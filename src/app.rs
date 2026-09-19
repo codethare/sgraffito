@@ -1,0 +1,781 @@
+//! Wayland glue: layer surface lifecycle, mode switching, frame submission.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::time::Instant;
+
+use smithay_client_toolkit::{
+    compositor::{CompositorHandler, CompositorState, Region},
+    delegate_dispatch2, delegate_registry,
+    output::{OutputHandler, OutputState},
+    registry::{ProvidesRegistryState, RegistryState},
+    registry_handlers,
+    seat::{Capability, SeatHandler, SeatState},
+    shell::{
+        WaylandSurface,
+        wlr_layer::{
+            Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
+            LayerSurfaceConfigure,
+        },
+    },
+    shm::{
+        Shm, ShmHandler,
+        slot::{Buffer, SlotPool},
+    },
+};
+use wayland_client::{
+    Connection, Proxy, QueueHandle,
+    protocol::{wl_output, wl_seat, wl_shm, wl_surface},
+};
+
+use crate::canvas::{Doc, OutputAnnotations, Overlay, TextBuffer, TextItem, TextOverlay};
+use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3::ZwpTextInputManagerV3;
+use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::ZwpTextInputV3;
+
+use crate::render::Renderer;
+use crate::store::{self, Store};
+
+/// Built-in palette (`#rrggbb`).
+pub const PALETTE: [&str; 5] = ["#e01b24", "#f6d32d", "#33d17a", "#3584e4", "#ffffff"];
+/// Fixed stroke width, in logical pixels.
+pub const PEN_WIDTH: f32 = 3.0;
+/// Font size for new text boxes, in logical pixels.
+pub const TEXT_SIZE: f32 = 18.0;
+
+pub(crate) const BTN_LEFT: u32 = 0x110;
+/// Max shm buffers kept per output: the compositor may still hold the previous one.
+const MAX_BUFFERS: usize = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Locked,
+    Edit,
+}
+
+impl Mode {
+    fn layer(self) -> Layer {
+        match self {
+            Mode::Locked => Layer::Background,
+            Mode::Edit => Layer::Overlay,
+        }
+    }
+
+    fn keyboard(self) -> KeyboardInteractivity {
+        match self {
+            Mode::Locked => KeyboardInteractivity::None,
+            Mode::Edit => KeyboardInteractivity::Exclusive,
+        }
+    }
+}
+
+/// A single command line from the control socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Command {
+    Toggle,
+    Edit,
+    Lock,
+    Clear,
+}
+
+impl Command {
+    pub fn parse(line: &str) -> Result<Self, String> {
+        match line.trim() {
+            "toggle" => Ok(Command::Toggle),
+            "edit" => Ok(Command::Edit),
+            "lock" => Ok(Command::Lock),
+            "clear" => Ok(Command::Clear),
+            "" => Err("empty command".into()),
+            other => Err(format!("unknown command '{other}'")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tool {
+    Pen,
+    Eraser,
+    Text,
+}
+
+pub struct Output {
+    output: wl_output::WlOutput,
+    /// The `wl_output` name; it may only arrive after the surface was created.
+    name: String,
+    surface: wl_surface::WlSurface,
+    layer: LayerSurface,
+    width: u32,
+    height: u32,
+    scale: f32,
+    configured: bool,
+    dirty: bool,
+    buffers: Vec<Buffer>,
+    buffer_size: (u32, u32),
+    pub(crate) overlay: Overlay,
+}
+
+impl Output {
+    /// Key used for annotations; falls back to `output-<id>` until the name arrives.
+    pub(crate) fn bucket(&self, id: u32) -> String {
+        if self.name.is_empty() {
+            format!("output-{id}")
+        } else {
+            self.name.clone()
+        }
+    }
+}
+
+pub struct App {
+    pub(crate) qh: QueueHandle<App>,
+    pub(crate) connection: Connection,
+    pub(crate) registry_state: RegistryState,
+    compositor_state: CompositorState,
+    layer_shell: LayerShell,
+    output_state: OutputState,
+    seat_state: SeatState,
+    shm: Shm,
+    pool: SlotPool,
+
+    renderer: Renderer,
+    pub(crate) doc: Doc,
+    pub(crate) store: Store,
+    path: PathBuf,
+
+    pub(crate) mode: Mode,
+    pub(crate) tool: Tool,
+    pub(crate) color_idx: usize,
+    /// Keyed by the `wl_output` protocol id, because proxy identity is unreliable here.
+    pub(crate) outputs: HashMap<u32, Output>,
+    pub(crate) keyboard_focus: Option<u32>,
+    pub(crate) dirty: bool,
+    exit: bool,
+
+    // text-input-v3 state
+    pub(crate) text_input_manager: Option<ZwpTextInputManagerV3>,
+    pub(crate) text_input: Option<ZwpTextInputV3>,
+    pub(crate) text_input_enabled: bool,
+    pub(crate) im_commit: String,
+    pub(crate) im_preedit: Option<String>,
+    pub(crate) im_delete: Option<(u32, u32)>,
+}
+
+impl App {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        connection: Connection,
+        qh: QueueHandle<App>,
+        registry_state: RegistryState,
+        compositor_state: CompositorState,
+        layer_shell: LayerShell,
+        output_state: OutputState,
+        seat_state: SeatState,
+        shm: Shm,
+    ) -> anyhow::Result<Self> {
+        let path = store::path().ok_or_else(|| {
+            anyhow::anyhow!("need $XDG_DATA_HOME or $HOME to locate the annotation file")
+        })?;
+        let doc = store::load(&path);
+        let pool = SlotPool::new(1 << 20, &shm)?;
+        let mut app = Self {
+            qh,
+            connection,
+            registry_state,
+            compositor_state,
+            layer_shell,
+            output_state,
+            seat_state,
+            shm,
+            pool,
+            renderer: Renderer::new(),
+            doc,
+            store: Store::new(path.clone()),
+            path,
+            mode: Mode::Locked,
+            tool: Tool::Pen,
+            color_idx: 0,
+            outputs: HashMap::new(),
+            keyboard_focus: None,
+            dirty: false,
+            exit: false,
+            text_input_manager: None,
+            text_input: None,
+            text_input_enabled: false,
+            im_commit: String::new(),
+            im_preedit: None,
+            im_delete: None,
+        };
+        app.bind_text_input_manager();
+        app.sync_outputs();
+        Ok(app)
+    }
+
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    pub fn request_exit(&mut self) {
+        self.exit = true;
+    }
+
+    pub fn exiting(&self) -> bool {
+        self.exit
+    }
+
+    /// Flush pending annotations before exiting.
+    pub fn shutdown(&mut self) {
+        if let Err(e) = self.store.flush(&self.doc) {
+            log(&format!(
+                "failed to write {} on exit: {e}",
+                self.path.display()
+            ));
+        }
+    }
+
+    fn name_of(&self, output: &wl_output::WlOutput) -> String {
+        self.output_state
+            .info(output)
+            .and_then(|i| i.name)
+            .unwrap_or_default()
+    }
+
+    /// Create layer surfaces for outputs that do not have one yet (startup, hotplug).
+    fn sync_outputs(&mut self) {
+        let outputs: Vec<wl_output::WlOutput> = self.output_state.outputs().collect();
+        for output in outputs {
+            if !self.outputs.contains_key(&key_of(&output)) {
+                self.create_surface(output);
+            }
+        }
+    }
+
+    fn create_surface(&mut self, output: wl_output::WlOutput) {
+        let surface = self.compositor_state.create_surface(&self.qh);
+        let layer = self.layer_shell.create_layer_surface(
+            &self.qh,
+            surface.clone(),
+            self.mode.layer(),
+            Some("sgraffito"),
+            Some(&output),
+        );
+        layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
+        layer.set_exclusive_zone(-1);
+        layer.set_keyboard_interactivity(self.mode.keyboard());
+        layer.set_size(0, 0);
+        apply_input_region(&self.compositor_state, &surface, self.mode);
+        // The first commit carries no buffer; wait for configure to tell us the size.
+        layer.commit();
+        let name = self.name_of(&output);
+        log(&format!(
+            "layer surface created for output {}",
+            if name.is_empty() { "<unnamed>" } else { &name }
+        ));
+        self.outputs.insert(
+            key_of(&output),
+            Output {
+                output,
+                name,
+                surface,
+                layer,
+                width: 0,
+                height: 0,
+                scale: 1.0,
+                configured: false,
+                dirty: true,
+                buffers: Vec::new(),
+                buffer_size: (0, 0),
+                overlay: Overlay::default(),
+            },
+        );
+    }
+
+    /// Switch mode: destroy and recreate every surface on the new layer.
+    ///
+    /// Protocol v2 offers `set_layer`, but entering edit mode needs a fresh map so the
+    /// compositor hands us keyboard focus; recreating is the most portable trigger.
+    pub(crate) fn set_mode(&mut self, mode: Mode) {
+        if self.mode == mode {
+            return;
+        }
+        if mode == Mode::Locked {
+            self.end_text_edit();
+        }
+        self.mode = mode;
+        let keys: Vec<u32> = self.outputs.keys().copied().collect();
+        for key in keys {
+            let Some(old) = self.outputs.remove(&key) else {
+                continue;
+            };
+            let (was_configured, name, output) =
+                (old.configured, old.name.clone(), old.output.clone());
+            drop(old);
+            self.create_surface(output);
+            if let Some(out) = self.outputs.get_mut(&key) {
+                out.configured = was_configured;
+                out.name = name;
+                out.dirty = true;
+            }
+        }
+        log(&format!("mode switched to {mode:?}"));
+    }
+
+    pub(crate) fn set_tool(&mut self, tool: Tool) {
+        if self.tool != tool {
+            self.end_text_edit();
+            self.tool = tool;
+            log(&format!("tool switched to {tool:?}"));
+            self.mark_all_dirty();
+        }
+    }
+
+    fn mark_all_dirty(&mut self) {
+        self.dirty = true;
+        for out in self.outputs.values_mut() {
+            out.dirty = true;
+        }
+    }
+
+    pub(crate) fn set_color(&mut self, idx: usize) {
+        if idx < PALETTE.len() {
+            self.color_idx = idx;
+        }
+    }
+
+    /// Write the text box being edited back into the document (empty boxes are dropped).
+    pub(crate) fn end_text_edit(&mut self) {
+        let mut changed = false;
+        let keys: Vec<u32> = self.outputs.keys().copied().collect();
+        for key in keys {
+            let id = key;
+            let Some(out) = self.outputs.get_mut(&key) else {
+                continue;
+            };
+            let Some(edit) = out.overlay.text.take() else {
+                continue;
+            };
+            out.overlay.eraser = None;
+            if edit.buffer.text.is_empty() {
+                continue;
+            }
+            let bucket = out.bucket(id);
+            let mut item = edit.item.clone();
+            item.text = edit.buffer.text.clone();
+            let ann = self.doc.outputs.entry(bucket).or_default();
+            match edit.index {
+                Some(idx) if idx < ann.texts.len() => ann.texts[idx] = item,
+                _ => ann.texts.push(item),
+            }
+            changed = true;
+        }
+        if changed {
+            self.store.mark_dirty(Instant::now());
+        }
+        self.sync_text_input();
+    }
+
+    pub(crate) fn begin_text_edit(&mut self, key: &u32, x: f32, y: f32) {
+        let id = *key;
+        let Some(out) = self.outputs.get(key) else {
+            return;
+        };
+        let bucket = out.bucket(id);
+        let existing = self
+            .doc
+            .outputs
+            .get(&bucket)
+            .and_then(|ann| ann.texts.iter().position(|t| t.bounds().contains(x, y)));
+        let (item, index) = match existing {
+            Some(idx) => (self.doc.outputs[&bucket].texts[idx].clone(), Some(idx)),
+            None => (
+                TextItem {
+                    x,
+                    y,
+                    color: PALETTE[self.color_idx].to_string(),
+                    size: TEXT_SIZE,
+                    text: String::new(),
+                },
+                None,
+            ),
+        };
+        if let Some(out) = self.outputs.get_mut(key) {
+            out.overlay.text = Some(TextOverlay {
+                buffer: TextBuffer::new(item.text.clone()),
+                item,
+                index,
+                preedit: String::new(),
+            });
+            out.dirty = true;
+        }
+        self.dirty = true;
+        self.sync_text_input();
+    }
+
+    /// Handle one command from the socket and return the response line.
+    pub fn command(&mut self, cmd: &str) -> String {
+        let parsed = match Command::parse(cmd) {
+            Ok(parsed) => parsed,
+            Err(e) => return format!("error: {e}"),
+        };
+        match parsed {
+            Command::Toggle => {
+                let next = match self.mode {
+                    Mode::Locked => Mode::Edit,
+                    Mode::Edit => Mode::Locked,
+                };
+                self.set_mode(next);
+                "ok".into()
+            }
+            Command::Edit => {
+                self.set_mode(Mode::Edit);
+                "ok".into()
+            }
+            Command::Lock => {
+                self.set_mode(Mode::Locked);
+                "ok".into()
+            }
+            Command::Clear => {
+                self.end_text_edit();
+                self.doc.outputs.clear();
+                let _ = self.connection.flush();
+                match self.store.flush(&self.doc) {
+                    Ok(()) => {
+                        self.mark_all_dirty();
+                        "ok".into()
+                    }
+                    Err(e) => format!("error: {e}"),
+                }
+            }
+        }
+    }
+
+    /// Called once per event loop iteration: flush pending writes and redraw.
+    pub fn tick(&mut self) {
+        if self.store.due(Instant::now())
+            && let Err(e) = self.store.flush(&self.doc)
+        {
+            log(&format!("failed to write {}: {e}", self.path.display()));
+        }
+        if !self.dirty {
+            return;
+        }
+        self.dirty = false;
+        let keys: Vec<u32> = self.outputs.keys().copied().collect();
+        for key in keys {
+            self.draw_output(&key);
+        }
+    }
+
+    /// Read output info: name, scale and logical size.
+    fn refresh_output(&mut self, output: &wl_output::WlOutput) {
+        let name = self.name_of(output);
+        let info = self.output_state.info(output);
+        let scale = info
+            .as_ref()
+            .map(|i| i.scale_factor.max(1) as f32)
+            .unwrap_or(1.0);
+        if !self.outputs.contains_key(&key_of(output)) {
+            self.create_surface(output.clone());
+        }
+        let Some(out) = self.outputs.get_mut(&key_of(output)) else {
+            return;
+        };
+        out.name = name;
+        if out.scale != scale {
+            out.scale = scale;
+            out.buffers.clear();
+            out.dirty = true;
+            self.dirty = true;
+        }
+        if let Some((w, h)) = info.and_then(|i| i.logical_size)
+            && w > 0
+            && h > 0
+            && (out.width, out.height) != (w as u32, h as u32)
+        {
+            out.width = w as u32;
+            out.height = h as u32;
+            out.buffers.clear();
+            out.dirty = true;
+            self.dirty = true;
+        }
+    }
+
+    fn draw_output(&mut self, key: &u32) {
+        let id = *key;
+        let Some(out) = self.outputs.get_mut(key) else {
+            return;
+        };
+        if !out.configured || out.width == 0 || out.height == 0 {
+            return;
+        }
+        let (w, h, scale) = (out.width, out.height, out.scale);
+        let px = ((w as f32 * scale) as u32, (h as f32 * scale) as u32);
+        if out.buffer_size != px {
+            out.buffers.clear();
+            out.buffer_size = px;
+        }
+
+        // Buffers the compositor has not released cannot be drawn into: reuse a free one, else add one.
+        let mut usable = out
+            .buffers
+            .iter()
+            .position(|b| b.canvas(&mut self.pool).is_some());
+        if usable.is_none() && out.buffers.len() < MAX_BUFFERS {
+            match self.pool.create_buffer(
+                px.0 as i32,
+                px.1 as i32,
+                (px.0 * 4) as i32,
+                wl_shm::Format::Argb8888,
+            ) {
+                Ok((buffer, _)) => {
+                    out.buffers.push(buffer);
+                    usable = Some(out.buffers.len() - 1);
+                }
+                Err(e) => {
+                    log(&format!("failed to allocate a buffer: {e}"));
+                    return;
+                }
+            }
+        }
+        let Some(idx) = usable else {
+            // All buffers are in flight: stay dirty and retry once the compositor releases one.
+            out.dirty = true;
+            self.dirty = true;
+            return;
+        };
+        out.dirty = false;
+
+        let bucket = out.bucket(id);
+        let empty = OutputAnnotations::default();
+        {
+            let buffer = &mut out.buffers[idx];
+            let Some(canvas) = buffer.canvas(&mut self.pool) else {
+                return;
+            };
+            // Buffers are reused, so clear to transparent or the previous frame shows through.
+            canvas.fill(0);
+            let ann = self.doc.outputs.get(&bucket).unwrap_or(&empty);
+            self.renderer
+                .render(canvas, px.0, px.1, scale, ann, &out.overlay);
+            // tiny-skia is premultiplied RGBA; wl_shm ARGB8888 is BGRA bytes on little endian.
+            for chunk in canvas.chunks_exact_mut(4) {
+                chunk.swap(0, 2);
+            }
+        }
+
+        out.surface.damage_buffer(0, 0, px.0 as i32, px.1 as i32);
+        if let Err(e) = out.buffers[idx].attach_to(&out.surface) {
+            log(&format!("failed to attach the buffer: {e}"));
+            return;
+        }
+        out.surface.commit();
+    }
+
+    pub(crate) fn output_of(&self, surface: &wl_surface::WlSurface) -> Option<u32> {
+        self.outputs
+            .iter()
+            .find(|(_, o)| &o.surface == surface)
+            .map(|(key, _)| *key)
+    }
+
+    fn key_of_layer(&self, layer: &LayerSurface) -> Option<u32> {
+        self.outputs
+            .iter()
+            .find(|(_, o)| &o.layer == layer)
+            .map(|(key, _)| *key)
+    }
+}
+
+fn key_of(output: &wl_output::WlOutput) -> u32 {
+    output.id().protocol_id()
+}
+
+fn apply_input_region(compositor: &CompositorState, surface: &wl_surface::WlSurface, mode: Mode) {
+    match mode {
+        Mode::Locked => match Region::new(compositor) {
+            // An empty region means full click-through.
+            Ok(region) => surface.set_input_region(Some(region.wl_region())),
+            Err(e) => log(&format!("failed to create an empty input region: {e}")),
+        },
+        Mode::Edit => surface.set_input_region(None),
+    }
+}
+
+pub fn log(msg: &str) {
+    eprintln!("[sgraffito] {msg}");
+}
+
+impl CompositorHandler for App {
+    fn scale_factor_changed(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &wl_surface::WlSurface,
+        _new_factor: i32,
+    ) {
+        self.dirty = true;
+    }
+
+    fn transform_changed(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &wl_surface::WlSurface,
+        _new_transform: wl_output::Transform,
+    ) {
+    }
+
+    fn frame(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &wl_surface::WlSurface,
+        _time: u32,
+    ) {
+    }
+
+    fn surface_enter(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &wl_surface::WlSurface,
+        _output: &wl_output::WlOutput,
+    ) {
+    }
+
+    fn surface_leave(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &wl_surface::WlSurface,
+        _output: &wl_output::WlOutput,
+    ) {
+    }
+}
+
+impl OutputHandler for App {
+    fn output_state(&mut self) -> &mut OutputState {
+        &mut self.output_state
+    }
+
+    fn new_output(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        output: wl_output::WlOutput,
+    ) {
+        if !self.outputs.contains_key(&key_of(&output)) {
+            self.create_surface(output.clone());
+        }
+        // A single wl_output burst may only trigger new_output, so read the info here too.
+        self.refresh_output(&output);
+    }
+
+    fn update_output(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        output: wl_output::WlOutput,
+    ) {
+        self.refresh_output(&output);
+    }
+
+    fn output_destroyed(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        output: wl_output::WlOutput,
+    ) {
+        if let Some(out) = self.outputs.remove(&key_of(&output)) {
+            log(&format!("output {} removed, annotations kept", out.name));
+        }
+    }
+}
+
+impl LayerShellHandler for App {
+    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, layer: &LayerSurface) {
+        if let Some(key) = self.key_of_layer(layer)
+            && let Some(old) = self.outputs.remove(&key)
+        {
+            log(&format!(
+                "compositor closed the layer surface of {}, recreating",
+                old.name
+            ));
+            self.create_surface(old.output.clone());
+        }
+    }
+
+    fn configure(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        layer: &LayerSurface,
+        configure: LayerSurfaceConfigure,
+        _serial: u32,
+    ) {
+        let Some(key) = self.key_of_layer(layer) else {
+            return;
+        };
+        let Some(out) = self.outputs.get_mut(&key) else {
+            return;
+        };
+        let (w, h) = configure.new_size;
+        if w > 0 && h > 0 && (out.width, out.height) != (w, h) {
+            out.width = w;
+            out.height = h;
+            out.buffers.clear();
+        }
+        out.configured = true;
+        out.dirty = true;
+        self.dirty = true;
+    }
+}
+
+impl SeatHandler for App {
+    fn seat_state(&mut self) -> &mut SeatState {
+        &mut self.seat_state
+    }
+
+    fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+
+    fn new_capability(
+        &mut self,
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+        seat: wl_seat::WlSeat,
+        capability: Capability,
+    ) {
+        if capability == Capability::Pointer {
+            let _ = self.seat_state.get_pointer(qh, &seat);
+        }
+        if capability == Capability::Keyboard {
+            let _ = self.seat_state.get_keyboard(qh, &seat, None);
+            self.ensure_text_input(&seat);
+        }
+    }
+
+    fn remove_capability(
+        &mut self,
+        _conn: &Connection,
+        _: &QueueHandle<Self>,
+        _: wl_seat::WlSeat,
+        _: Capability,
+    ) {
+    }
+
+    fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+}
+
+impl ShmHandler for App {
+    fn shm_state(&mut self) -> &mut Shm {
+        &mut self.shm
+    }
+}
+
+delegate_registry!(App);
+
+impl ProvidesRegistryState for App {
+    fn registry(&mut self) -> &mut RegistryState {
+        &mut self.registry_state
+    }
+    registry_handlers![OutputState, SeatState];
+}
+
+delegate_dispatch2!(App);
