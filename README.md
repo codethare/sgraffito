@@ -1,32 +1,32 @@
 # sgraffito
 
-Wayland 桌面上的壁纸层涂鸦 / 备忘录：注解画在壁纸之上、普通窗口之下，锁定时鼠标键盘完全穿透。
+Doodle and sticky notes on the Wayland wallpaper layer: annotations are drawn above the wallpaper and below ordinary windows, and while locked the mouse and keyboard pass straight through.
 
-## 环境要求
+## Requirements
 
-需要支持 `wlr-layer-shell` 的合成器：
+A compositor implementing `wlr-layer-shell`:
 
-- 支持：sway、niri、hyprland、river（wlroots / 同类实现）
-- **不支持：GNOME（Mutter）、KDE（KWin）** —— 它们不实现该协议
-- 可选：fcitx5 等输入法，用于中文输入（走 `zwp_text_input_v3`）
+- Supported: sway, niri, hyprland, river (wlroots and similar implementations)
+- **Not supported: GNOME (Mutter), KDE (KWin)** — they do not implement the protocol
+- Optional: fcitx5 or another input method for IME text (through `zwp_text_input_v3`)
 
-## 构建与运行
+## Build and run
 
 ```sh
 cargo build --release
-./target/release/sgraffito daemon     # 常驻进程，由合成器 autostart 拉起
+./target/release/sgraffito daemon     # long-running process, started by your compositor
 ```
 
-控制端（连到 `$XDG_RUNTIME_DIR/sgraffito.sock`，daemon 没跑时会报错退出）：
+Control commands (they talk to `$XDG_RUNTIME_DIR/sgraffito.sock` and fail if the daemon is not running):
 
 ```sh
-sgraffito toggle   # 锁定 <-> 编辑
-sgraffito edit     # 进入编辑模式
-sgraffito lock     # 回到锁定模式
-sgraffito clear    # 清空全部注解
+sgraffito toggle   # switch between locked and edit mode
+sgraffito edit     # enter edit mode
+sgraffito lock     # go back to the locked mode
+sgraffito clear    # erase every annotation
 ```
 
-合成器快捷键示例：
+Compositor key binding examples:
 
 ```
 # sway
@@ -42,55 +42,55 @@ binds { Mod+D { spawn "sgraffito" "toggle"; } }
 exec-once = sgraffito daemon
 bind = SUPER, D, exec, sgraffito toggle
 
-# river (init 脚本里)
+# river (from your init script)
 sgraffito daemon &
 riverctl map normal Super D spawn 'sgraffito toggle'
 ```
 
-## 用法
+## Usage
 
-**锁定模式**（默认）：注解显示在壁纸层，input region 为空，鼠标键盘完全不经过它。
+**Locked mode** (the default): annotations render on the wallpaper layer, the input region is empty, and mouse and keyboard never reach the surface.
 
-**编辑模式**：全屏 overlay 抓指针和键盘。
+**Edit mode**: a fullscreen overlay grabs the pointer and the keyboard.
 
-| 按键 | 作用 |
+| Key | Action |
 |---|---|
-| 鼠标拖动 | 自由划线 |
-| `P` | 画笔 |
-| `E` | 橡皮（整条线 / 整个文本框为删除单位，命中阈值 8 逻辑像素） |
-| `T` | 文本工具，点击落点建立文本框 |
-| `1`–`5` | 切换颜色 |
-| `Esc` | 结束文本编辑（若有）并回到锁定模式 |
+| drag the mouse | freehand drawing |
+| `P` | pen |
+| `E` | eraser (deletes whole strokes or text boxes; hit radius 8 logical pixels) |
+| `T` | text tool: click to place a text box |
+| `1`–`5` | pick a colour |
+| `Esc` | finish text editing (if any) and return to the locked mode |
 
-文本编辑中，可打印字符与 `Backspace`、`Enter`（换行）都作用于文本框，此时 `P`/`E`/`T`/数字键是正文而不是快捷键；要换工具就先按 `Esc` 回锁定模式，再 `sgraffito edit` 进入编辑模式后按键切换。
+While a text box is focused, printable characters plus `Backspace` and `Enter` (newline) go into that box, and `P`/`E`/`T`/digits are content instead of shortcuts. To switch tools, press `Esc` to leave edit mode, run `sgraffito edit` again, then press the tool key.
 
-## 数据
+## Data
 
-`$XDG_DATA_HOME/sgraffito/annotations.json`（默认 `~/.local/share/sgraffito/`）：
+`$XDG_DATA_HOME/sgraffito/annotations.json` (default `~/.local/share/sgraffito/`):
 
 ```json
 {"version":1,"outputs":{"eDP-1":{"strokes":[{"color":"#e01b24","width":3,"points":[[12,40],[14,44]]}],
- "texts":[{"x":100,"y":200,"color":"#ffffff","size":18,"text":"买牛奶"}]}}}
+ "texts":[{"x":100,"y":200,"color":"#ffffff","size":18,"text":"buy milk"}]}}}
 ```
 
-- 坐标是 **输出局部逻辑坐标**，按 `wl_output` 的 name 分桶。
-- 改动后最多 1 秒落盘，写入走同目录临时文件 + `rename`；`clear` 与退出时立即落盘。
-- 文件损坏或版本不支持时，原文件被改名为 `annotations.json.bak` 并以空注解启动。
-- 改过输出名（如换线、改名）后，旧分桶的注解不再显示但不会删除。
+- Coordinates are **output-local logical pixels**, bucketed by the `wl_output` name.
+- Changes land on disk within 1 second at most, written through a temp file in the same directory plus `rename`; `clear` and shutdown flush immediately.
+- A corrupt file or an unsupported version is renamed to `annotations.json.bak` and the daemon starts with no annotations.
+- After an output is renamed (or replugged), annotations in the old bucket stop being rendered but are never deleted.
 
-## 已知限制
+## Known limitations
 
-- v1 没有 undo/redo、选中/移动/缩放、图层、导出 PNG、工具栏 UI、配置文件、压感/触控。
-- 每个输出一份注解，输出改名或拔插后旧注解不显示（数据仍在文件里）。
-- 每帧整屏重绘并全屏 damage，4K/高刷下 CPU 占用待实测；若吃紧改为按包围盒局部 damage。
-- 进入文本编辑依赖输入法的 `commit_string`；若合成器没有 `text-input-v3`，会退化为本地按键（只能输入键盘布局能直接产生的字符，无候选词）。
-- **未经实测**：niri / hyprland / river 上的 `exclusive` keyboard 与 `text-input-v3` 组合、以及 fcitx5 中文选词。首次在真实会话里使用请确认这两点。
+- v1 has no undo/redo, no select/move/resize, no layers, no PNG export, no toolbar UI, no configuration file and no pressure or touch support.
+- One set of annotations per output; after an output is renamed or replugged the old annotations are not rendered (the data stays in the file).
+- Every frame redraws the whole surface and damages all of it, so CPU cost on 4K or high refresh rate displays is unmeasured. If it hurts, switch to damage by bounding box.
+- Text editing relies on the input method's `commit_string`; without `text-input-v3` on the compositor it falls back to local keys, which can only produce characters the keyboard layout yields directly (no candidate list).
+- **Unverified**: `exclusive` keyboard and `text-input-v3` on niri / hyprland / river, and fcitx5 IME candidate selection. Confirm those two in a real session first.
 
-## 开发
+## Development
 
 ```sh
-cargo test                # 纯逻辑单测：数据模型、命中测试、JSON、渲染、按键映射、命令解析
-scripts/smoke.sh          # headless sway 端到端：渲染、模式切换、IPC、clear、单实例、优雅退出
+cargo test                # pure logic unit tests: data model, hit testing, JSON, rendering, key mapping, command parsing
+scripts/smoke.sh          # headless sway end to end: rendering, mode switching, IPC, clear, single instance, graceful exit
 ```
 
-规格与设计在 `openspec/changes/sgraffito-v1/`。
+The spec and design live in `openspec/changes/sgraffito-v1/`.
