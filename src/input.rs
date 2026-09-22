@@ -202,10 +202,8 @@ impl PointerHandler for App {
                     self.pointer_release(&key)
                 }
                 PointerEventKind::Leave { .. } => {
-                    if let Some(out) = self.outputs.get_mut(&key) {
-                        out.overlay.eraser = None;
-                    }
-                    self.dirty = true;
+                    // The release may never come back to this surface (multi-output drag), so finish here.
+                    self.pointer_release(&key);
                 }
                 _ => {}
             }
@@ -337,6 +335,8 @@ impl App {
         if self.mode != Mode::Edit {
             return;
         }
+        // A click anywhere finishes the text edit in progress first, so typed content is kept.
+        self.end_text_edit();
         match self.tool {
             Tool::Pen => {
                 if let Some(out) = self.outputs.get_mut(key) {
@@ -361,28 +361,22 @@ impl App {
         if self.mode != Mode::Edit {
             return;
         }
-        let color = PALETTE[self.color_idx].to_string();
         let Some(out) = self.outputs.get_mut(key) else {
             return;
         };
         match self.tool {
-            Tool::Pen => match out.overlay.stroke.as_mut() {
-                Some(stroke) => {
-                    if let Some(last) = stroke.points.last()
-                        && !wants_sampling(*last, [x, y])
-                    {
-                        return;
-                    }
-                    stroke.points.push([x, y]);
+            // Only a press starts a stroke: hovering with no button held must not draw.
+            Tool::Pen => {
+                let Some(stroke) = out.overlay.stroke.as_mut() else {
+                    return;
+                };
+                if let Some(last) = stroke.points.last()
+                    && !wants_sampling(*last, [x, y])
+                {
+                    return;
                 }
-                None => {
-                    out.overlay.stroke = Some(Stroke {
-                        color,
-                        width: PEN_WIDTH,
-                        points: vec![[x, y]],
-                    });
-                }
-            },
+                stroke.points.push([x, y]);
+            }
             Tool::Eraser => out.overlay.eraser = Some([x, y]),
             Tool::Text => return,
         }

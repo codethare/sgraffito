@@ -55,14 +55,14 @@ riverctl map normal Super D spawn 'sgraffito toggle'
 
 | Key | Action |
 |---|---|
-| drag the mouse | freehand drawing |
+| drag with the left button held | freehand drawing (motion with no button held draws nothing) |
 | `P` | pen |
 | `E` | eraser (deletes whole strokes or text boxes; hit radius 8 logical pixels) |
-| `T` | text tool: click to place a text box |
+| `T` | text tool: click to place a text box with that point as its top-left corner |
 | `1`–`5` | pick a colour |
 | `Esc` | finish text editing (if any) and return to the locked mode |
 
-While a text box is focused, printable characters plus `Backspace` and `Enter` (newline) go into that box, and `P`/`E`/`T`/digits are content instead of shortcuts. To switch tools, press `Esc` to leave edit mode, run `sgraffito edit` again, then press the tool key.
+While a text box is focused, printable characters plus `Backspace` and `Enter` (newline) go into that box, and `P`/`E`/`T`/digits are content instead of shortcuts. Clicking anywhere finishes the edit in progress and keeps what was typed. To switch tools, press `Esc` to leave edit mode, run `sgraffito edit` again, then press the tool key.
 
 ## Data
 
