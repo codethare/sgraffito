@@ -33,6 +33,7 @@ pkg/
 .pi/
 .pi-subagents/
 .codegraph/
+CLAUDE.md
 
 # ── Editors / IDEs ───────────────────────────────────────────
 .vscode/
