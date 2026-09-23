@@ -28,11 +28,13 @@ use wayland_client::{
     protocol::{wl_output, wl_seat, wl_shm, wl_surface},
 };
 
-use crate::canvas::{Doc, OutputAnnotations, Overlay, TextBuffer, TextItem, TextOverlay};
+use crate::canvas::{
+    Doc, Hint, OutputAnnotations, Overlay, Rect, TextBuffer, TextItem, TextOverlay,
+};
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3::ZwpTextInputManagerV3;
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::ZwpTextInputV3;
 
-use crate::render::Renderer;
+use crate::render::{DamageRegion, Renderer, damage_box, transient_bounds};
 use crate::store::{self, Store};
 
 /// Built-in palette (`#rrggbb`).
@@ -107,7 +109,13 @@ pub struct Output {
     height: u32,
     scale: f32,
     configured: bool,
-    dirty: bool,
+    pub(crate) dirty: bool,
+    /// Only the transient overlay moved, so the next frame can damage just its box.
+    pub(crate) transient_dirty: bool,
+    /// Transient overlay box as drawn in the previous frame; it has to be erased next time.
+    last_transient: Option<Rect>,
+    /// Buffer index that holds the previous frame. A bounding-box damage is only valid on it.
+    last_buffer: Option<usize>,
     buffers: Vec<Buffer>,
     buffer_size: (u32, u32),
     pub(crate) overlay: Overlay,
@@ -249,6 +257,7 @@ impl App {
 
     fn create_surface(&mut self, output: wl_output::WlOutput) {
         let surface = self.compositor_state.create_surface(&self.qh);
+        let hint = self.current_hint();
         let layer = self.layer_shell.create_layer_surface(
             &self.qh,
             surface.clone(),
@@ -280,9 +289,15 @@ impl App {
                 scale: 1.0,
                 configured: false,
                 dirty: true,
+                transient_dirty: false,
+                last_transient: None,
+                last_buffer: None,
                 buffers: Vec::new(),
                 buffer_size: (0, 0),
-                overlay: Overlay::default(),
+                overlay: Overlay {
+                    hint,
+                    ..Default::default()
+                },
             },
         );
     }
@@ -315,6 +330,29 @@ impl App {
             }
         }
         log(&format!("mode switched to {mode:?}"));
+        self.refresh_hint();
+    }
+
+    /// The edit-mode hint of the current mode, tool and colour.
+    fn current_hint(&self) -> Option<Hint> {
+        match self.mode {
+            Mode::Locked => None,
+            Mode::Edit => Some(Hint {
+                tool: tool_label(self.tool),
+                color: PALETTE[self.color_idx],
+            }),
+        }
+    }
+
+    /// Push the current hint into every output's transient overlay. Called when the mode,
+    /// the tool or the colour changes.
+    fn refresh_hint(&mut self) {
+        let hint = self.current_hint();
+        for out in self.outputs.values_mut() {
+            out.overlay.hint = hint;
+            out.dirty = true;
+        }
+        self.dirty = true;
     }
 
     pub(crate) fn set_tool(&mut self, tool: Tool) {
@@ -323,6 +361,7 @@ impl App {
             self.tool = tool;
             log(&format!("tool switched to {tool:?}"));
             self.mark_all_dirty();
+            self.refresh_hint();
         }
     }
 
@@ -336,6 +375,7 @@ impl App {
     pub(crate) fn set_color(&mut self, idx: usize) {
         if idx < PALETTE.len() {
             self.color_idx = idx;
+            self.refresh_hint();
         }
     }
 
@@ -352,6 +392,8 @@ impl App {
                 continue;
             };
             out.overlay.eraser = None;
+            // The caret disappears and the box may be committed: repaint this output whole.
+            out.dirty = true;
             if edit.buffer.text.is_empty() {
                 continue;
             }
@@ -368,6 +410,7 @@ impl App {
         if changed {
             self.store.mark_dirty(Instant::now());
         }
+        self.dirty = true;
         self.sync_text_input();
     }
 
@@ -481,6 +524,8 @@ impl App {
         if out.scale != scale {
             out.scale = scale;
             out.buffers.clear();
+            out.last_buffer = None;
+            out.last_transient = None;
             out.dirty = true;
             self.dirty = true;
         }
@@ -492,6 +537,8 @@ impl App {
             out.width = w as u32;
             out.height = h as u32;
             out.buffers.clear();
+            out.last_buffer = None;
+            out.last_transient = None;
             out.dirty = true;
             self.dirty = true;
         }
@@ -509,14 +556,25 @@ impl App {
         let px = ((w as f32 * scale) as u32, (h as f32 * scale) as u32);
         if out.buffer_size != px {
             out.buffers.clear();
+            out.last_buffer = None;
+            out.last_transient = None;
             out.buffer_size = px;
         }
 
-        // Buffers the compositor has not released cannot be drawn into: reuse a free one, else add one.
-        let mut usable = out
-            .buffers
-            .iter()
-            .position(|b| b.canvas(&mut self.pool).is_some());
+        // Buffers the compositor has not released cannot be drawn into: reuse a free one,
+        // preferring the one that holds the previous frame, or add one up to MAX_BUFFERS.
+        let previous_is_free = out.last_buffer.is_some_and(|i| {
+            out.buffers
+                .get_mut(i)
+                .is_some_and(|b| b.canvas(&mut self.pool).is_some())
+        });
+        let mut usable = if previous_is_free {
+            out.last_buffer
+        } else {
+            out.buffers
+                .iter()
+                .position(|b| b.canvas(&mut self.pool).is_some())
+        };
         if usable.is_none() && out.buffers.len() < MAX_BUFFERS {
             match self.pool.create_buffer(
                 px.0 as i32,
@@ -540,27 +598,65 @@ impl App {
             self.dirty = true;
             return;
         };
-        out.dirty = false;
 
+        // What this frame has to touch. Painting a box is only valid on the buffer that holds
+        // the previous frame: on any other buffer the pixels outside the box are older. If the
+        // previous buffer is in flight we fell back to the other one, so redraw everything.
+        // An open text edit also forces a whole frame: its caret is not a transient box.
+        let transient = transient_bounds(&out.overlay);
         let bucket = out.bucket(id);
         let empty = OutputAnnotations::default();
+        let ann = self.doc.outputs.get(&bucket).unwrap_or(&empty);
+        let damage = if out.dirty || out.last_buffer != Some(idx) || out.overlay.text.is_some() {
+            None
+        } else if out.transient_dirty {
+            let transient = match (out.last_transient, transient) {
+                (Some(a), Some(b)) => a.union(b),
+                (Some(a), None) => a,
+                (None, Some(b)) => b,
+                (None, None) => Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 0.0,
+                    h: 0.0,
+                },
+            };
+            // The box has to contain everything that will be drawn, because nothing may be
+            // painted outside it: those bytes still hold the previous frame, already swapped.
+            Some(damage_box(ann, &out.overlay, transient))
+        } else {
+            // Nothing changed for this output; another output is why the daemon redrew.
+            return;
+        };
+        let region = match damage {
+            None => DamageRegion::All,
+            Some(d) => DamageRegion::from_logical(d, scale, px.0, px.1),
+        };
+        out.dirty = false;
+        out.transient_dirty = false;
+        out.last_transient = transient;
+        out.last_buffer = Some(idx);
+
         {
             let buffer = &mut out.buffers[idx];
             let Some(canvas) = buffer.canvas(&mut self.pool) else {
                 return;
             };
             // Buffers are reused, so clear to transparent or the previous frame shows through.
-            canvas.fill(0);
-            let ann = self.doc.outputs.get(&bucket).unwrap_or(&empty);
+            region.clear(canvas, px.0, px.1);
             self.renderer
-                .render(canvas, px.0, px.1, scale, ann, &out.overlay);
+                .render(canvas, px.0, px.1, scale, ann, &out.overlay, damage);
             // tiny-skia is premultiplied RGBA; wl_shm ARGB8888 is BGRA bytes on little endian.
-            for chunk in canvas.chunks_exact_mut(4) {
-                chunk.swap(0, 2);
-            }
+            region.swap_rb(canvas, px.0, px.1);
         }
 
-        out.surface.damage_buffer(0, 0, px.0 as i32, px.1 as i32);
+        match region {
+            DamageRegion::All => out.surface.damage_buffer(0, 0, px.0 as i32, px.1 as i32),
+            DamageRegion::Rect { x0, y0, x1, y1 } => {
+                out.surface
+                    .damage_buffer(x0 as i32, y0 as i32, (x1 - x0) as i32, (y1 - y0) as i32)
+            }
+        }
         if let Err(e) = out.buffers[idx].attach_to(&out.surface) {
             log(&format!("failed to attach the buffer: {e}"));
             return;
@@ -587,6 +683,15 @@ fn key_of(output: &wl_output::WlOutput) -> u32 {
     output.id().protocol_id()
 }
 
+/// The word the edit-mode hint shows for the active tool.
+fn tool_label(tool: Tool) -> &'static str {
+    match tool {
+        Tool::Pen => "pen",
+        Tool::Eraser => "eraser",
+        Tool::Text => "text",
+    }
+}
+
 fn apply_input_region(compositor: &CompositorState, surface: &wl_surface::WlSurface, mode: Mode) {
     match mode {
         Mode::Locked => match Region::new(compositor) {
@@ -610,7 +715,8 @@ impl CompositorHandler for App {
         _surface: &wl_surface::WlSurface,
         _new_factor: i32,
     ) {
-        self.dirty = true;
+        // The buffers and every stored coordinate stay logical; just repaint everything.
+        self.mark_all_dirty();
     }
 
     fn transform_changed(
@@ -721,6 +827,8 @@ impl LayerShellHandler for App {
             out.width = w;
             out.height = h;
             out.buffers.clear();
+            out.last_buffer = None;
+            out.last_transient = None;
         }
         out.configured = true;
         out.dirty = true;

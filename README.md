@@ -64,6 +64,8 @@ riverctl map normal Super D spawn 'sgraffito toggle'
 
 While a text box is focused, printable characters plus `Backspace` and `Enter` (newline) go into that box, and `P`/`E`/`T`/digits are content instead of shortcuts. Clicking anywhere finishes the edit in progress and keeps what was typed. To switch tools, press `Esc` to leave edit mode, run `sgraffito edit` again, then press the tool key.
 
+While editing, the top-left corner of every output shows the active tool, a swatch of the active colour and the same key list, so the armed tool and the click-to-place step for text are always visible on screen. The hint is transient: it is not part of the annotations, it cannot be erased and it is not rendered while locked.
+
 ## Data
 
 `$XDG_DATA_HOME/sgraffito/annotations.json` (default `~/.local/share/sgraffito/`):
@@ -82,7 +84,9 @@ While a text box is focused, printable characters plus `Backspace` and `Enter` (
 
 - v1 has no undo/redo, no select/move/resize, no layers, no PNG export, no toolbar UI, no configuration file and no pressure or touch support.
 - One set of annotations per output; after an output is renamed or replugged the old annotations are not rendered (the data stays in the file).
-- Every frame redraws the whole surface and damages all of it, so CPU cost on 4K or high refresh rate displays is unmeasured. If it hurts, switch to damage by bounding box.
+- While a drag is in progress only the bounding box of the transient overlay (the in-progress stroke and the eraser marker) is cleared, damaged and byte-swapped, and elements outside that box are not rasterised. Anything else — committing a stroke, erasing, a text edit, a mode switch, a resize or a scale change, `clear` — redraws and damages the whole surface.
+- Measured on this machine (release, pixman software rendering, 3840x2160, median of 15): a whole-surface frame over 30 strokes costs 20.5 ms, the same frame with a bounding-box damage 0.14 ms. The box is grown until it contains every element it overlaps, so a drag on top of a dense drawing can grow it back to nearly the whole surface (measured 31.9 ms against 56.6 ms for 200 mutually overlapping strokes, where the box reached 2001x1808).
+- Strokes are rendered as a quadratic curve through the midpoints of the pointer samples; the stored sample points are never smoothed, so the geometry in the file stays the raw input.
 - Text editing relies on the input method's `commit_string`; without `text-input-v3` on the compositor it falls back to local keys, which can only produce characters the keyboard layout yields directly (no candidate list).
 - **Unverified**: `exclusive` keyboard and `text-input-v3` on niri / hyprland / river, and fcitx5 IME candidate selection. Confirm those two in a real session first.
 

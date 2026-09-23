@@ -75,6 +75,28 @@ impl OutputAnnotations {
 }
 
 impl Stroke {
+    /// Axis-aligned box of the drawn geometry in logical pixels, stroke width and the
+    /// anti-aliasing edge included. `None` when there is no sample to draw.
+    pub fn bounds(&self) -> Option<Rect> {
+        let first = self.points.first()?;
+        let (mut x0, mut y0, mut x1, mut y1) = (first[0], first[1], first[0], first[1]);
+        for p in &self.points[1..] {
+            x0 = x0.min(p[0]);
+            y0 = y0.min(p[1]);
+            x1 = x1.max(p[0]);
+            y1 = y1.max(p[1]);
+        }
+        Some(
+            Rect {
+                x: x0,
+                y: y0,
+                w: x1 - x0,
+                h: y1 - y0,
+            }
+            .grown(self.width / 2.0 + 1.0),
+        )
+    }
+
     /// Squared distance from a point to this polyline.
     fn distance_squared(&self, x: f32, y: f32) -> f32 {
         let p = [x, y];
@@ -101,12 +123,43 @@ impl Rect {
     pub fn contains(&self, x: f32, y: f32) -> bool {
         x >= self.x && x <= self.x + self.w && y >= self.y && y <= self.y + self.h
     }
+
+    /// Smallest rectangle covering both.
+    pub fn union(self, other: Rect) -> Rect {
+        let x = self.x.min(other.x);
+        let y = self.y.min(other.y);
+        let right = (self.x + self.w).max(other.x + other.w);
+        let bottom = (self.y + self.h).max(other.y + other.h);
+        Rect {
+            x,
+            y,
+            w: right - x,
+            h: bottom - y,
+        }
+    }
+
+    /// Whether the two rectangles share any area. Touching edges do not count.
+    pub fn intersects(&self, other: Rect) -> bool {
+        self.x < other.x + other.w
+            && other.x < self.x + self.w
+            && self.y < other.y + other.h
+            && other.y < self.y + self.h
+    }
+
+    /// The same rectangle with every edge moved `by` outwards.
+    pub fn grown(self, by: f32) -> Rect {
+        Rect {
+            x: self.x - by,
+            y: self.y - by,
+            w: self.w + 2.0 * by,
+            h: self.h + 2.0 * by,
+        }
+    }
 }
 
 impl TextItem {
-    /// ponytail: bounds estimated from the font size (0.6em per char wide, 1.2em per line high)
-    /// instead of real glyph metrics; if erasing feels off, write back measured bounds while rendering.
-    pub fn bounds(&self) -> Rect {
+    /// Number of lines and the width in characters of the longest one.
+    fn extent(&self) -> (f32, f32) {
         let lines = self.text.lines().count().max(1) as f32;
         let chars = self
             .text
@@ -115,12 +168,34 @@ impl TextItem {
             .max()
             .unwrap_or(0)
             .max(1) as f32;
+        (lines, chars)
+    }
+
+    /// ponytail: bounds estimated from the font size (0.6em per char wide, 1.2em per line high)
+    /// instead of real glyph metrics; if erasing feels off, write back measured bounds while rendering.
+    pub fn bounds(&self) -> Rect {
+        let (lines, chars) = self.extent();
         Rect {
             x: self.x,
             y: self.y,
             w: 0.6 * self.size * chars,
             h: 1.2 * self.size * lines,
         }
+    }
+
+    /// Conservative box of everything the renderer can paint for this item. `bounds()` is
+    /// tuned for the eraser and is too narrow for wide glyphs such as CJK, but a damaged
+    /// frame may never paint outside the box it declared, so this one errs wide.
+    /// ponytail: one em per character plus half an em of margin, not real glyph metrics.
+    pub fn paint_bounds(&self) -> Rect {
+        let (lines, chars) = self.extent();
+        Rect {
+            x: self.x,
+            y: self.y,
+            w: self.size * chars,
+            h: 1.2 * self.size * lines,
+        }
+        .grown(self.size * 0.5)
     }
 }
 
@@ -155,6 +230,17 @@ pub struct Overlay {
     pub eraser: Option<[f32; 2]>,
     /// Text box being edited, preedit included.
     pub text: Option<TextOverlay>,
+    /// Edit-mode affordance: the active tool and colour. Never part of the document, so it
+    /// cannot be persisted, erased or exported.
+    pub hint: Option<Hint>,
+}
+
+/// What the edit-mode hint shows: the active tool's label and the active colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Hint {
+    pub tool: &'static str,
+    /// `#rrggbb`
+    pub color: &'static str,
 }
 
 #[derive(Debug, Clone)]

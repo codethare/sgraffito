@@ -301,7 +301,7 @@ impl App {
         if !commit.is_empty() {
             edit.buffer.insert(&commit);
         }
-        self.dirty = true;
+        self.mark_edit_dirty();
         self.sync_text_input();
     }
 
@@ -311,8 +311,19 @@ impl App {
             return;
         };
         f(&mut edit.buffer);
-        self.dirty = true;
+        self.mark_edit_dirty();
         self.sync_text_input();
+    }
+
+    /// Mark the output that owns the focused text edit for a whole-surface redraw: typed
+    /// content and the caret are not localisable to a transient box.
+    fn mark_edit_dirty(&mut self) {
+        self.dirty = true;
+        for out in self.outputs.values_mut() {
+            if out.overlay.text.is_some() {
+                out.dirty = true;
+            }
+        }
     }
 
     fn focused_edit(&self) -> Option<&crate::canvas::TextOverlay> {
@@ -354,6 +365,10 @@ impl App {
             }
             Tool::Text => self.begin_text_edit(key, x, y),
         }
+        if let Some(out) = self.outputs.get_mut(key) {
+            // A press starts or ends something: repaint that output whole.
+            out.dirty = true;
+        }
         self.dirty = true;
     }
 
@@ -380,6 +395,8 @@ impl App {
             Tool::Eraser => out.overlay.eraser = Some([x, y]),
             Tool::Text => return,
         }
+        // Only the transient overlay moved, so the next frame can damage just its box.
+        out.transient_dirty = true;
         self.dirty = true;
     }
 
@@ -417,6 +434,10 @@ impl App {
         }
         if committed {
             self.store.mark_dirty(Instant::now());
+        }
+        // The committed stroke, the erased element or the vanished marker: repaint whole.
+        if let Some(out) = self.outputs.get_mut(key) {
+            out.dirty = true;
         }
         self.dirty = true;
     }
