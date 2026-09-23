@@ -64,7 +64,7 @@ riverctl map normal Super D spawn 'sgraffito toggle'
 
 While a text box is focused, printable characters plus `Backspace` and `Enter` (newline) go into that box, and `P`/`E`/`T`/digits are content instead of shortcuts. Clicking anywhere finishes the edit in progress and keeps what was typed. To switch tools, press `Esc` to leave edit mode, run `sgraffito edit` again, then press the tool key.
 
-While editing, the top-left corner of every output shows the active tool, a swatch of the active colour and the same key list, so the armed tool and the click-to-place step for text are always visible on screen. The hint is transient: it is not part of the annotations, it cannot be erased and it is not rendered while locked.
+While editing, every output shows a capsule centred near its top edge: a well with the active colour and a keycap per key with its meaning beside it, the armed tool's keycap highlighted. The hint is transient: it is not part of the annotations, it cannot be erased, it does not widen the region a drag damages, and it is not rendered while locked.
 
 ## Data
 
@@ -96,5 +96,3 @@ While editing, the top-left corner of every output shows the active tool, a swat
 cargo test                # pure logic unit tests: data model, hit testing, JSON, rendering, key mapping, command parsing
 scripts/smoke.sh          # headless sway end to end: rendering, mode switching, IPC, clear, single instance, graceful exit
 ```
-
-The spec and design live in `openspec/changes/sgraffito-v1/`.

@@ -623,7 +623,7 @@ impl App {
             };
             // The box has to contain everything that will be drawn, because nothing may be
             // painted outside it: those bytes still hold the previous frame, already swapped.
-            Some(damage_box(ann, &out.overlay, transient))
+            Some(damage_box(ann, &out.overlay, transient, w as f32))
         } else {
             // Nothing changed for this output; another output is why the daemon redrew.
             return;

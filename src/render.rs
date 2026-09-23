@@ -9,17 +9,50 @@ use tiny_skia::{
 };
 
 use crate::canvas::{Hint, OutputAnnotations, Overlay, Rect, Stroke, TextItem, TextOverlay};
-
 /// Radius of the eraser marker circle, in logical pixels.
 const ERASER_MARKER_RADIUS: f32 = 8.0;
-/// Position, size and text of the edit-mode hint, in logical pixels.
-const HINT_ORIGIN: [f32; 2] = [16.0, 16.0];
-const HINT_SIZE: f32 = 14.0;
-const HINT_SWATCH: f32 = 11.0;
+/// The edit-mode hint: a capsule in the macOS HUD idiom, built around the 13 pt control size
+/// the HIG gives as the macOS default. All of it is logical pixels.
+const HINT_TOP: f32 = 16.0;
+const HINT_PAD: [f32; 2] = [12.0, 6.0];
+const HINT_HEIGHT: f32 = 34.0;
+/// A capsule is a rectangle whose corner radius is half its height.
+const HINT_RADIUS: f32 = HINT_HEIGHT / 2.0;
+const HINT_HAIRLINE: f32 = 1.0;
+const HINT_LABEL_SIZE: f32 = 13.0;
+const HINT_KEY_SIZE: f32 = 12.0;
+const HINT_KEY_MIN: f32 = 8.0;
+const HINT_KEY_PAD: f32 = 7.0;
+const HINT_KEY_HEIGHT: f32 = 22.0;
+const HINT_KEY_RADIUS: f32 = 6.0;
 const HINT_GAP: f32 = 7.0;
-const HINT_COLOR: &str = "#ffffff";
-/// Everything the hint has to say beyond the active tool and the colour swatch.
-const HINT_KEYS: &str = "P pen · E eraser · T text: click to place · 1-5 colour · Esc lock";
+const HINT_ITEM_GAP: f32 = 14.0;
+const HINT_WELL: f32 = 16.0;
+/// Widest capsule the damage accounting reserves room for. It keeps the reserved box a
+/// centred strip instead of the full width of the output: a full-width strip unioned with a
+/// grown drawing box covers nearly the whole surface and the fast path disappears.
+const HINT_RESERVE: f32 = 640.0;
+const HINT_WELL_RADIUS: f32 = 4.0;
+/// `#rrggbbaa`. The pill fill stands in for a HUD material: a `wl_shm` layer surface cannot be
+/// blurred, so there is translucency but no real vibrancy.
+const HINT_PILL_FILL: &str = "#1c1c1ec7";
+const HINT_PILL_EDGE: &str = "#ffffff1f";
+const HINT_KEY_FILL: &str = "#ffffff26";
+const HINT_KEY_EDGE: &str = "#ffffff2e";
+/// macOS system accent, used for the active tool's keycap.
+const HINT_ACCENT: &str = "#0a84ffff";
+const HINT_KEY_TEXT: &str = "#ffffffee";
+const HINT_LABEL_TEXT: &str = "#ebebf59e";
+const HINT_LABEL_ACTIVE: &str = "#fffffff2";
+const HINT_WELL_EDGE: &str = "#ffffff4d";
+/// The keys and what they do, in the order the capsule shows them.
+const HINT_ITEMS: [(&str, &str); 5] = [
+    ("1-5", "colour"),
+    ("P", "pen"),
+    ("E", "eraser"),
+    ("T", "text: click to place"),
+    ("Esc", "lock"),
+];
 const UNDERLINE_HEIGHT: f32 = 1.5;
 const CURSOR_WIDTH: f32 = 2.0;
 const LINE_HEIGHT_SCALE: f32 = 1.2;
@@ -90,20 +123,137 @@ impl Renderer {
         }
     }
 
-    /// The edit-mode affordance: a swatch of the active colour plus the key list, with the
-    /// active tool in brackets so it is never ambiguous which one is armed.
+    /// The edit-mode affordance. macOS idiom: a capsule, keys drawn as keycaps and their
+    /// meaning as secondary label text, with the active tool's keycap in the system accent.
     fn draw_hint(&mut self, pixmap: &mut PixmapMut, hint: &Hint, scale: f32) {
-        let (r, g, b) = parse_hex(hint.color);
-        fill(
+        let surface = pixmap.width() as f32 / scale;
+        // The descriptions are dropped first when the capsule would not fit: the keycaps
+        // alone still teach the shortcuts.
+        let Some(pill) = self
+            .hint_pill(hint, surface, true)
+            .or_else(|| self.hint_pill(hint, surface, false))
+        else {
+            return;
+        };
+        round_rect(
             pixmap,
-            HINT_ORIGIN[0] * scale,
-            HINT_ORIGIN[1] * scale,
-            HINT_SWATCH * scale,
-            HINT_SWATCH * scale,
-            Color::rgba(r, g, b, 255),
+            Rect {
+                x: pill.x * scale,
+                y: HINT_TOP * scale,
+                w: pill.width * scale,
+                h: HINT_HEIGHT * scale,
+            },
+            HINT_RADIUS * scale,
+            parse_hex(HINT_PILL_FILL),
+            Some((parse_hex(HINT_PILL_EDGE), HINT_HAIRLINE * scale)),
         );
-        let item = hint_item(hint);
-        self.draw_text(pixmap, &item, scale, None);
+        for (piece, x, w) in &pill.pieces {
+            match *piece {
+                Piece::Well => round_rect(
+                    pixmap,
+                    Rect {
+                        x: (pill.x + x) * scale,
+                        y: (HINT_TOP + (HINT_HEIGHT - HINT_WELL) / 2.0) * scale,
+                        w: HINT_WELL * scale,
+                        h: HINT_WELL * scale,
+                    },
+                    HINT_WELL_RADIUS * scale,
+                    parse_hex(hint.color),
+                    Some((parse_hex(HINT_WELL_EDGE), HINT_HAIRLINE * scale)),
+                ),
+                Piece::Key(text, active) => {
+                    let top = HINT_TOP + (HINT_HEIGHT - HINT_KEY_HEIGHT) / 2.0;
+                    let (fill, edge) = if active {
+                        (HINT_ACCENT, HINT_ACCENT)
+                    } else {
+                        (HINT_KEY_FILL, HINT_KEY_EDGE)
+                    };
+                    round_rect(
+                        pixmap,
+                        Rect {
+                            x: (pill.x + x) * scale,
+                            y: top * scale,
+                            w: w * scale,
+                            h: HINT_KEY_HEIGHT * scale,
+                        },
+                        HINT_KEY_RADIUS * scale,
+                        parse_hex(fill),
+                        Some((parse_hex(edge), HINT_HAIRLINE * scale)),
+                    );
+                    // Centre the glyph in its keycap.
+                    let glyph = self.text_width(text, HINT_KEY_SIZE);
+                    let item = hint_text(
+                        pill.x + x + (w - glyph) / 2.0,
+                        top,
+                        HINT_KEY_HEIGHT,
+                        HINT_KEY_SIZE,
+                        HINT_KEY_TEXT,
+                        text,
+                    );
+                    self.draw_text(pixmap, &item, scale, None);
+                }
+                Piece::Label(text, active) => {
+                    let item = hint_text(
+                        pill.x + x,
+                        HINT_TOP,
+                        HINT_HEIGHT,
+                        HINT_LABEL_SIZE,
+                        if active {
+                            HINT_LABEL_ACTIVE
+                        } else {
+                            HINT_LABEL_TEXT
+                        },
+                        text,
+                    );
+                    self.draw_text(pixmap, &item, scale, None);
+                }
+            }
+        }
+    }
+
+    /// Lay the capsule out from left to right, measuring each keycap and label. `None` when
+    /// the result would not fit on the surface.
+    fn hint_pill(&mut self, hint: &Hint, surface: f32, labels: bool) -> Option<HintPill> {
+        let active = active_key(hint.tool);
+        let mut pieces = vec![(Piece::Well, HINT_PAD[0], HINT_WELL)];
+        let mut cursor = HINT_PAD[0] + HINT_WELL + HINT_ITEM_GAP;
+        for (i, (key, label)) in HINT_ITEMS.iter().enumerate() {
+            let is_active = *key == active;
+            let width = self.text_width(key, HINT_KEY_SIZE).max(HINT_KEY_MIN) + 2.0 * HINT_KEY_PAD;
+            pieces.push((Piece::Key(key, is_active), cursor, width));
+            cursor += width;
+            if labels {
+                cursor += HINT_GAP;
+                let width = self.text_width(label, HINT_LABEL_SIZE);
+                pieces.push((Piece::Label(label, is_active), cursor, width));
+                cursor += width;
+            }
+            if i + 1 < HINT_ITEMS.len() {
+                cursor += HINT_ITEM_GAP;
+            }
+        }
+        let width = cursor + HINT_PAD[0];
+        if width > surface.min(HINT_RESERVE) {
+            return None;
+        }
+        Some(HintPill {
+            x: (surface - width) / 2.0,
+            width,
+            pieces,
+        })
+    }
+
+    /// Width of one line of text, in logical pixels. The shaped buffer is thrown away: the
+    /// hint is a handful of short strings and it is only drawn while editing.
+    fn text_width(&mut self, text: &str, size: f32) -> f32 {
+        let mut buffer = Buffer::new(
+            &mut self.font_system,
+            Metrics::new(size, size * LINE_HEIGHT_SCALE),
+        );
+        buffer.set_size(None, None);
+        buffer.set_text(text, &Attrs::new(), Shaping::Advanced, None);
+        buffer.shape_until_scroll(&mut self.font_system, false);
+        buffer.layout_runs().map(|r| r.line_w).fold(0.0, f32::max)
     }
 
     fn draw_text(
@@ -145,8 +295,8 @@ impl Renderer {
         }
 
         let (ox, oy) = (item.x * scale, item.y * scale);
-        let (r, g, b) = parse_hex(&item.color);
-        let color = Color::rgba(r, g, b, 255);
+        let c = parse_hex(&item.color);
+        let color = Color::rgba(c[0], c[1], c[2], c[3]);
         let (clip_w, clip_h) = (pixmap.width(), pixmap.height());
         buffer.draw(
             &mut self.font_system,
@@ -271,7 +421,7 @@ impl DamageRegion {
 /// ponytail: growing can cascade into a large box when the drag touches a long stroke over a
 /// dense drawing, and then the frame costs nearly a whole-surface one. That is the honest
 /// price of redrawing that stroke where the box overlaps it.
-pub fn damage_box(ann: &OutputAnnotations, overlay: &Overlay, from: Rect) -> Rect {
+pub fn damage_box(ann: &OutputAnnotations, overlay: &Overlay, from: Rect, width: f32) -> Rect {
     let mut damage = from;
     loop {
         let mut grown = damage;
@@ -295,8 +445,15 @@ pub fn damage_box(ann: &OutputAnnotations, overlay: &Overlay, from: Rect) -> Rec
             }
         }
         // The hint is painted every frame, so it always has to be inside the box.
-        if let Some(hint) = &overlay.hint {
-            grown = grown.union(hint_bounds(hint));
+        // The hint is static content that only changes on a tool, colour or mode switch, and
+        // those force a whole-surface frame. So it only has to be repainted when the box grew
+        // into it — reserving its box unconditionally would union a top strip with a drawing
+        // box far below it and swallow nearly the whole surface.
+        if overlay.hint.is_some() {
+            let hint = hint_bounds(width);
+            if hint.intersects(grown) {
+                grown = grown.union(hint);
+            }
         }
         if grown == damage {
             return damage;
@@ -324,33 +481,129 @@ pub fn transient_bounds(overlay: &Overlay) -> Option<Rect> {
     }
 }
 
-/// The text line of the hint. `draw_hint` and the damage accounting share it so they can
-/// never disagree about where the hint is.
-fn hint_item(hint: &Hint) -> TextItem {
-    TextItem {
-        x: HINT_ORIGIN[0] + HINT_SWATCH + HINT_GAP,
-        y: HINT_ORIGIN[1],
-        color: HINT_COLOR.into(),
-        size: HINT_SIZE,
-        text: format!("[{}]  {HINT_KEYS}", hint.tool),
+/// The keycap of the tool the hint reports as the active one.
+fn active_key(tool: &str) -> &str {
+    match tool {
+        "pen" => "P",
+        "eraser" => "E",
+        "text" => "T",
+        _ => "",
     }
 }
 
-/// Everything the hint paints.
-fn hint_bounds(hint: &Hint) -> Rect {
-    Rect {
-        x: HINT_ORIGIN[0],
-        y: HINT_ORIGIN[1],
-        w: HINT_SWATCH,
-        h: HINT_SWATCH,
+/// One laid-out element of the hint.
+#[derive(Clone, Copy)]
+enum Piece {
+    /// The active colour; macOS calls this a colour well.
+    Well,
+    /// A keycap: the glyph and whether it is the active tool's key.
+    Key(&'static str, bool),
+    /// The meaning of the keycap before it.
+    Label(&'static str, bool),
+}
+
+/// A laid-out hint capsule: where it sits and what to paint, in logical pixels.
+struct HintPill {
+    x: f32,
+    width: f32,
+    pieces: Vec<(Piece, f32, f32)>,
+}
+
+/// A label vertically centred in a `height`-tall box whose top edge is `top`.
+fn hint_text(x: f32, top: f32, height: f32, size: f32, color: &str, text: &str) -> TextItem {
+    TextItem {
+        x,
+        y: top + (height - size * LINE_HEIGHT_SCALE) / 2.0,
+        color: color.into(),
+        size,
+        text: text.into(),
     }
-    .union(hint_item(hint).paint_bounds())
+}
+
+/// Everything the hint paints. The capsule is centred and its width depends on the font, so
+/// the damage accounting reserves a centred box of the widest capsule `hint_pill` will build.
+fn hint_bounds(width: f32) -> Rect {
+    let reserved = HINT_RESERVE.min(width);
+    Rect {
+        x: (width - reserved) / 2.0,
+        y: HINT_TOP - HINT_HAIRLINE,
+        w: reserved,
+        h: HINT_HEIGHT + 2.0 * HINT_HAIRLINE,
+    }
+}
+
+/// A rounded rectangle with a fill and an optional hairline edge, in device pixels. The
+/// corners are cubic approximations of a circle, so a radius of half the height is a real
+/// capsule.
+fn round_rect(
+    pixmap: &mut PixmapMut,
+    box_: Rect,
+    radius: f32,
+    fill: [u8; 4],
+    edge: Option<([u8; 4], f32)>,
+) {
+    let Some(path) = rounded_rect_path(box_, radius) else {
+        return;
+    };
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(fill[0], fill[1], fill[2], fill[3]);
+    paint.anti_alias = true;
+    pixmap.fill_path(
+        &path,
+        &paint,
+        tiny_skia::FillRule::Winding,
+        Transform::identity(),
+        None,
+    );
+    if let Some((edge, width)) = edge {
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(edge[0], edge[1], edge[2], edge[3]);
+        paint.anti_alias = true;
+        let stroke = SkStroke {
+            width,
+            line_cap: LineCap::Round,
+            ..Default::default()
+        };
+        pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+    }
+}
+
+/// Path of a rounded rectangle. tiny-skia has no rounded-rect helper, and quadratic corners
+/// are visibly too flat at a capsule's radius, so the corners are cubic circle segments.
+fn rounded_rect_path(box_: Rect, radius: f32) -> Option<tiny_skia::Path> {
+    let Rect { x, y, w, h } = box_;
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    let r = radius.min(w / 2.0).min(h / 2.0);
+    // Cubic control-point distance that approximates a quarter circle.
+    let k = r * 0.552_285;
+    let (right, bottom) = (x + w, y + h);
+    let mut pb = PathBuilder::new();
+    pb.move_to(x + r, y);
+    pb.line_to(right - r, y);
+    pb.cubic_to(right - r + k, y, right, y + r - k, right, y + r);
+    pb.line_to(right, bottom - r);
+    pb.cubic_to(
+        right,
+        bottom - r + k,
+        right - r + k,
+        bottom,
+        right - r,
+        bottom,
+    );
+    pb.line_to(x + r, bottom);
+    pb.cubic_to(x + r - k, bottom, x, bottom - r + k, x, bottom - r);
+    pb.line_to(x, y + r);
+    pb.cubic_to(x, y + r - k, x + r - k, y, x + r, y);
+    pb.close();
+    pb.finish()
 }
 
 fn draw_stroke(pixmap: &mut PixmapMut, s: &Stroke, scale: f32) {
-    let (r, g, b) = parse_hex(&s.color);
+    let c = parse_hex(&s.color);
     let mut paint = Paint::default();
-    paint.set_color_rgba8(r, g, b, 255);
+    paint.set_color_rgba8(c[0], c[1], c[2], c[3]);
     paint.anti_alias = true;
     let width = s.width * scale;
     let transform = Transform::identity();
@@ -482,11 +735,13 @@ fn fill(pixmap: &mut PixmapMut, x: f32, y: f32, w: f32, h: f32, color: Color) {
     );
 }
 
-fn parse_hex(s: &str) -> (u8, u8, u8) {
+/// `#rrggbb` or `#rrggbbaa` to RGBA bytes.
+fn parse_hex(s: &str) -> [u8; 4] {
     let hex = s.trim_start_matches('#');
-    if hex.len() != 6 {
-        return (255, 255, 255);
-    }
     let v = u32::from_str_radix(hex, 16).unwrap_or(0xff_ffff);
-    ((v >> 16) as u8, (v >> 8) as u8, v as u8)
+    match hex.len() {
+        8 => [(v >> 24) as u8, (v >> 16) as u8, (v >> 8) as u8, v as u8],
+        6 => [(v >> 16) as u8, (v >> 8) as u8, v as u8, 255],
+        _ => [255, 255, 255, 255],
+    }
 }

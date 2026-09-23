@@ -286,6 +286,41 @@ fn hint_draws_ink_only_when_it_is_present() {
 }
 
 #[test]
+fn hint_is_a_centred_translucent_capsule() {
+    let (w, h) = (640u32, 120u32);
+    let mut buf = buffer(w, h);
+    let overlay = Overlay {
+        hint: Some(Hint {
+            tool: "pen",
+            color: "#33d17a",
+        }),
+        ..Default::default()
+    };
+    Renderer::new().render(
+        &mut buf,
+        w,
+        h,
+        1.0,
+        &OutputAnnotations::default(),
+        &overlay,
+        None,
+    );
+    // The capsule lives in the top strip and is centred: the row through its middle is
+    // painted in the middle of the surface and empty at the far left edge.
+    let painted: Vec<u32> = (0..w).filter(|x| alpha(&buf, w, *x, 33) > 0).collect();
+    assert!(!painted.is_empty());
+    let (left, right) = (*painted.first().unwrap(), *painted.last().unwrap());
+    assert!(
+        (left + right).abs_diff(w - 1) <= 2,
+        "pill {left}..{right} is not centred on {w}"
+    );
+    assert_eq!(alpha(&buf, w, 2, 33), 0);
+    // The fill is translucent, so the wallpaper still reads through the capsule.
+    let fill = alpha(&buf, w, left + 4, 33);
+    assert!(fill > 0 && fill < 255, "fill alpha {fill}");
+}
+
+#[test]
 fn the_eraser_cannot_reach_the_hint() {
     // The hint lives in the transient overlay, never in the document, so a click at its
     // position has nothing to delete — including the colour swatch at the hint's origin.
@@ -361,7 +396,7 @@ fn damage_box_grows_to_contain_the_element_it_overlaps() {
         w: 10.0,
         h: 10.0,
     };
-    let grown = damage_box(&a, &Overlay::default(), transient);
+    let grown = damage_box(&a, &Overlay::default(), transient, W as f32);
     // The line's box is 20..180 x 47..53 plus half the width and the anti-aliasing edge, and
     // the line is drawn whole, so the damage box has to reach past both of its ends: outside
     // the box those pixels would keep already-swapped bytes.
@@ -374,7 +409,7 @@ fn damage_box_grows_to_contain_the_element_it_overlaps() {
         w: 10.0,
         h: 10.0,
     };
-    assert_eq!(damage_box(&a, &Overlay::default(), far), far);
+    assert_eq!(damage_box(&a, &Overlay::default(), far, W as f32), far);
 }
 
 #[test]
@@ -397,6 +432,7 @@ fn bounding_box_frame_is_pixel_identical_to_a_whole_surface_frame() {
         transient_bounds(&first)
             .unwrap()
             .union(transient_bounds(&second).unwrap()),
+        W as f32,
     );
     // Both buffers start from the same frame, then get the second frame in the two ways.
     let mut whole = buffer(W, H);
