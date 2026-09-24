@@ -17,7 +17,7 @@ cargo build --release
 ./target/release/sgraffito daemon     # long-running process, started by your compositor
 ```
 
-Control commands (they talk to `$XDG_RUNTIME_DIR/sgraffito.sock` and fail if the daemon is not running):
+Control commands (they talk to `$XDG_RUNTIME_DIR/sgraffito.sock` and fail if the daemon is not running). The daemon reads control clients outside the Wayland event loop, so an incomplete client cannot delay drawing or keyboard input:
 
 ```sh
 sgraffito toggle   # switch between locked and edit mode
@@ -63,7 +63,7 @@ riverctl map normal Super D spawn 'sgraffito toggle'
 | `[` / `]` | shrink / grow the active tool's size: pen width, or text size while the text tool is armed |
 | `Esc` | finish the text edit (if any) and stay in edit mode; press again to return to the locked mode |
 
-While a text box is focused, printable characters plus `Backspace` and `Enter` (newline) go into that box, and `P`/`E`/`T`/digits are content instead of shortcuts. Clicking anywhere finishes the edit in progress and keeps what was typed. `Esc` finishes the text edit without leaving edit mode, so a tool or size change is one keypress away; a second `Esc`, with no text box focused, locks.
+While a text box is focused, printable characters plus `Backspace` and `Enter` (newline) go into that box, and `P`/`E`/`T`/digits are content instead of shortcuts. Clicking anywhere finishes the edit in progress and keeps what was typed. `Esc` finishes the text edit without leaving edit mode, so a tool or size change is one keypress away; a second `Esc`, with no text box focused, locks. Text boxes grow only when `Enter` inserts a newline; a long logical line is clipped at the output edge instead of being wrapped automatically.
 
 Pen width and text size are brush settings, like the colour: they apply to content created afterwards and never change what is already drawn or what the file holds. `[` and `]` adjust the active tool's size, bounded to 1–16 logical pixels for the pen and 8–72 for text.
 
@@ -79,7 +79,7 @@ While editing, every output shows a capsule centred near its top edge: a well wi
 ```
 
 - Coordinates are **output-local logical pixels**, bucketed by the `wl_output` name.
-- Changes land on disk within 1 second at most, written through a temp file in the same directory plus `rename`; `clear` and shutdown flush immediately.
+- Changes land on disk within 1 second at most, written through a temp file in the same directory plus `rename`; `clear` and shutdown flush immediately. If a write fails, the change stays pending and the daemon retries without dropping the in-memory annotations.
 - A corrupt file or an unsupported version is renamed to `annotations.json.bak` and the daemon starts with no annotations.
 - After an output is renamed (or replugged), annotations in the old bucket stop being rendered but are never deleted.
 
@@ -92,7 +92,7 @@ While editing, every output shows a capsule centred near its top edge: a well wi
 - Strokes are rendered as a quadratic curve through the midpoints of the pointer samples; the stored sample points are never smoothed, so the geometry in the file stays the raw input.
 - Text editing relies on the input method's `commit_string`; without `text-input-v3` on the compositor it falls back to local keys, which can only produce characters the keyboard layout yields directly (no candidate list).
 - A text box's size is fixed when it is created; there is no per-box resize, so changing the size means creating a new box.
-- **Unverified**: `exclusive` keyboard and `text-input-v3` on niri / hyprland / river, and the fcitx5 preedit/commit flow. The preedit is now cleared per input-method batch and `surrounding text` uses UTF-8 byte offsets, but a real fcitx5 session is what confirms the pair.
+- **Unverified**: `exclusive` keyboard and `text-input-v3` on niri / hyprland / river, the fcitx5 preedit/commit flow, and real-compositor output-name/closed-surface lifecycle events. The preedit is now cleared per input-method batch and `surrounding text` uses UTF-8 byte offsets, but real compositor and input-method sessions are what confirm those paths.
 
 ## Development
 

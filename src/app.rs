@@ -1,5 +1,6 @@
 //! Wayland glue: layer surface lifecycle, mode switching, frame submission.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -130,11 +131,11 @@ pub struct Output {
 
 impl Output {
     /// Key used for annotations; falls back to `output-<id>` until the name arrives.
-    pub(crate) fn bucket(&self, id: u32) -> String {
+    pub(crate) fn bucket(&self, id: u32) -> Cow<'_, str> {
         if self.name.is_empty() {
-            format!("output-{id}")
+            Cow::Owned(format!("output-{id}"))
         } else {
-            self.name.clone()
+            Cow::Borrowed(&self.name)
         }
     }
 }
@@ -331,9 +332,10 @@ impl App {
         if self.mode == mode {
             return;
         }
-        if mode == Mode::Locked {
-            self.end_text_edit();
-        }
+        self.end_text_edit();
+        self.cancel_transients();
+        self.keyboard_focus = None;
+        self.sync_text_input();
         self.mode = mode;
         let keys: Vec<u32> = self.outputs.keys().copied().collect();
         for key in keys {
@@ -414,6 +416,7 @@ impl App {
     pub(crate) fn set_tool(&mut self, tool: Tool) {
         if self.tool != tool {
             self.end_text_edit();
+            self.commit_transient_strokes();
             self.tool = tool;
             log(&format!("tool switched to {tool:?}"));
             self.mark_all_dirty();
@@ -425,6 +428,58 @@ impl App {
         self.dirty = true;
         for out in self.outputs.values_mut() {
             out.dirty = true;
+        }
+    }
+
+    /// Commit any in-progress strokes before a tool change or a new pointer gesture.
+    pub(crate) fn commit_transient_strokes(&mut self) {
+        let mut pending = Vec::new();
+        let mut overlay_changed = false;
+        for (key, out) in self.outputs.iter_mut() {
+            if let Some(stroke) = out.overlay.stroke.take() {
+                if !stroke.points.is_empty() {
+                    pending.push((out.bucket(*key).into_owned(), stroke));
+                }
+                overlay_changed = true;
+            }
+            if out.overlay.eraser.take().is_some() {
+                overlay_changed = true;
+            }
+        }
+        let committed = !pending.is_empty();
+        for (bucket, stroke) in pending {
+            self.doc
+                .outputs
+                .entry(bucket)
+                .or_default()
+                .strokes
+                .push(stroke);
+        }
+        if committed {
+            self.store.mark_dirty(Instant::now());
+        }
+        if overlay_changed || committed {
+            self.mark_all_dirty();
+        }
+    }
+
+    /// Drop transient drawing state when its surface or the current operation disappears.
+    pub(crate) fn cancel_transient(&mut self, key: u32) {
+        let Some(out) = self.outputs.get_mut(&key) else {
+            return;
+        };
+        let changed = out.overlay.stroke.take().is_some() || out.overlay.eraser.take().is_some();
+        if changed {
+            out.transient_dirty = true;
+            out.dirty = true;
+            self.dirty = true;
+        }
+    }
+
+    fn cancel_transients(&mut self) {
+        let keys: Vec<u32> = self.outputs.keys().copied().collect();
+        for key in keys {
+            self.cancel_transient(key);
         }
     }
 
@@ -453,7 +508,7 @@ impl App {
             if edit.buffer.text.is_empty() {
                 continue;
             }
-            let bucket = out.bucket(id);
+            let bucket = out.bucket(id).into_owned();
             let mut item = edit.item.clone();
             item.text = edit.buffer.text.clone();
             let ann = self.doc.outputs.entry(bucket).or_default();
@@ -466,6 +521,9 @@ impl App {
         if changed {
             self.store.mark_dirty(Instant::now());
         }
+        self.im_preedit = None;
+        self.im_commit.clear();
+        self.im_delete = None;
         self.dirty = true;
         self.sync_text_input();
     }
@@ -479,10 +537,13 @@ impl App {
         let existing = self
             .doc
             .outputs
-            .get(&bucket)
+            .get(bucket.as_ref())
             .and_then(|ann| ann.texts.iter().position(|t| t.bounds().contains(x, y)));
         let (item, index) = match existing {
-            Some(idx) => (self.doc.outputs[&bucket].texts[idx].clone(), Some(idx)),
+            Some(idx) => (
+                self.doc.outputs[bucket.as_ref()].texts[idx].clone(),
+                Some(idx),
+            ),
             None => (
                 TextItem {
                     x,
@@ -532,13 +593,12 @@ impl App {
             }
             Command::Clear => {
                 self.end_text_edit();
+                self.cancel_transients();
                 self.doc.outputs.clear();
+                self.mark_all_dirty();
                 let _ = self.connection.flush();
                 match self.store.flush(&self.doc) {
-                    Ok(()) => {
-                        self.mark_all_dirty();
-                        "ok".into()
-                    }
+                    Ok(()) => "ok".into(),
                     Err(e) => format!("error: {e}"),
                 }
             }
@@ -566,15 +626,34 @@ impl App {
     fn refresh_output(&mut self, output: &wl_output::WlOutput) {
         let key = key_of(output);
         let info = self.output_state.info(output);
-        let name = self.name_of(output);
+        let reported_name = self.name_of(output);
         if !self.outputs.contains_key(&key) {
             self.create_surface(output.clone());
+        }
+        // Some compositor updates briefly omit the name; do not regress a known bucket to the
+        // temporary id-based fallback and repaint the wrong annotations.
+        let name = if reported_name.is_empty() {
+            self.outputs
+                .get(&key)
+                .map(|out| out.name.clone())
+                .unwrap_or_default()
+        } else {
+            reported_name
+        };
+        let name_changed = self.outputs.get(&key).is_some_and(|out| out.name != name);
+        if name_changed {
+            // Finish under the old bucket before changing the name used by the document.
+            self.end_text_edit();
         }
         self.adopt_scale(&key, output_scale(info.as_ref()));
         let Some(out) = self.outputs.get_mut(&key) else {
             return;
         };
-        out.name = name;
+        if out.name != name {
+            out.name = name;
+            out.dirty = true;
+            self.dirty = true;
+        }
         if let Some((w, h)) = info.and_then(|i| i.logical_size)
             && w > 0
             && h > 0
@@ -669,7 +748,7 @@ impl App {
         let transient = transient_bounds(&out.overlay);
         let bucket = out.bucket(id);
         let empty = OutputAnnotations::default();
-        let ann = self.doc.outputs.get(&bucket).unwrap_or(&empty);
+        let ann = self.doc.outputs.get(bucket.as_ref()).unwrap_or(&empty);
         let damage = if out.dirty || out.last_buffer != Some(idx) || out.overlay.text.is_some() {
             None
         } else if out.transient_dirty {
@@ -876,7 +955,16 @@ impl OutputHandler for App {
         _qh: &QueueHandle<Self>,
         output: wl_output::WlOutput,
     ) {
-        if let Some(out) = self.outputs.remove(&key_of(&output)) {
+        let key = key_of(&output);
+        if self.outputs.contains_key(&key) {
+            self.end_text_edit();
+            self.cancel_transient(key);
+        }
+        if self.keyboard_focus == Some(key) {
+            self.keyboard_focus = None;
+            self.sync_text_input();
+        }
+        if let Some(out) = self.outputs.remove(&key) {
             log(&format!("output {} removed, annotations kept", out.name));
         }
     }
@@ -884,14 +972,20 @@ impl OutputHandler for App {
 
 impl LayerShellHandler for App {
     fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, layer: &LayerSurface) {
-        if let Some(key) = self.key_of_layer(layer)
-            && let Some(old) = self.outputs.remove(&key)
-        {
-            log(&format!(
-                "compositor closed the layer surface of {}, recreating",
-                old.name
-            ));
-            self.create_surface(old.output.clone());
+        if let Some(key) = self.key_of_layer(layer) {
+            self.end_text_edit();
+            self.cancel_transient(key);
+            if self.keyboard_focus == Some(key) {
+                self.keyboard_focus = None;
+                self.sync_text_input();
+            }
+            if let Some(old) = self.outputs.remove(&key) {
+                log(&format!(
+                    "compositor closed the layer surface of {}, recreating",
+                    old.name
+                ));
+                self.create_surface(old.output.clone());
+            }
         }
     }
 

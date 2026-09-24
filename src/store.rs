@@ -12,11 +12,18 @@ use crate::canvas::{Doc, OutputAnnotations};
 
 pub const VERSION: u32 = 1;
 pub const DEBOUNCE: Duration = Duration::from_secs(1);
+pub const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Serialize, Deserialize)]
 struct File {
     version: u32,
     outputs: BTreeMap<String, OutputAnnotations>,
+}
+
+#[derive(Serialize)]
+struct FileRef<'a> {
+    version: u32,
+    outputs: &'a BTreeMap<String, OutputAnnotations>,
 }
 
 /// Resolve the annotation path: `$XDG_DATA_HOME/sgraffito/annotations.json`, falling back to `$HOME/.local/share`.
@@ -75,9 +82,9 @@ fn backup(path: &Path, reason: &str) {
 
 /// Atomic write: temp file in the same directory, then rename.
 pub fn save(path: &Path, doc: &Doc) -> io::Result<()> {
-    let file = File {
+    let file = FileRef {
         version: VERSION,
-        outputs: doc.outputs.clone(),
+        outputs: &doc.outputs,
     };
     let json = serde_json::to_vec_pretty(&file)?;
     if let Some(dir) = path.parent() {
@@ -111,8 +118,12 @@ impl Store {
     }
 
     pub fn flush(&mut self, doc: &Doc) -> io::Result<()> {
-        let r = save(&self.path, doc);
-        self.deadline = None;
-        r
+        let result = save(&self.path, doc);
+        self.deadline = if result.is_ok() {
+            None
+        } else {
+            Some(Instant::now() + RETRY_DELAY)
+        };
+        result
     }
 }

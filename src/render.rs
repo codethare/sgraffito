@@ -2,6 +2,8 @@
 //!
 //! `buf` is a tiny-skia premultiplied RGBA buffer already sized as logical size x scale.
 
+use std::borrow::Cow;
+
 use cosmic_text::{Attrs, Buffer, Color, FontSystem, Metrics, Shaping, SwashCache};
 use tiny_skia::{
     LineCap, LineJoin, Paint, PathBuilder, PixmapMut, PremultipliedColorU8, Stroke as SkStroke,
@@ -261,11 +263,7 @@ impl Renderer {
     /// Width of one line of text, in logical pixels. The shaped buffer is thrown away: the
     /// hint is a handful of short strings and it is only drawn while editing.
     fn text_width(&mut self, text: &str, size: f32) -> f32 {
-        let mut buffer = Buffer::new(
-            &mut self.font_system,
-            Metrics::new(size, size * LINE_HEIGHT_SCALE),
-        );
-        buffer.set_size(None, None);
+        let mut buffer = Buffer::new_empty(Metrics::new(size, size * LINE_HEIGHT_SCALE));
         buffer.set_text(text, &Attrs::new(), Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut self.font_system, false);
         buffer.layout_runs().map(|r| r.line_w).fold(0.0, f32::max)
@@ -279,21 +277,23 @@ impl Renderer {
         edit: Option<&TextOverlay>,
     ) {
         let size = item.size * scale;
-        let mut buffer = Buffer::new(
-            &mut self.font_system,
-            Metrics::new(size, size * LINE_HEIGHT_SCALE),
-        );
-        buffer.set_size(Some(pixmap.width() as f32), None);
+        let mut buffer = Buffer::new_empty(Metrics::new(size, size * LINE_HEIGHT_SCALE));
 
         let (committed, preedit) = match edit {
             Some(e) => (e.buffer.text.as_str(), e.preedit.as_str()),
             None => (item.text.as_str(), ""),
         };
-        let display = format!("{committed}{preedit}");
+        // Text uses explicit newlines only. The output clips long lines instead of wrapping
+        // them behind the damage calculator's back.
+        let display = if preedit.is_empty() {
+            Cow::Borrowed(committed)
+        } else {
+            Cow::Owned(format!("{committed}{preedit}"))
+        };
         if display.is_empty() && edit.is_none() {
             return;
         }
-        buffer.set_text(&display, &Attrs::new(), Shaping::Advanced, None);
+        buffer.set_text(display.as_ref(), &Attrs::new(), Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut self.font_system, false);
 
         // Pre-scan the layout for the preedit start, and for the caret box and baseline of the

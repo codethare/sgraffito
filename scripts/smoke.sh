@@ -9,8 +9,10 @@ bin=$(realpath "$bin")
 work=$(mktemp -d /tmp/sgraffito-smoke.XXXXXX)
 sway_pid=""
 daemon_pid=""
+slow_pid=""
 
 cleanup() {
+    [ -n "$slow_pid" ] && kill "$slow_pid" 2>/dev/null || true
     [ -n "$daemon_pid" ] && kill "$daemon_pid" 2>/dev/null || true
     [ -n "$sway_pid" ] && kill "$sway_pid" 2>/dev/null || true
     wait 2>/dev/null || true
@@ -109,6 +111,39 @@ s=socket.socket(socket.AF_UNIX); s.connect(os.environ['XDG_RUNTIME_DIR']+'/sgraf
 s.sendall(b'frobnicate\n'); print(s.recv(200).decode().strip())
 " | grep -q '^ok'; then fail "an unknown command returned ok"; fi
 echo "  unknown command ok"
+
+# 3b. an incomplete client does not block another command
+python3 - "$XDG_RUNTIME_DIR/sgraffito.sock" <<'PY' &
+import socket
+import sys
+import time
+s = socket.socket(socket.AF_UNIX)
+s.connect(sys.argv[1])
+time.sleep(3)
+PY
+slow_pid=$!
+sleep 0.1
+timeout 1 "$bin" lock >/dev/null || fail "an incomplete client blocked the control socket"
+kill "$slow_pid" 2>/dev/null || true
+wait "$slow_pid" 2>/dev/null || true
+slow_pid=""
+echo "  incomplete client is non-blocking"
+
+# 3c. oversized commands are rejected
+response=$(python3 - "$XDG_RUNTIME_DIR/sgraffito.sock" <<'PY'
+import socket
+import sys
+s = socket.socket(socket.AF_UNIX)
+s.connect(sys.argv[1])
+s.sendall(b"x" * 5000)
+print(s.recv(200).decode().strip())
+PY
+)
+case "$response" in
+    error:*) ;;
+    *) fail "oversized command returned '$response'" ;;
+esac
+echo "  oversized command rejected"
 
 # 4. clear empties memory and file
 "$bin" clear > /dev/null || fail "clear failed"

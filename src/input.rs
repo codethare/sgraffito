@@ -135,7 +135,11 @@ impl KeyboardHandler for App {
         _: &[u32],
         _: &[Keysym],
     ) {
-        self.keyboard_focus = self.output_of(surface);
+        let next_focus = self.output_of(surface);
+        if self.keyboard_focus.is_some() && self.keyboard_focus != next_focus {
+            self.end_text_edit();
+        }
+        self.keyboard_focus = next_focus;
         // Focus changed, so the text input has to be enabled again.
         self.text_input_enabled = false;
         self.sync_text_input();
@@ -150,7 +154,9 @@ impl KeyboardHandler for App {
         _: u32,
     ) {
         if self.output_of(surface) == self.keyboard_focus {
+            self.end_text_edit();
             self.keyboard_focus = None;
+            self.sync_text_input();
         }
     }
 
@@ -315,10 +321,18 @@ impl App {
         use zwp_text_input_v3::Event;
         match event {
             Event::Enter { .. } => {
+                self.im_preedit = None;
+                self.im_commit.clear();
+                self.im_delete = None;
                 self.text_input_enabled = false;
                 self.sync_text_input();
             }
-            Event::Leave { .. } => self.text_input_enabled = false,
+            Event::Leave { .. } => {
+                self.im_preedit = None;
+                self.im_commit.clear();
+                self.im_delete = None;
+                self.text_input_enabled = false;
+            }
             Event::PreeditString { text, .. } => self.im_preedit = text,
             Event::CommitString { text: Some(text) } => self.im_commit.push_str(&text),
             Event::DeleteSurroundingText {
@@ -393,8 +407,10 @@ impl App {
         if self.mode != Mode::Edit {
             return;
         }
-        // A click anywhere finishes the text edit in progress first, so typed content is kept.
+        // A click anywhere finishes the text edit and any previous stroke first, so typed
+        // content is kept and a new gesture starts from a clean transient state.
         self.end_text_edit();
+        self.commit_transient_strokes();
         match self.tool {
             Tool::Pen => {
                 if let Some(out) = self.outputs.get_mut(key) {
@@ -451,33 +467,31 @@ impl App {
     fn pointer_release(&mut self, key: &u32) {
         let tool = self.tool;
         let id = *key;
-        let bucket = self.outputs.get(key).map(|o| o.bucket(id));
+        let bucket = self.outputs.get(key).map(|o| o.bucket(id).into_owned());
         let mut committed = false;
-        if let Some(bucket) = bucket
-            && let Some(out) = self.outputs.get_mut(key)
-        {
-            match tool {
-                Tool::Pen => {
-                    if let Some(stroke) = out.overlay.stroke.take()
-                        && !stroke.points.is_empty()
-                    {
-                        self.doc
-                            .outputs
-                            .entry(bucket)
-                            .or_default()
-                            .strokes
-                            .push(stroke);
-                        committed = true;
-                    }
+        if let Some(bucket) = bucket {
+            let transient = self
+                .outputs
+                .get_mut(key)
+                .map(|out| (out.overlay.stroke.take(), out.overlay.eraser.take()));
+            if let Some((stroke, eraser)) = transient {
+                if let Some(stroke) = stroke
+                    && !stroke.points.is_empty()
+                {
+                    self.doc
+                        .outputs
+                        .entry(bucket.clone())
+                        .or_default()
+                        .strokes
+                        .push(stroke);
+                    committed = true;
                 }
-                Tool::Eraser => {
-                    if let Some([x, y]) = out.overlay.eraser.take()
-                        && let Some(ann) = self.doc.outputs.get_mut(&bucket)
-                    {
-                        committed = ann.erase(x, y);
-                    }
+                if tool == Tool::Eraser
+                    && let Some([x, y]) = eraser
+                    && let Some(ann) = self.doc.outputs.get_mut(&bucket)
+                {
+                    committed |= ann.erase(x, y);
                 }
-                Tool::Text => {}
             }
         }
         if committed {

@@ -142,3 +142,15 @@ fn flush_writes_and_clears_pending() {
     assert!(!s.due(t0 + Duration::from_secs(10)));
     assert_eq!(store::load(&p), sample());
 }
+
+#[test]
+fn failed_flush_stays_pending_for_retry() {
+    let dir = tmpdir("failed-flush");
+    let blocker = dir.join("not-a-directory");
+    std::fs::write(&blocker, "not a directory").unwrap();
+    let mut s = Store::new(blocker.join("annotations.json"));
+    let t0 = Instant::now();
+    s.mark_dirty(t0);
+    assert!(s.flush(&sample()).is_err());
+    assert!(s.due(Instant::now() + Duration::from_secs(2)));
+}

@@ -658,6 +658,36 @@ fn abgr_buffer_carries_rgba_bytes_so_it_needs_no_swap() {
 }
 
 #[test]
+fn long_text_damage_contains_everything_rasterised() {
+    let doc = ann(
+        vec![],
+        vec![TextItem {
+            x: 10.0,
+            y: 20.0,
+            color: "#ffffff".into(),
+            size: 24.0,
+            text: "a long text line that exceeds the output width. ".repeat(3),
+        }],
+    );
+    let first = dot(100.0, 50.0);
+    let second = dot(104.0, 54.0);
+    let damage = damage_box(
+        &doc,
+        &Overlay { ..second.clone() },
+        transient_bounds(&first)
+            .unwrap()
+            .union(transient_bounds(&second).unwrap()),
+        W as f32,
+    );
+    let mut whole = buffer(W, H);
+    frame(&mut whole, W, H, &doc, &first, None);
+    let mut boxed = whole.clone();
+    frame(&mut whole, W, H, &doc, &second, None);
+    frame(&mut boxed, W, H, &doc, &second, Some(damage));
+    assert_eq!(whole, boxed);
+}
+
+#[test]
 fn doc_strokes_of_other_outputs_are_not_drawn() {
     let mut buf = buffer(W, H);
     let mut doc = Doc::default();
