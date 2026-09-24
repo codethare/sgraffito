@@ -7,6 +7,7 @@ use tiny_skia::{
     LineCap, LineJoin, Paint, PathBuilder, PixmapMut, PremultipliedColorU8, Stroke as SkStroke,
     Transform,
 };
+use wayland_client::protocol::wl_shm::Format;
 
 use crate::canvas::{Hint, OutputAnnotations, Overlay, Rect, Stroke, TextItem, TextOverlay};
 /// Radius of the eraser marker circle, in logical pixels.
@@ -122,7 +123,14 @@ impl Renderer {
             self.draw_text(&mut pixmap, &t.item, scale, Some(t));
         }
         if let Some(hint) = &overlay.hint {
-            self.draw_hint(&mut pixmap, hint, scale);
+            // The hint is static content: only a tool, colour, size or mode change repaints it,
+            // and those force a whole-surface frame. A bounding-box frame that does not reach it
+            // must leave it alone — those bytes are outside the damage region and still hold
+            // the previous frame.
+            let box_ = hint_bounds(pixmap.width() as f32 / scale);
+            if damage.is_none_or(|d| box_.intersects(d)) {
+                self.draw_hint(&mut pixmap, hint, scale);
+            }
         }
         if let Some([x, y]) = overlay.eraser {
             draw_eraser_marker(&mut pixmap, x * scale, y * scale, scale);
@@ -402,9 +410,10 @@ impl DamageRegion {
         }
     }
 
-    /// Swaps the R and B bytes inside the region. tiny-skia is premultiplied RGBA and
-    /// `wl_shm` ARGB8888 is BGRA byte order on little endian, so this is mandatory and
-    /// makes the region single-use until it is cleared again.
+    /// Swaps the R and B bytes inside the region, turning a tiny-skia premultiplied RGBA
+    /// buffer into `wl_shm` ARGB8888 (B, G, R, A on little endian). Only the `Argb8888`
+    /// fallback of [`buffer_format`] needs it; either way the swapped bytes are single-use
+    /// until the region is cleared again.
     pub fn swap_rb(self, buf: &mut [u8], w: u32, h: u32) {
         if let DamageRegion::All = self {
             // Measured: one flat pass is ~45% faster than the same swap row by row.
@@ -426,10 +435,21 @@ impl DamageRegion {
     }
 }
 
+/// The `wl_shm` format to allocate buffers in, and whether the frame's bytes then need the
+/// R/B swap. On little endian `Abgr8888` is R, G, B, A — the order tiny-skia writes
+/// (premultiplied) — so it needs no swap; the mandatory `Argb8888` is B, G, R, A and does.
+pub fn buffer_format(formats: &[Format]) -> (Format, bool) {
+    if formats.contains(&Format::Abgr8888) {
+        (Format::Abgr8888, false)
+    } else {
+        (Format::Argb8888, true)
+    }
+}
+
 /// Damage box for a bounding-box frame: `from` grown until it contains every element the
 /// renderer will paint inside it. Painting outside the box is not allowed, because those
-/// bytes still hold the previous frame's already-swapped pixels; `render` culls the
-/// elements left outside, which is why they may keep those pixels.
+/// bytes still hold the previous frame's pixels; `render` culls the elements left outside,
+/// which is why they may keep those pixels.
 ///
 /// ponytail: growing can cascade into a large box when the drag touches a long stroke over a
 /// dense drawing, and then the frame costs nearly a whole-surface one. That is the honest
@@ -457,11 +477,10 @@ pub fn damage_box(ann: &OutputAnnotations, overlay: &Overlay, from: Rect, width:
                 grown = grown.union(b);
             }
         }
-        // The hint is painted every frame, so it always has to be inside the box.
-        // The hint is static content that only changes on a tool, colour or mode switch, and
-        // those force a whole-surface frame. So it only has to be repainted when the box grew
-        // into it — reserving its box unconditionally would union a top strip with a drawing
-        // box far below it and swallow nearly the whole surface.
+        // The hint is only repainted when the box grows into it, so the growth has to cover
+        // everything the hint paints. Reserving its box unconditionally would union a top strip
+        // with a drawing box far below it and swallow nearly the whole surface; the hint itself
+        // only changes on a tool, colour or mode switch, and those force a whole-surface frame.
         if overlay.hint.is_some() {
             let hint = hint_bounds(width);
             if hint.intersects(grown) {

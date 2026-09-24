@@ -1,7 +1,8 @@
 use sgraffito::canvas::{
     Doc, Hint, OutputAnnotations, Overlay, Rect, Stroke, TextBuffer, TextItem, TextOverlay,
 };
-use sgraffito::render::{DamageRegion, Renderer, damage_box, transient_bounds};
+use sgraffito::render::{DamageRegion, Renderer, buffer_format, damage_box, transient_bounds};
+use wayland_client::protocol::wl_shm::Format;
 
 const W: u32 = 200;
 const H: u32 = 100;
@@ -562,6 +563,98 @@ fn bounding_box_frame_with_a_hint_matches_a_whole_surface_frame() {
         Some(damage),
     );
     assert_eq!(whole, boxed);
+}
+
+#[test]
+fn a_drag_far_from_the_hint_leaves_the_hint_pixels_alone() {
+    // The hint is static: only a tool, colour, size or mode change repaints it, and those force
+    // a whole-surface frame. A bounding-box frame that does not reach it may not paint it,
+    // because those bytes lie outside the damage region and still hold the previous frame.
+    let (w, h) = (1024u32, 600u32);
+    let hint = Hint {
+        tool: "pen",
+        color: "#33d17a",
+        size: 3.0,
+    };
+    let with = |x: f32, y: f32| Overlay {
+        hint: Some(hint),
+        ..dot(x, y)
+    };
+    let first = with(500.0, 400.0);
+    let second = with(504.0, 404.0);
+    let damage = damage_box(
+        &OutputAnnotations::default(),
+        &second,
+        transient_bounds(&first)
+            .unwrap()
+            .union(transient_bounds(&second).unwrap()),
+        w as f32,
+    );
+    let mut whole = buffer(w, h);
+    frame(
+        &mut whole,
+        w,
+        h,
+        &OutputAnnotations::default(),
+        &first,
+        None,
+    );
+    let mut boxed = whole.clone();
+    frame(
+        &mut whole,
+        w,
+        h,
+        &OutputAnnotations::default(),
+        &second,
+        None,
+    );
+    frame(
+        &mut boxed,
+        w,
+        h,
+        &OutputAnnotations::default(),
+        &second,
+        Some(damage),
+    );
+    assert_eq!(whole, boxed);
+}
+
+#[test]
+fn buffer_format_prefers_abgr_and_falls_back_to_argb() {
+    assert_eq!(
+        buffer_format(&[Format::Argb8888, Format::Abgr8888]),
+        (Format::Abgr8888, false)
+    );
+    // Without Abgr8888 on offer the mandatory ARGB8888 needs the R/B swap.
+    assert_eq!(
+        buffer_format(&[Format::Argb8888, Format::Xrgb8888]),
+        (Format::Argb8888, true)
+    );
+    assert_eq!(buffer_format(&[]), (Format::Argb8888, true));
+}
+
+#[test]
+fn abgr_buffer_carries_rgba_bytes_so_it_needs_no_swap() {
+    let (w, h) = (16u32, 8u32);
+    let mut buf = buffer(w, h);
+    Renderer::new().render(
+        &mut buf,
+        w,
+        h,
+        1.0,
+        &ann(vec![line(4.0, 0.0, 8.0)], vec![]),
+        &Overlay::default(),
+        None,
+    );
+    let i = ((4 * w + 4) * 4) as usize;
+    assert_eq!(
+        (buf[i], buf[i + 1], buf[i + 2]),
+        (0xe0, 0x1b, 0x24),
+        "not R,G,B"
+    );
+    // The ARGB8888 fallback is the same frame with the two exchanged.
+    DamageRegion::All.swap_rb(&mut buf, w, h);
+    assert_eq!((buf[i], buf[i + 2]), (0x24, 0xe0));
 }
 
 #[test]

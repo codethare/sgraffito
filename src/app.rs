@@ -7,7 +7,7 @@ use std::time::Instant;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, Region},
     delegate_dispatch2, delegate_registry,
-    output::{OutputHandler, OutputState},
+    output::{OutputHandler, OutputInfo, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
     seat::{Capability, SeatHandler, SeatState},
@@ -35,7 +35,7 @@ use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3::Z
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::ZwpTextInputV3;
 
 use crate::input::stepped_size;
-use crate::render::{DamageRegion, Renderer, damage_box, transient_bounds};
+use crate::render::{DamageRegion, Renderer, buffer_format, damage_box, transient_bounds};
 use crate::store::{self, Store};
 
 /// Built-in palette (`#rrggbb`).
@@ -175,6 +175,9 @@ pub struct App {
     pub(crate) im_commit: String,
     pub(crate) im_preedit: Option<String>,
     pub(crate) im_delete: Option<(u32, u32)>,
+    /// Shm format of every buffer and whether frames need the R/B swap. Decided once from the
+    /// compositor's advertised list, because all buffers of an output have to agree.
+    buffer_format: Option<(wl_shm::Format, bool)>,
 }
 
 impl App {
@@ -223,6 +226,7 @@ impl App {
             im_commit: String::new(),
             im_preedit: None,
             im_delete: None,
+            buffer_format: None,
         };
         app.bind_text_input_manager();
         app.sync_outputs();
@@ -270,6 +274,10 @@ impl App {
 
     fn create_surface(&mut self, output: wl_output::WlOutput) {
         let surface = self.compositor_state.create_surface(&self.qh);
+        // The compositor has to be told the buffer scale, or it maps the buffer 1:1 and every
+        // annotation lands scale times too far out and is clipped.
+        let scale = output_scale(self.output_state.info(&output).as_ref());
+        surface.set_buffer_scale(scale as i32);
         let hint = self.current_hint();
         let layer = self.layer_shell.create_layer_surface(
             &self.qh,
@@ -299,7 +307,7 @@ impl App {
                 layer,
                 width: 0,
                 height: 0,
-                scale: 1.0,
+                scale,
                 configured: false,
                 dirty: true,
                 transient_dirty: false,
@@ -556,27 +564,17 @@ impl App {
 
     /// Read output info: name, scale and logical size.
     fn refresh_output(&mut self, output: &wl_output::WlOutput) {
-        let name = self.name_of(output);
+        let key = key_of(output);
         let info = self.output_state.info(output);
-        let scale = info
-            .as_ref()
-            .map(|i| i.scale_factor.max(1) as f32)
-            .unwrap_or(1.0);
-        if !self.outputs.contains_key(&key_of(output)) {
+        let name = self.name_of(output);
+        if !self.outputs.contains_key(&key) {
             self.create_surface(output.clone());
         }
-        let Some(out) = self.outputs.get_mut(&key_of(output)) else {
+        self.adopt_scale(&key, output_scale(info.as_ref()));
+        let Some(out) = self.outputs.get_mut(&key) else {
             return;
         };
         out.name = name;
-        if out.scale != scale {
-            out.scale = scale;
-            out.buffers.clear();
-            out.last_buffer = None;
-            out.last_transient = None;
-            out.dirty = true;
-            self.dirty = true;
-        }
         if let Some((w, h)) = info.and_then(|i| i.logical_size)
             && w > 0
             && h > 0
@@ -592,8 +590,27 @@ impl App {
         }
     }
 
+    /// Adopt an output's scale: tell the compositor the buffer scale and drop the buffers, which
+    /// were allocated for the old one. Stored coordinates stay logical, so nothing moves.
+    fn adopt_scale(&mut self, key: &u32, scale: f32) {
+        let Some(out) = self.outputs.get_mut(key) else {
+            return;
+        };
+        if out.scale == scale {
+            return;
+        }
+        out.scale = scale;
+        out.surface.set_buffer_scale(scale as i32);
+        out.buffers.clear();
+        out.last_buffer = None;
+        out.last_transient = None;
+        out.dirty = true;
+        self.dirty = true;
+    }
+
     fn draw_output(&mut self, key: &u32) {
         let id = *key;
+        let (format, swap) = self.shm_format();
         let Some(out) = self.outputs.get_mut(key) else {
             return;
         };
@@ -624,12 +641,10 @@ impl App {
                 .position(|b| b.canvas(&mut self.pool).is_some())
         };
         if usable.is_none() && out.buffers.len() < MAX_BUFFERS {
-            match self.pool.create_buffer(
-                px.0 as i32,
-                px.1 as i32,
-                (px.0 * 4) as i32,
-                wl_shm::Format::Argb8888,
-            ) {
+            match self
+                .pool
+                .create_buffer(px.0 as i32, px.1 as i32, (px.0 * 4) as i32, format)
+            {
                 Ok((buffer, _)) => {
                     out.buffers.push(buffer);
                     usable = Some(out.buffers.len() - 1);
@@ -694,8 +709,10 @@ impl App {
             region.clear(canvas, px.0, px.1);
             self.renderer
                 .render(canvas, px.0, px.1, scale, ann, &out.overlay, damage);
-            // tiny-skia is premultiplied RGBA; wl_shm ARGB8888 is BGRA bytes on little endian.
-            region.swap_rb(canvas, px.0, px.1);
+            // Only the ARGB8888 fallback is B, G, R, A; Abgr8888 is already tiny-skia's order.
+            if swap {
+                region.swap_rb(canvas, px.0, px.1);
+            }
         }
 
         match region {
@@ -710,6 +727,19 @@ impl App {
             return;
         }
         out.surface.commit();
+    }
+
+    /// The buffer format, decided on first use: the compositor's advertised list only arrives
+    /// with the first dispatch, and every buffer an output holds has to be in that format.
+    fn shm_format(&mut self) -> (wl_shm::Format, bool) {
+        match self.buffer_format {
+            Some(f) => f,
+            None => {
+                let f = buffer_format(self.shm.formats());
+                self.buffer_format = Some(f);
+                f
+            }
+        }
     }
 
     pub(crate) fn output_of(&self, surface: &wl_surface::WlSurface) -> Option<u32> {
@@ -729,6 +759,11 @@ impl App {
 
 fn key_of(output: &wl_output::WlOutput) -> u32 {
     output.id().protocol_id()
+}
+
+/// The output's scale factor, never below 1.
+fn output_scale(info: Option<&OutputInfo>) -> f32 {
+    info.map(|i| i.scale_factor.max(1) as f32).unwrap_or(1.0)
 }
 
 /// The word the edit-mode hint shows for the active tool.
@@ -760,10 +795,14 @@ impl CompositorHandler for App {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _new_factor: i32,
+        surface: &wl_surface::WlSurface,
+        new_factor: i32,
     ) {
-        // The buffers and every stored coordinate stay logical; just repaint everything.
+        // Buffer pixels are logical x scale now, so the surface has to be told; the buffers
+        // allocated for the old scale are dropped. Every stored coordinate stays logical.
+        if let Some(key) = self.output_of(surface) {
+            self.adopt_scale(&key, new_factor.max(1) as f32);
+        }
         self.mark_all_dirty();
     }
 
