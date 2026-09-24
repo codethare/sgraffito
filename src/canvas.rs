@@ -235,12 +235,15 @@ pub struct Overlay {
     pub hint: Option<Hint>,
 }
 
-/// What the edit-mode hint shows: the active tool's label and the active colour.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// What the edit-mode hint shows: the active tool's label, the active colour and the
+/// active size, in logical pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Hint {
     pub tool: &'static str,
     /// `#rrggbb`
     pub color: &'static str,
+    /// Stroke width or text size, depending on the tool.
+    pub size: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -288,6 +291,27 @@ impl TextBuffer {
     }
     pub fn surrounding(&self) -> (&str, usize) {
         (&self.text, self.cursor)
+    }
+
+    /// Byte offset of the cursor, which is what `set_surrounding_text` takes.
+    pub fn cursor_bytes(&self) -> usize {
+        char_boundary(&self.text, self.cursor)
+    }
+
+    /// Delete `bytes` bytes before the cursor, landed on a character boundary. The input
+    /// method's `delete_surrounding_text` counts bytes, unlike the local `backspace`.
+    pub fn delete_before_bytes(&mut self, bytes: usize) -> bool {
+        let end = self.cursor_bytes();
+        if bytes == 0 || end == 0 {
+            return false;
+        }
+        let mut start = end.saturating_sub(bytes);
+        while start < end && !self.text.is_char_boundary(start) {
+            start += 1;
+        }
+        self.text.replace_range(start..end, "");
+        self.cursor = self.text[..start].chars().count();
+        true
     }
 
     /// Character offset the preedit is inserted at.

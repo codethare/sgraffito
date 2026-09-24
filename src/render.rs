@@ -30,8 +30,9 @@ const HINT_ITEM_GAP: f32 = 14.0;
 const HINT_WELL: f32 = 16.0;
 /// Widest capsule the damage accounting reserves room for. It keeps the reserved box a
 /// centred strip instead of the full width of the output: a full-width strip unioned with a
-/// grown drawing box covers nearly the whole surface and the fast path disappears.
-const HINT_RESERVE: f32 = 640.0;
+/// grown drawing box covers nearly the whole surface and the fast path disappears. The size
+/// key and its value grew the capsule from ~508 to ~707 px, hence the reserve.
+const HINT_RESERVE: f32 = 720.0;
 const HINT_WELL_RADIUS: f32 = 4.0;
 /// `#rrggbbaa`. The pill fill stands in for a HUD material: a `wl_shm` layer surface cannot be
 /// blurred, so there is translucency but no real vibrancy.
@@ -45,14 +46,19 @@ const HINT_KEY_TEXT: &str = "#ffffffee";
 const HINT_LABEL_TEXT: &str = "#ebebf59e";
 const HINT_LABEL_ACTIVE: &str = "#fffffff2";
 const HINT_WELL_EDGE: &str = "#ffffff4d";
-/// The keys and what they do, in the order the capsule shows them.
-const HINT_ITEMS: [(&str, &str); 5] = [
-    ("1-5", "colour"),
-    ("P", "pen"),
-    ("E", "eraser"),
-    ("T", "text: click to place"),
-    ("Esc", "lock"),
-];
+/// The keys and what they do, in the order the capsule shows them. The size key is
+/// contextual: it adjusts the pen width, or the text size while the text tool is active.
+fn hint_items(hint: &Hint) -> Vec<(&'static str, String)> {
+    let size_name = if hint.tool == "text" { "size" } else { "width" };
+    vec![
+        ("1-5", "colour".into()),
+        ("P", "pen".into()),
+        ("E", "eraser".into()),
+        ("T", "text: click to place".into()),
+        ("[ ]", format!("{size_name} {:.0}", hint.size)),
+        ("Esc", "end text, again locks".into()),
+    ]
+}
 const UNDERLINE_HEIGHT: f32 = 1.5;
 const CURSOR_WIDTH: f32 = 2.0;
 const LINE_HEIGHT_SCALE: f32 = 1.2;
@@ -148,7 +154,7 @@ impl Renderer {
             Some((parse_hex(HINT_PILL_EDGE), HINT_HAIRLINE * scale)),
         );
         for (piece, x, w) in &pill.pieces {
-            match *piece {
+            match piece {
                 Piece::Well => round_rect(
                     pixmap,
                     Rect {
@@ -163,7 +169,7 @@ impl Renderer {
                 ),
                 Piece::Key(text, active) => {
                     let top = HINT_TOP + (HINT_HEIGHT - HINT_KEY_HEIGHT) / 2.0;
-                    let (fill, edge) = if active {
+                    let (fill, edge) = if *active {
                         (HINT_ACCENT, HINT_ACCENT)
                     } else {
                         (HINT_KEY_FILL, HINT_KEY_EDGE)
@@ -198,7 +204,7 @@ impl Renderer {
                         HINT_TOP,
                         HINT_HEIGHT,
                         HINT_LABEL_SIZE,
-                        if active {
+                        if *active {
                             HINT_LABEL_ACTIVE
                         } else {
                             HINT_LABEL_TEXT
@@ -215,9 +221,10 @@ impl Renderer {
     /// the result would not fit on the surface.
     fn hint_pill(&mut self, hint: &Hint, surface: f32, labels: bool) -> Option<HintPill> {
         let active = active_key(hint.tool);
+        let items = hint_items(hint);
         let mut pieces = vec![(Piece::Well, HINT_PAD[0], HINT_WELL)];
         let mut cursor = HINT_PAD[0] + HINT_WELL + HINT_ITEM_GAP;
-        for (i, (key, label)) in HINT_ITEMS.iter().enumerate() {
+        for (i, (key, label)) in items.iter().enumerate() {
             let is_active = *key == active;
             let width = self.text_width(key, HINT_KEY_SIZE).max(HINT_KEY_MIN) + 2.0 * HINT_KEY_PAD;
             pieces.push((Piece::Key(key, is_active), cursor, width));
@@ -225,10 +232,10 @@ impl Renderer {
             if labels {
                 cursor += HINT_GAP;
                 let width = self.text_width(label, HINT_LABEL_SIZE);
-                pieces.push((Piece::Label(label, is_active), cursor, width));
+                pieces.push((Piece::Label(label.clone(), is_active), cursor, width));
                 cursor += width;
             }
-            if i + 1 < HINT_ITEMS.len() {
+            if i + 1 < items.len() {
                 cursor += HINT_ITEM_GAP;
             }
         }
@@ -492,14 +499,14 @@ fn active_key(tool: &str) -> &str {
 }
 
 /// One laid-out element of the hint.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Piece {
     /// The active colour; macOS calls this a colour well.
     Well,
     /// A keycap: the glyph and whether it is the active tool's key.
     Key(&'static str, bool),
     /// The meaning of the keycap before it.
-    Label(&'static str, bool),
+    Label(String, bool),
 }
 
 /// A laid-out hint capsule: where it sits and what to paint, in logical pixels.

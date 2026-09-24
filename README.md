@@ -60,11 +60,14 @@ riverctl map normal Super D spawn 'sgraffito toggle'
 | `E` | eraser (deletes whole strokes or text boxes; hit radius 8 logical pixels) |
 | `T` | text tool: click to place a text box with that point as its top-left corner |
 | `1`–`5` | pick a colour |
-| `Esc` | finish text editing (if any) and return to the locked mode |
+| `[` / `]` | shrink / grow the active tool's size: pen width, or text size while the text tool is armed |
+| `Esc` | finish the text edit (if any) and stay in edit mode; press again to return to the locked mode |
 
-While a text box is focused, printable characters plus `Backspace` and `Enter` (newline) go into that box, and `P`/`E`/`T`/digits are content instead of shortcuts. Clicking anywhere finishes the edit in progress and keeps what was typed. To switch tools, press `Esc` to leave edit mode, run `sgraffito edit` again, then press the tool key.
+While a text box is focused, printable characters plus `Backspace` and `Enter` (newline) go into that box, and `P`/`E`/`T`/digits are content instead of shortcuts. Clicking anywhere finishes the edit in progress and keeps what was typed. `Esc` finishes the text edit without leaving edit mode, so a tool or size change is one keypress away; a second `Esc`, with no text box focused, locks.
 
-While editing, every output shows a capsule centred near its top edge: a well with the active colour and a keycap per key with its meaning beside it, the armed tool's keycap highlighted. The hint is transient: it is not part of the annotations, it cannot be erased, it does not widen the region a drag damages, and it is not rendered while locked.
+Pen width and text size are brush settings, like the colour: they apply to content created afterwards and never change what is already drawn or what the file holds. `[` and `]` adjust the active tool's size, bounded to 1–16 logical pixels for the pen and 8–72 for text.
+
+While editing, every output shows a capsule centred near its top edge: a well with the active colour, the active size as a number, and a keycap per key with its meaning beside it, the armed tool's keycap highlighted. The hint is transient: it is not part of the annotations, it cannot be erased, it does not widen the region a drag damages, and it is not rendered while locked.
 
 ## Data
 
@@ -88,7 +91,8 @@ While editing, every output shows a capsule centred near its top edge: a well wi
 - Measured on this machine (release, pixman software rendering, 3840x2160, median of 15): a whole-surface frame over 30 strokes costs 20.5 ms, the same frame with a bounding-box damage 0.14 ms. The box is grown until it contains every element it overlaps, so a drag on top of a dense drawing can grow it back to nearly the whole surface (measured 31.9 ms against 56.6 ms for 200 mutually overlapping strokes, where the box reached 2001x1808).
 - Strokes are rendered as a quadratic curve through the midpoints of the pointer samples; the stored sample points are never smoothed, so the geometry in the file stays the raw input.
 - Text editing relies on the input method's `commit_string`; without `text-input-v3` on the compositor it falls back to local keys, which can only produce characters the keyboard layout yields directly (no candidate list).
-- **Unverified**: `exclusive` keyboard and `text-input-v3` on niri / hyprland / river, and fcitx5 IME candidate selection. Confirm those two in a real session first.
+- A text box's size is fixed when it is created; there is no per-box resize, so changing the size means creating a new box.
+- **Unverified**: `exclusive` keyboard and `text-input-v3` on niri / hyprland / river, and the fcitx5 preedit/commit flow. The preedit is now cleared per input-method batch and `surrounding text` uses UTF-8 byte offsets, but a real fcitx5 session is what confirms the pair.
 
 ## Development
 

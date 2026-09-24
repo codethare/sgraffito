@@ -34,15 +34,22 @@ use crate::canvas::{
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3::ZwpTextInputManagerV3;
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::ZwpTextInputV3;
 
+use crate::input::stepped_size;
 use crate::render::{DamageRegion, Renderer, damage_box, transient_bounds};
 use crate::store::{self, Store};
 
 /// Built-in palette (`#rrggbb`).
 pub const PALETTE: [&str; 5] = ["#e01b24", "#f6d32d", "#33d17a", "#3584e4", "#ffffff"];
-/// Fixed stroke width, in logical pixels.
+/// Initial stroke width and the range `[`/`]` may adjust it within, in logical pixels.
 pub const PEN_WIDTH: f32 = 3.0;
-/// Font size for new text boxes, in logical pixels.
+pub const PEN_WIDTH_MIN: f32 = 1.0;
+pub const PEN_WIDTH_MAX: f32 = 16.0;
+pub const PEN_WIDTH_STEP: f32 = 1.0;
+/// Initial text size and the range `[`/`]` may adjust it within, in logical pixels.
 pub const TEXT_SIZE: f32 = 18.0;
+pub const TEXT_SIZE_MIN: f32 = 8.0;
+pub const TEXT_SIZE_MAX: f32 = 72.0;
+pub const TEXT_SIZE_STEP: f32 = 2.0;
 
 pub(crate) const BTN_LEFT: u32 = 0x110;
 /// Max shm buffers kept per output: the compositor may still hold the previous one.
@@ -151,6 +158,10 @@ pub struct App {
     pub(crate) mode: Mode,
     pub(crate) tool: Tool,
     pub(crate) color_idx: usize,
+    /// Width new strokes are created with, in logical pixels.
+    pub(crate) pen_width: f32,
+    /// Size new text boxes are created with, in logical pixels.
+    pub(crate) text_size: f32,
     /// Keyed by the `wl_output` protocol id, because proxy identity is unreliable here.
     pub(crate) outputs: HashMap<u32, Output>,
     pub(crate) keyboard_focus: Option<u32>,
@@ -200,6 +211,8 @@ impl App {
             mode: Mode::Locked,
             tool: Tool::Pen,
             color_idx: 0,
+            pen_width: PEN_WIDTH,
+            text_size: TEXT_SIZE,
             outputs: HashMap::new(),
             keyboard_focus: None,
             dirty: false,
@@ -333,15 +346,50 @@ impl App {
         self.refresh_hint();
     }
 
-    /// The edit-mode hint of the current mode, tool and colour.
+    /// The edit-mode hint of the current mode, tool, colour and size.
     fn current_hint(&self) -> Option<Hint> {
         match self.mode {
             Mode::Locked => None,
             Mode::Edit => Some(Hint {
                 tool: tool_label(self.tool),
                 color: PALETTE[self.color_idx],
+                size: self.active_size(),
             }),
         }
+    }
+
+    /// The size the active tool creates content with.
+    fn active_size(&self) -> f32 {
+        match self.tool {
+            Tool::Text => self.text_size,
+            Tool::Pen | Tool::Eraser => self.pen_width,
+        }
+    }
+
+    /// `[` and `]` step the active tool's size, clamped to its range. The hint shows the value,
+    /// so it is repainted (a whole-surface frame, like a tool or colour change).
+    pub(crate) fn nudge_size(&mut self, dir: f32) {
+        match self.tool {
+            Tool::Text => {
+                self.text_size = stepped_size(
+                    self.text_size,
+                    dir,
+                    TEXT_SIZE_STEP,
+                    TEXT_SIZE_MIN,
+                    TEXT_SIZE_MAX,
+                )
+            }
+            Tool::Pen | Tool::Eraser => {
+                self.pen_width = stepped_size(
+                    self.pen_width,
+                    dir,
+                    PEN_WIDTH_STEP,
+                    PEN_WIDTH_MIN,
+                    PEN_WIDTH_MAX,
+                )
+            }
+        }
+        self.refresh_hint();
     }
 
     /// Push the current hint into every output's transient overlay. Called when the mode,
@@ -432,7 +480,7 @@ impl App {
                     x,
                     y,
                     color: PALETTE[self.color_idx].to_string(),
-                    size: TEXT_SIZE,
+                    size: self.text_size,
                     text: String::new(),
                 },
                 None,

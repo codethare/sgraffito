@@ -16,8 +16,57 @@ use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::{
     self, ContentHint, ContentPurpose, ZwpTextInputV3,
 };
 
-use crate::app::{App, BTN_LEFT, Mode, PALETTE, PEN_WIDTH, Tool, log};
+use crate::app::{App, BTN_LEFT, Mode, PALETTE, Tool, log};
 use crate::canvas::{Stroke, TextBuffer};
+
+/// What a local key does while a text box is focused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditAction {
+    /// Finish the text edit and stay in edit mode; a further `Esc` with no text box focused locks.
+    EndText,
+    Backspace,
+    Newline,
+    /// Insert the key's text into the buffer.
+    Local,
+    /// The input method owns this key while a preedit is active; touch nothing.
+    InputMethod,
+}
+
+/// Decide a local key while a text box is focused. A non-empty preedit means the input method
+/// owns every key except `Esc`, which only ends the edit, so local `Backspace`/`Enter`/printable
+/// keys must not change the committed content.
+pub fn edit_action(keysym: Keysym, preedit_active: bool) -> EditAction {
+    if preedit_active && keysym != Keysym::Escape {
+        return EditAction::InputMethod;
+    }
+    match keysym {
+        Keysym::Escape => EditAction::EndText,
+        Keysym::BackSpace => EditAction::Backspace,
+        Keysym::Return | Keysym::KP_Enter => EditAction::Newline,
+        _ => EditAction::Local,
+    }
+}
+
+/// `[` narrows and `]` widens the active tool's size; returns the direction as ±1.
+pub fn size_step_for_keysym(keysym: Keysym) -> Option<f32> {
+    match keysym {
+        Keysym::bracketleft => Some(-1.0),
+        Keysym::bracketright => Some(1.0),
+        _ => None,
+    }
+}
+
+/// Step a size by `dir` (±1) within `[min, max]`.
+pub fn stepped_size(current: f32, dir: f32, step: f32, min: f32, max: f32) -> f32 {
+    (current + dir * step).clamp(min, max)
+}
+
+/// Bytes `delete_surrounding_text` asks the committed buffer to drop. Its `before_length` is
+/// counted from the start of the preedit when one is present (protocol note), and the preedit is
+/// not in the buffer, so those bytes are not deleted.
+pub fn bytes_to_delete(before_length: u32, preedit_bytes: usize) -> usize {
+    (before_length as usize).saturating_sub(preedit_bytes)
+}
 
 /// Key mapping while no text box is edited: `P`/`E`/`T` switch tools.
 pub fn tool_for_keysym(keysym: Keysym) -> Option<Tool> {
@@ -118,23 +167,18 @@ impl KeyboardHandler for App {
         }
         // While a text box is edited, printable characters are content, not shortcuts.
         if self.focused_edit_mut().is_some() {
-            match event.keysym {
-                Keysym::Escape => {
-                    self.end_text_edit();
-                    self.set_mode(Mode::Locked);
-                }
-                Keysym::BackSpace => self.edit_buffer(|b| {
+            match edit_action(event.keysym, !self.preedit_is_empty()) {
+                EditAction::EndText => self.end_text_edit(),
+                EditAction::Backspace => self.edit_buffer(|b| {
                     b.backspace();
                 }),
-                Keysym::Return | Keysym::KP_Enter => self.edit_buffer(|b| b.insert("\n")),
-                _ => {
-                    // The input method sends content through commit_string while preediting; do not insert locally.
-                    if self.preedit_is_empty()
-                        && let Some(text) = event.utf8
-                    {
+                EditAction::Newline => self.edit_buffer(|b| b.insert("\n")),
+                EditAction::Local => {
+                    if let Some(text) = event.utf8 {
                         self.edit_buffer(|b| b.insert(&text));
                     }
                 }
+                EditAction::InputMethod => {}
             }
             return;
         }
@@ -144,6 +188,8 @@ impl KeyboardHandler for App {
             self.set_tool(tool);
         } else if let Some(idx) = color_for_keysym(event.keysym) {
             self.set_color(idx);
+        } else if let Some(dir) = size_step_for_keysym(event.keysym) {
+            self.nudge_size(dir);
         }
     }
 
@@ -243,7 +289,7 @@ impl App {
         };
         let state = self
             .focused_edit()
-            .map(|t| (t.buffer.text.clone(), t.buffer.cursor));
+            .map(|t| (t.buffer.text.clone(), t.buffer.cursor_bytes()));
         match state {
             Some((text, cursor)) => {
                 if !self.text_input_enabled {
@@ -291,12 +337,13 @@ impl App {
         let Some(edit) = self.focused_edit_mut() else {
             return;
         };
-        if let Some(preedit) = preedit {
-            edit.preedit = preedit;
-        }
+        // The preedit is double-buffered: a `done` batch that carried no `preedit_string` resets
+        // it to empty, so the last pinyin does not stay rendered after its candidate was committed.
+        edit.preedit = preedit.unwrap_or_default();
         if let Some((before, _after)) = delete {
             // The cursor is always at the end, so there is never anything after it to delete.
-            edit.buffer.delete_before(before as usize);
+            let bytes = bytes_to_delete(before, edit.preedit.len());
+            edit.buffer.delete_before_bytes(bytes);
         }
         if !commit.is_empty() {
             edit.buffer.insert(&commit);
@@ -351,9 +398,10 @@ impl App {
         match self.tool {
             Tool::Pen => {
                 if let Some(out) = self.outputs.get_mut(key) {
+                    let width = self.pen_width;
                     out.overlay.stroke = Some(Stroke {
                         color: PALETTE[self.color_idx].to_string(),
-                        width: PEN_WIDTH,
+                        width,
                         points: vec![[x, y]],
                     });
                 }

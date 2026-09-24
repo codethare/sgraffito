@@ -273,6 +273,7 @@ fn hint_draws_ink_only_when_it_is_present() {
         hint: Some(Hint {
             tool: "text",
             color: "#33d17a",
+            size: 18.0,
         }),
         ..Default::default()
     };
@@ -293,6 +294,7 @@ fn hint_is_a_centred_translucent_capsule() {
         hint: Some(Hint {
             tool: "pen",
             color: "#33d17a",
+            size: 3.0,
         }),
         ..Default::default()
     };
@@ -440,6 +442,84 @@ fn bounding_box_frame_is_pixel_identical_to_a_whole_surface_frame() {
     let mut boxed = whole.clone();
     frame(&mut whole, W, H, &doc, &second, None);
     frame(&mut boxed, W, H, &doc, &second, Some(damage));
+    assert_eq!(whole, boxed);
+}
+
+#[test]
+fn a_hint_does_not_widen_a_drag_far_from_it() {
+    let overlay = Overlay {
+        hint: Some(Hint {
+            tool: "pen",
+            color: "#ffffff",
+            size: 3.0,
+        }),
+        ..Default::default()
+    };
+    let transient = Rect {
+        x: 100.0,
+        y: 300.0,
+        w: 10.0,
+        h: 10.0,
+    };
+    // The hint sits in the top strip; a drag far below it must not drag it along.
+    assert_eq!(
+        damage_box(&OutputAnnotations::default(), &overlay, transient, 1920.0),
+        transient
+    );
+}
+
+#[test]
+fn bounding_box_frame_with_a_hint_matches_a_whole_surface_frame() {
+    // The reserve has to hold the whole capsule: a frame that damages only the box around a
+    // drag into the hint must still paint every capsule pixel the whole-surface frame paints.
+    let (w, h) = (1024u32, 200u32);
+    let hint = Hint {
+        tool: "text",
+        color: "#33d17a",
+        size: 72.0,
+    };
+    let first = Overlay {
+        hint: Some(hint),
+        ..dot(500.0, 20.0)
+    };
+    let second = Overlay {
+        hint: Some(hint),
+        ..dot(504.0, 24.0)
+    };
+    let damage = damage_box(
+        &OutputAnnotations::default(),
+        &second,
+        transient_bounds(&first)
+            .unwrap()
+            .union(transient_bounds(&second).unwrap()),
+        w as f32,
+    );
+    let mut whole = buffer(w, h);
+    frame(
+        &mut whole,
+        w,
+        h,
+        &OutputAnnotations::default(),
+        &first,
+        None,
+    );
+    let mut boxed = whole.clone();
+    frame(
+        &mut whole,
+        w,
+        h,
+        &OutputAnnotations::default(),
+        &second,
+        None,
+    );
+    frame(
+        &mut boxed,
+        w,
+        h,
+        &OutputAnnotations::default(),
+        &second,
+        Some(damage),
+    );
     assert_eq!(whole, boxed);
 }
 
