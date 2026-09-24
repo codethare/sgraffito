@@ -288,12 +288,16 @@ impl Renderer {
         buffer.set_text(&display, &Attrs::new(), Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut self.font_system, false);
 
-        // Pre-scan the layout for the preedit start, the last line width and the baseline.
+        // Pre-scan the layout for the preedit start, and for the caret box and baseline of the
+        // last line: the cursor is always at the end, so that is the line it is drawn on.
         let (mut line_w, mut baseline) = (0.0f32, size * 0.8);
+        let (mut line_top, mut line_height) = (0.0f32, size * LINE_HEIGHT_SCALE);
         let mut preedit_x0 = None;
         for run in buffer.layout_runs() {
             line_w = run.line_w;
             baseline = run.line_y;
+            line_top = run.line_top;
+            line_height = run.line_height;
             for g in run.glyphs {
                 if g.start >= committed.len() && preedit_x0.is_none() {
                     preedit_x0 = Some(g.x);
@@ -324,7 +328,6 @@ impl Renderer {
         );
 
         if let Some(e) = edit {
-            let line_top = oy + baseline - size * 0.8;
             if !e.preedit.is_empty() {
                 let x0 = ox + preedit_x0.unwrap_or(line_w);
                 fill(
@@ -336,12 +339,15 @@ impl Renderer {
                     color,
                 );
             }
+            // The caret is the line box the text sits in, so it matches the typed text instead
+            // of floating at a hardcoded fraction of the font size (the empty-line baseline and
+            // a real glyph's baseline are not the same fraction).
             fill(
                 pixmap,
                 ox + line_w,
-                line_top,
+                oy + line_top,
                 CURSOR_WIDTH * scale,
-                size * LINE_HEIGHT_SCALE,
+                line_height,
                 color,
             );
         }

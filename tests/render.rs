@@ -153,6 +153,47 @@ fn overlay_text_box_draws_text_and_cursor() {
 }
 
 #[test]
+fn the_caret_spans_the_whole_line_box() {
+    // An empty box draws no glyphs, so the only ink is the caret and its bounds are the line
+    // box the typed text will use.
+    let (w, h) = (200u32, 100u32);
+    let mut buf = buffer(w, h);
+    let overlay = Overlay {
+        text: Some(TextOverlay {
+            item: TextItem {
+                x: 10.0,
+                y: 10.0,
+                color: "#ffffff".into(),
+                size: 32.0,
+                text: String::new(),
+            },
+            buffer: TextBuffer::new(""),
+            index: None,
+            preedit: String::new(),
+        }),
+        ..Default::default()
+    };
+    Renderer::new().render(
+        &mut buf,
+        w,
+        h,
+        1.0,
+        &OutputAnnotations::default(),
+        &overlay,
+        None,
+    );
+    let rows: Vec<u32> = (0..h)
+        .filter(|y| (0..w).any(|x| alpha(&buf, w, x, *y) > 0))
+        .collect();
+    let (top, bottom) = (*rows.first().unwrap(), *rows.last().unwrap());
+    // The caret starts at the top of the line, not below the glyph ascent.
+    assert_eq!(top, 10, "caret top {top} is not the line top");
+    // One metrics line height (1.2 em) tall, matching the text's line.
+    let height = bottom - top + 1;
+    assert!((36..=40).contains(&height), "caret height {height}");
+}
+
+#[test]
 fn preedit_renders_more_ink_than_committed_text_alone() {
     let item = TextItem {
         x: 10.0,
