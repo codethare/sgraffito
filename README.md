@@ -63,7 +63,7 @@ riverctl map normal Super D spawn 'sgraffito toggle'
 | `[` / `]` | shrink / grow the active tool's size: pen width, or text size while the text tool is armed |
 | `Esc` | finish the text edit (if any) and stay in edit mode; press again to return to the locked mode |
 
-While a text box is focused, printable characters plus `Backspace` and `Enter` (newline) go into that box, and `P`/`E`/`T`/digits are content instead of shortcuts. Clicking anywhere finishes the edit in progress and keeps what was typed. `Esc` finishes the text edit without leaving edit mode, so a tool or size change is one keypress away; a second `Esc`, with no text box focused, locks. Text boxes grow only when `Enter` inserts a newline; a long logical line is clipped at the output edge instead of being wrapped automatically.
+While a text box is focused, printable characters plus `Backspace` and `Enter` (newline) go into that box, and `P`/`E`/`T`/digits are content instead of shortcuts. Clicking anywhere finishes the edit in progress and keeps what was typed. `Esc` finishes the text edit without leaving edit mode, so a tool or size change is one keypress away; a second `Esc`, with no text box focused, locks. Text boxes grow only when `Enter` inserts a newline; a long logical line is clipped at the output edge instead of being wrapped automatically. Ordinary committed text edits reuse the measured text region when possible; preedit and lifecycle transitions deliberately use a full redraw.
 
 Pen width and text size are brush settings, like the colour: they apply to content created afterwards and never change what is already drawn or what the file holds. `[` and `]` adjust the active tool's size, bounded to 1–16 logical pixels for the pen and 8–72 for text.
 
@@ -98,5 +98,8 @@ While editing, every output shows a capsule centred near its top edge: a well wi
 
 ```sh
 cargo test                # pure logic unit tests: data model, hit testing, JSON, rendering, key mapping, command parsing
+cargo bench --bench render # release render measurements: sparse/dense drag, hint, text, scale
 scripts/smoke.sh          # headless sway end to end: rendering, mode switching, IPC, clear, single instance, graceful exit
 ```
+
+The render benchmark uses the standard library only and reports median/p95 frame times. The baseline below was collected before the round-two caches on Arch Linux, Intel Xeon E3-1220L v2, Rust 1.98.1, 2026-09-24: sparse drag 180.7/248.1 us, dense overlap 14.5/20.8 ms, 4K hint frame 6.5/9.2 ms, 1080p committed text edit 1.57/1.70 ms, and scale-2 full frame 5.72/6.85 ms (median/p95). These are comparison numbers, not hardware-independent thresholds. The first hint cache stores layout only; a rendered hint pixmap and a spatial index remain deferred until a workload shows they are worthwhile.

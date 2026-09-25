@@ -36,6 +36,7 @@ const HINT_WELL: f32 = 16.0;
 /// grown drawing box covers nearly the whole surface and the fast path disappears. The size
 /// key and its value grew the capsule from ~508 to ~707 px, hence the reserve.
 const HINT_RESERVE: f32 = 720.0;
+const HINT_CACHE_CAP: usize = 16;
 const HINT_WELL_RADIUS: f32 = 4.0;
 /// `#rrggbbaa`. The pill fill stands in for a HUD material: a `wl_shm` layer surface cannot be
 /// blurred, so there is translucency but no real vibrancy.
@@ -69,6 +70,109 @@ const LINE_HEIGHT_SCALE: f32 = 1.2;
 pub struct Renderer {
     font_system: FontSystem,
     cache: SwashCache,
+    hint_cache: Vec<CachedHint>,
+}
+
+#[derive(Default)]
+pub(crate) struct TextLayoutCache {
+    scale: f32,
+    entries: Vec<Option<TextCacheEntry>>,
+    stroke_bounds: Vec<Option<Rect>>,
+}
+
+struct TextCacheEntry {
+    text: String,
+    size: f32,
+    layout: PreparedText,
+}
+
+struct PreparedText {
+    buffer: Buffer,
+    paint_bounds: Rect,
+    line_w: f32,
+    baseline: f32,
+    line_top: f32,
+    line_height: f32,
+}
+
+#[derive(Clone)]
+struct CachedHint {
+    hint: Hint,
+    surface: f32,
+    scale: f32,
+    pill: HintPill,
+}
+
+impl TextLayoutCache {
+    pub(crate) fn invalidate(&mut self) {
+        self.scale = 0.0;
+        self.entries.clear();
+        self.stroke_bounds.clear();
+    }
+
+    fn sync(&mut self, stroke_len: usize, text_len: usize, scale: f32) {
+        if self.scale != scale {
+            self.invalidate();
+            self.scale = scale;
+        }
+        if self.entries.len() != text_len {
+            self.entries.resize_with(text_len, || None);
+        }
+        if self.stroke_bounds.len() != stroke_len {
+            self.stroke_bounds.resize_with(stroke_len, || None);
+        }
+    }
+
+    fn stroke_bounds(&mut self, index: usize, stroke: &Stroke) -> Option<Rect> {
+        if let Some(bounds) = self.stroke_bounds.get(index).and_then(Option::as_ref) {
+            return Some(*bounds);
+        }
+        let bounds = stroke.bounds();
+        if index < self.stroke_bounds.len() {
+            self.stroke_bounds[index] = bounds;
+        }
+        bounds
+    }
+
+    fn matches(&self, index: usize, item: &TextItem) -> bool {
+        self.entries
+            .get(index)
+            .and_then(Option::as_ref)
+            .is_some_and(|entry| entry.text == item.text && entry.size == item.size)
+    }
+
+    fn bounds(&self, index: usize) -> Option<Rect> {
+        self.entries
+            .get(index)
+            .and_then(Option::as_ref)
+            .map(|entry| entry.layout.paint_bounds)
+    }
+
+    fn text_bounds(&self, index: usize, item: &TextItem) -> Option<Rect> {
+        self.entries
+            .get(index)
+            .and_then(Option::as_ref)
+            .filter(|entry| entry.text == item.text && entry.size == item.size)
+            .map(|entry| entry.layout.paint_bounds)
+    }
+
+    fn insert(&mut self, index: usize, item: &TextItem, layout: PreparedText) {
+        if index >= self.entries.len() {
+            self.entries.resize_with(index + 1, || None);
+        }
+        self.entries[index] = Some(TextCacheEntry {
+            text: item.text.clone(),
+            size: item.size,
+            layout,
+        });
+    }
+
+    fn get_mut(&mut self, index: usize) -> Option<&mut PreparedText> {
+        self.entries
+            .get_mut(index)
+            .and_then(Option::as_mut)
+            .map(|entry| &mut entry.layout)
+    }
 }
 
 impl Default for Renderer {
@@ -82,6 +186,7 @@ impl Renderer {
         Self {
             font_system: FontSystem::new(),
             cache: SwashCache::new(),
+            hint_cache: Vec::new(),
         }
     }
 
@@ -96,27 +201,70 @@ impl Renderer {
         overlay: &Overlay,
         damage: Option<Rect>,
     ) {
+        let mut cache = TextLayoutCache::default();
+        self.render_with_cache(
+            buf, width, height, scale, ann, overlay, damage, &mut cache, None,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn render_with_cache(
+        &mut self,
+        buf: &mut [u8],
+        width: u32,
+        height: u32,
+        scale: f32,
+        ann: &OutputAnnotations,
+        overlay: &Overlay,
+        damage: Option<Rect>,
+        text_cache: &mut TextLayoutCache,
+        skip_text: Option<usize>,
+    ) {
         let Some(mut pixmap) = PixmapMut::from_bytes(buf, width, height) else {
             return;
         };
-        for s in &ann.strokes {
+        text_cache.sync(ann.strokes.len(), ann.texts.len(), scale);
+        for (index, s) in ann.strokes.iter().enumerate() {
             // Strokes outside the damaged box already hold the right pixels in this buffer.
             if let Some(damage) = damage
-                && !s.bounds().is_some_and(|b| b.intersects(damage))
+                && !text_cache
+                    .stroke_bounds(index, s)
+                    .is_some_and(|b| b.intersects(damage))
             {
                 continue;
             }
             draw_stroke(&mut pixmap, s, scale);
         }
-        for t in &ann.texts {
-            // Text is culled by its conservative paint box, which `damage_box` has grown the
-            // damage box to contain, so a drawn item is always inside the region being swapped.
+        for (index, item) in ann.texts.iter().enumerate() {
+            if skip_text == Some(index) {
+                continue;
+            }
+            let cache_valid = text_cache.matches(index, item);
+            let bounds = if cache_valid {
+                text_cache.bounds(index)
+            } else {
+                Some(item.paint_bounds())
+            };
             if let Some(damage) = damage
-                && !t.paint_bounds().intersects(damage)
+                && !bounds.is_some_and(|bounds| bounds.intersects(damage))
             {
                 continue;
             }
-            self.draw_text(&mut pixmap, t, scale, None);
+            if !cache_valid {
+                let layout = self.prepare_text(&item.text, item, scale);
+                text_cache.insert(index, item, layout);
+            }
+            let Some(bounds) = text_cache.bounds(index) else {
+                continue;
+            };
+            if let Some(damage) = damage
+                && !bounds.intersects(damage)
+            {
+                continue;
+            }
+            if let Some(layout) = text_cache.get_mut(index) {
+                self.draw_prepared_text(&mut pixmap, item, scale, layout);
+            }
         }
         if let Some(s) = &overlay.stroke {
             draw_stroke(&mut pixmap, s, scale);
@@ -143,12 +291,7 @@ impl Renderer {
     /// meaning as secondary label text, with the active tool's keycap in the system accent.
     fn draw_hint(&mut self, pixmap: &mut PixmapMut, hint: &Hint, scale: f32) {
         let surface = pixmap.width() as f32 / scale;
-        // The descriptions are dropped first when the capsule would not fit: the keycaps
-        // alone still teach the shortcuts.
-        let Some(pill) = self
-            .hint_pill(hint, surface, true)
-            .or_else(|| self.hint_pill(hint, surface, false))
-        else {
+        let Some(pill) = self.cached_hint_pill(hint, surface, scale) else {
             return;
         };
         round_rect(
@@ -227,6 +370,29 @@ impl Renderer {
         }
     }
 
+    fn cached_hint_pill(&mut self, hint: &Hint, surface: f32, scale: f32) -> Option<HintPill> {
+        if let Some(cached) = self.hint_cache.iter().find(|cached| {
+            cached.hint == *hint && cached.surface == surface && cached.scale == scale
+        }) {
+            return Some(cached.pill.clone());
+        }
+        // The descriptions are dropped first when the capsule would not fit: the keycaps
+        // alone still teach the shortcuts.
+        let pill = self
+            .hint_pill(hint, surface, true)
+            .or_else(|| self.hint_pill(hint, surface, false))?;
+        if self.hint_cache.len() == HINT_CACHE_CAP {
+            self.hint_cache.remove(0);
+        }
+        self.hint_cache.push(CachedHint {
+            hint: *hint,
+            surface,
+            scale,
+            pill: pill.clone(),
+        });
+        Some(pill)
+    }
+
     /// Lay the capsule out from left to right, measuring each keycap and label. `None` when
     /// the result would not fit on the surface.
     fn hint_pill(&mut self, hint: &Hint, surface: f32, labels: bool) -> Option<HintPill> {
@@ -269,55 +435,62 @@ impl Renderer {
         buffer.layout_runs().map(|r| r.line_w).fold(0.0, f32::max)
     }
 
-    fn draw_text(
-        &mut self,
-        pixmap: &mut PixmapMut,
-        item: &TextItem,
-        scale: f32,
-        edit: Option<&TextOverlay>,
-    ) {
+    fn prepare_text(&mut self, text: &str, item: &TextItem, scale: f32) -> PreparedText {
         let size = item.size * scale;
         let mut buffer = Buffer::new_empty(Metrics::new(size, size * LINE_HEIGHT_SCALE));
-
-        let (committed, preedit) = match edit {
-            Some(e) => (e.buffer.text.as_str(), e.preedit.as_str()),
-            None => (item.text.as_str(), ""),
-        };
-        // Text uses explicit newlines only. The output clips long lines instead of wrapping
-        // them behind the damage calculator's back.
-        let display = if preedit.is_empty() {
-            Cow::Borrowed(committed)
-        } else {
-            Cow::Owned(format!("{committed}{preedit}"))
-        };
-        if display.is_empty() && edit.is_none() {
-            return;
-        }
-        buffer.set_text(display.as_ref(), &Attrs::new(), Shaping::Advanced, None);
+        buffer.set_size(None, None);
+        buffer.set_text(text, &Attrs::new(), Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut self.font_system, false);
 
-        // Pre-scan the layout for the preedit start, and for the caret box and baseline of the
-        // last line: the cursor is always at the end, so that is the line it is drawn on.
-        let (mut line_w, mut baseline) = (0.0f32, size * 0.8);
-        let (mut line_top, mut line_height) = (0.0f32, size * LINE_HEIGHT_SCALE);
-        let mut preedit_x0 = None;
+        let mut line_w = 0.0;
+        let mut baseline = size * 0.8;
+        let mut line_top = 0.0;
+        let mut line_height = size * LINE_HEIGHT_SCALE;
+        let mut max_right: f32 = 0.0;
+        let mut max_bottom: f32 = line_height;
         for run in buffer.layout_runs() {
             line_w = run.line_w;
             baseline = run.line_y;
             line_top = run.line_top;
             line_height = run.line_height;
-            for g in run.glyphs {
-                if g.start >= committed.len() && preedit_x0.is_none() {
-                    preedit_x0 = Some(g.x);
-                }
-            }
+            max_right = max_right.max(run.line_w);
+            max_bottom = max_bottom.max(run.line_top + run.line_height);
         }
+        let paint_bounds = Rect {
+            x: item.x,
+            y: item.y,
+            w: max_right / scale,
+            h: max_bottom / scale,
+        }
+        .grown(1.0);
+        PreparedText {
+            buffer,
+            paint_bounds,
+            line_w,
+            baseline,
+            line_top,
+            line_height,
+        }
+    }
 
+    pub(crate) fn text_edit_bounds(&mut self, text: &str, item: &TextItem, scale: f32) -> Rect {
+        self.prepare_text(text, item, scale)
+            .paint_bounds
+            .grown(CURSOR_WIDTH)
+    }
+
+    fn draw_prepared_text(
+        &mut self,
+        pixmap: &mut PixmapMut,
+        item: &TextItem,
+        scale: f32,
+        prepared: &mut PreparedText,
+    ) {
         let (ox, oy) = (item.x * scale, item.y * scale);
         let c = parse_hex(&item.color);
         let color = Color::rgba(c[0], c[1], c[2], c[3]);
         let (clip_w, clip_h) = (pixmap.width(), pixmap.height());
-        buffer.draw(
+        prepared.buffer.draw(
             &mut self.font_system,
             &mut self.cache,
             color,
@@ -334,15 +507,56 @@ impl Renderer {
                 )
             },
         );
+    }
+
+    fn draw_text(
+        &mut self,
+        pixmap: &mut PixmapMut,
+        item: &TextItem,
+        scale: f32,
+        edit: Option<&TextOverlay>,
+    ) {
+        let (committed, preedit) = match edit {
+            Some(e) => (e.buffer.text.as_str(), e.preedit.as_str()),
+            None => (item.text.as_str(), ""),
+        };
+        // Text uses explicit newlines only. The output clips long lines instead of wrapping
+        // them behind the damage calculator's back.
+        let display = if preedit.is_empty() {
+            Cow::Borrowed(committed)
+        } else {
+            Cow::Owned(format!("{committed}{preedit}"))
+        };
+        if display.is_empty() && edit.is_none() {
+            return;
+        }
+        let mut prepared = self.prepare_text(display.as_ref(), item, scale);
+        let mut preedit_x0 = None;
+        if !preedit.is_empty() {
+            for run in prepared.buffer.layout_runs() {
+                for glyph in run.glyphs {
+                    if glyph.start >= committed.len() && preedit_x0.is_none() {
+                        preedit_x0 = Some(glyph.x);
+                    }
+                }
+            }
+        }
+        self.draw_prepared_text(pixmap, item, scale, &mut prepared);
 
         if let Some(e) = edit {
+            let size = item.size * scale;
+            let color = {
+                let c = parse_hex(&item.color);
+                Color::rgba(c[0], c[1], c[2], c[3])
+            };
+            let (ox, oy) = (item.x * scale, item.y * scale);
             if !e.preedit.is_empty() {
-                let x0 = ox + preedit_x0.unwrap_or(line_w);
+                let x0 = ox + preedit_x0.unwrap_or(prepared.line_w);
                 fill(
                     pixmap,
                     x0,
-                    oy + baseline + size * 0.15,
-                    (ox + line_w - x0).max(0.0),
+                    oy + prepared.baseline + size * 0.15,
+                    (ox + prepared.line_w - x0).max(0.0),
                     UNDERLINE_HEIGHT * scale,
                     color,
                 );
@@ -352,10 +566,10 @@ impl Renderer {
             // a real glyph's baseline are not the same fraction).
             fill(
                 pixmap,
-                ox + line_w,
-                oy + line_top,
+                ox + prepared.line_w,
+                oy + prepared.line_top,
                 CURSOR_WIDTH * scale,
-                line_height,
+                prepared.line_height,
                 color,
             );
         }
@@ -455,20 +669,35 @@ pub fn buffer_format(formats: &[Format]) -> (Format, bool) {
 /// dense drawing, and then the frame costs nearly a whole-surface one. That is the honest
 /// price of redrawing that stroke where the box overlaps it.
 pub fn damage_box(ann: &OutputAnnotations, overlay: &Overlay, from: Rect, width: f32) -> Rect {
+    let mut cache = TextLayoutCache::default();
+    damage_box_with_cache(ann, overlay, from, width, 1.0, &mut cache)
+}
+
+pub(crate) fn damage_box_with_cache(
+    ann: &OutputAnnotations,
+    overlay: &Overlay,
+    from: Rect,
+    width: f32,
+    scale: f32,
+    cache: &mut TextLayoutCache,
+) -> Rect {
+    cache.sync(ann.strokes.len(), ann.texts.len(), scale);
     let mut damage = from;
     loop {
         let mut grown = damage;
-        for s in &ann.strokes {
-            if let Some(b) = s.bounds()
-                && b.intersects(grown)
+        for (index, stroke) in ann.strokes.iter().enumerate() {
+            if let Some(bounds) = cache.stroke_bounds(index, stroke)
+                && bounds.intersects(grown)
             {
-                grown = grown.union(b);
+                grown = grown.union(bounds);
             }
         }
-        for t in &ann.texts {
-            let b = t.paint_bounds();
-            if b.intersects(grown) {
-                grown = grown.union(b);
+        for (index, text) in ann.texts.iter().enumerate() {
+            let bounds = cache
+                .text_bounds(index, text)
+                .unwrap_or_else(|| text.paint_bounds());
+            if bounds.intersects(grown) {
+                grown = grown.union(bounds);
             }
         }
         if let Some(t) = &overlay.text {
@@ -535,6 +764,7 @@ enum Piece {
 }
 
 /// A laid-out hint capsule: where it sits and what to paint, in logical pixels.
+#[derive(Clone)]
 struct HintPill {
     x: f32,
     width: f32,
@@ -775,5 +1005,219 @@ fn parse_hex(s: &str) -> [u8; 4] {
         8 => [(v >> 24) as u8, (v >> 16) as u8, (v >> 8) as u8, v as u8],
         6 => [(v >> 16) as u8, (v >> 8) as u8, v as u8, 255],
         _ => [255, 255, 255, 255],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::canvas::TextBuffer;
+
+    fn text_item(text: &str) -> TextItem {
+        TextItem {
+            x: 10.0,
+            y: 10.0,
+            color: "#ffffff".into(),
+            size: 24.0,
+            text: text.into(),
+        }
+    }
+
+    fn render_cached(
+        renderer: &mut Renderer,
+        cache: &mut TextLayoutCache,
+        annotations: &OutputAnnotations,
+        buffer: &mut [u8],
+    ) {
+        renderer.render_with_cache(
+            buffer,
+            200,
+            100,
+            1.0,
+            annotations,
+            &Overlay::default(),
+            None,
+            cache,
+            None,
+        );
+    }
+
+    #[test]
+    fn warm_text_cache_matches_cold_text_cache() {
+        let mut renderer = Renderer::new();
+        let mut cache = TextLayoutCache::default();
+        let annotations = OutputAnnotations {
+            strokes: vec![],
+            texts: vec![text_item("cached text")],
+        };
+        let mut cold = vec![0; 200 * 100 * 4];
+        let mut warm = vec![0; 200 * 100 * 4];
+        render_cached(&mut renderer, &mut cache, &annotations, &mut cold);
+        render_cached(&mut renderer, &mut cache, &annotations, &mut warm);
+        assert_eq!(cold, warm);
+    }
+
+    #[test]
+    fn text_cache_notices_changed_text_without_external_invalidation() {
+        let mut renderer = Renderer::new();
+        let mut cache = TextLayoutCache::default();
+        let mut annotations = OutputAnnotations {
+            strokes: vec![],
+            texts: vec![text_item("before")],
+        };
+        let mut first = vec![0; 200 * 100 * 4];
+        render_cached(&mut renderer, &mut cache, &annotations, &mut first);
+        annotations.texts[0].text = "after".into();
+        let mut warm = vec![0; 200 * 100 * 4];
+        render_cached(&mut renderer, &mut cache, &annotations, &mut warm);
+        let mut cold = vec![0; 200 * 100 * 4];
+        let mut fresh_cache = TextLayoutCache::default();
+        render_cached(&mut renderer, &mut fresh_cache, &annotations, &mut cold);
+        assert_eq!(cold, warm);
+    }
+
+    #[test]
+    fn warm_hint_cache_matches_cold_hint_render() {
+        let mut renderer = Renderer::new();
+        let annotations = OutputAnnotations::default();
+        let overlay = Overlay {
+            hint: Some(Hint {
+                tool: "pen",
+                color: "#e01b24",
+                size: 3.0,
+            }),
+            ..Default::default()
+        };
+        let mut cold = vec![0; 640 * 120 * 4];
+        renderer.render(&mut cold, 640, 120, 1.0, &annotations, &overlay, None);
+        let mut warm = vec![0; 640 * 120 * 4];
+        renderer.render(&mut warm, 640, 120, 1.0, &annotations, &overlay, None);
+        assert_eq!(cold, warm);
+    }
+
+    #[test]
+    fn localized_new_text_uses_the_same_safe_damage_path() {
+        let mut renderer = Renderer::new();
+        let annotations = OutputAnnotations::default();
+        let item = text_item("new text");
+        let overlay = Overlay {
+            text: Some(TextOverlay {
+                item: item.clone(),
+                buffer: TextBuffer::new("new text"),
+                index: None,
+                preedit: String::new(),
+            }),
+            ..Default::default()
+        };
+        let bounds = renderer.text_edit_bounds("new text", &item, 1.0);
+        let mut expected = vec![0; 200 * 100 * 4];
+        renderer.render(&mut expected, 200, 100, 1.0, &annotations, &overlay, None);
+        let mut actual = vec![0; 200 * 100 * 4];
+        let mut cache = TextLayoutCache::default();
+        renderer.render_with_cache(
+            &mut actual,
+            200,
+            100,
+            1.0,
+            &annotations,
+            &overlay,
+            Some(bounds),
+            &mut cache,
+            None,
+        );
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn cached_damage_box_matches_uncached_damage_box() {
+        let annotations = OutputAnnotations {
+            strokes: vec![Stroke {
+                color: "#ffffff".into(),
+                width: 3.0,
+                points: vec![[20.0, 50.0], [180.0, 50.0]],
+            }],
+            texts: vec![text_item("cached text")],
+        };
+        let overlay = Overlay::default();
+        let from = Rect {
+            x: 100.0,
+            y: 48.0,
+            w: 4.0,
+            h: 4.0,
+        };
+        let expected = damage_box(&annotations, &overlay, from, 200.0);
+        let mut cache = TextLayoutCache::default();
+        let actual = damage_box_with_cache(&annotations, &overlay, from, 200.0, 1.0, &mut cache);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn localized_text_edit_skips_the_stale_document_text() {
+        let mut renderer = Renderer::new();
+        let old_document = OutputAnnotations {
+            strokes: vec![],
+            texts: vec![text_item("before")],
+        };
+        let mut new_document = old_document.clone();
+        new_document.texts[0].text = "after".into();
+        let edit = TextOverlay {
+            item: old_document.texts[0].clone(),
+            buffer: TextBuffer::new("after"),
+            index: Some(0),
+            preedit: String::new(),
+        };
+        let overlay = Overlay {
+            text: Some(edit),
+            ..Default::default()
+        };
+        let old_bounds = renderer.text_edit_bounds("before", &old_document.texts[0], 1.0);
+        let new_bounds = renderer.text_edit_bounds("after", &new_document.texts[0], 1.0);
+        let damage = old_bounds.union(new_bounds);
+
+        let mut old_frame = vec![0; 200 * 100 * 4];
+        renderer.render(
+            &mut old_frame,
+            200,
+            100,
+            1.0,
+            &old_document,
+            &Overlay::default(),
+            None,
+        );
+        let expected_overlay = Overlay {
+            text: Some(TextOverlay {
+                item: new_document.texts[0].clone(),
+                buffer: TextBuffer::new("after"),
+                index: None,
+                preedit: String::new(),
+            }),
+            ..Default::default()
+        };
+        let mut expected = vec![0; 200 * 100 * 4];
+        renderer.render(
+            &mut expected,
+            200,
+            100,
+            1.0,
+            &OutputAnnotations::default(),
+            &expected_overlay,
+            None,
+        );
+
+        let mut actual = old_frame;
+        DamageRegion::from_logical(damage, 1.0, 200, 100).clear(&mut actual, 200, 100);
+        let mut cache = TextLayoutCache::default();
+        renderer.render_with_cache(
+            &mut actual,
+            200,
+            100,
+            1.0,
+            &old_document,
+            &overlay,
+            Some(damage),
+            &mut cache,
+            Some(0),
+        );
+        assert_eq!(actual, expected);
     }
 }

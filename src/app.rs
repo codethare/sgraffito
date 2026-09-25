@@ -36,7 +36,9 @@ use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3::Z
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::ZwpTextInputV3;
 
 use crate::input::stepped_size;
-use crate::render::{DamageRegion, Renderer, buffer_format, damage_box, transient_bounds};
+use crate::render::{
+    DamageRegion, Renderer, TextLayoutCache, buffer_format, damage_box_with_cache, transient_bounds,
+};
 use crate::store::{self, Store};
 
 /// Built-in palette (`#rrggbb`).
@@ -122,11 +124,15 @@ pub struct Output {
     pub(crate) transient_dirty: bool,
     /// Transient overlay box as drawn in the previous frame; it has to be erased next time.
     last_transient: Option<Rect>,
+    /// A committed text edit can be localized only after its previous layout was measured.
+    pub(crate) text_dirty: bool,
+    last_text_bounds: Option<Rect>,
     /// Buffer index that holds the previous frame. A bounding-box damage is only valid on it.
     last_buffer: Option<usize>,
     buffers: Vec<Buffer>,
     buffer_size: (u32, u32),
     pub(crate) overlay: Overlay,
+    text_cache: TextLayoutCache,
 }
 
 impl Output {
@@ -313,6 +319,8 @@ impl App {
                 dirty: true,
                 transient_dirty: false,
                 last_transient: None,
+                text_dirty: false,
+                last_text_bounds: None,
                 last_buffer: None,
                 buffers: Vec::new(),
                 buffer_size: (0, 0),
@@ -320,6 +328,7 @@ impl App {
                     hint,
                     ..Default::default()
                 },
+                text_cache: TextLayoutCache::default(),
             },
         );
     }
@@ -431,6 +440,12 @@ impl App {
         }
     }
 
+    pub(crate) fn invalidate_text_caches(&mut self) {
+        for out in self.outputs.values_mut() {
+            out.text_cache.invalidate();
+        }
+    }
+
     /// Commit any in-progress strokes before a tool change or a new pointer gesture.
     pub(crate) fn commit_transient_strokes(&mut self) {
         let mut pending = Vec::new();
@@ -503,6 +518,8 @@ impl App {
                 continue;
             };
             out.overlay.eraser = None;
+            out.text_dirty = false;
+            out.last_text_bounds = None;
             // The caret disappears and the box may be committed: repaint this output whole.
             out.dirty = true;
             if edit.buffer.text.is_empty() {
@@ -519,6 +536,7 @@ impl App {
             changed = true;
         }
         if changed {
+            self.invalidate_text_caches();
             self.store.mark_dirty(Instant::now());
         }
         self.im_preedit = None;
@@ -562,6 +580,8 @@ impl App {
                 index,
                 preedit: String::new(),
             });
+            out.text_dirty = false;
+            out.last_text_bounds = None;
             out.dirty = true;
         }
         self.dirty = true;
@@ -595,6 +615,7 @@ impl App {
                 self.end_text_edit();
                 self.cancel_transients();
                 self.doc.outputs.clear();
+                self.invalidate_text_caches();
                 self.mark_all_dirty();
                 let _ = self.connection.flush();
                 match self.store.flush(&self.doc) {
@@ -644,6 +665,7 @@ impl App {
         if name_changed {
             // Finish under the old bucket before changing the name used by the document.
             self.end_text_edit();
+            self.invalidate_text_caches();
         }
         self.adopt_scale(&key, output_scale(info.as_ref()));
         let Some(out) = self.outputs.get_mut(&key) else {
@@ -680,6 +702,7 @@ impl App {
         }
         out.scale = scale;
         out.surface.set_buffer_scale(scale as i32);
+        out.text_cache.invalidate();
         out.buffers.clear();
         out.last_buffer = None;
         out.last_transient = None;
@@ -744,13 +767,48 @@ impl App {
         // What this frame has to touch. Painting a box is only valid on the buffer that holds
         // the previous frame: on any other buffer the pixels outside the box are older. If the
         // previous buffer is in flight we fell back to the other one, so redraw everything.
-        // An open text edit also forces a whole frame: its caret is not a transient box.
         let transient = transient_bounds(&out.overlay);
         let bucket = out.bucket(id);
         let empty = OutputAnnotations::default();
         let ann = self.doc.outputs.get(bucket.as_ref()).unwrap_or(&empty);
-        let damage = if out.dirty || out.last_buffer != Some(idx) || out.overlay.text.is_some() {
+        let current_text_bounds = out.overlay.text.as_ref().and_then(|edit| {
+            (edit.preedit.is_empty()).then(|| {
+                self.renderer
+                    .text_edit_bounds(&edit.buffer.text, &edit.item, scale)
+            })
+        });
+        let edit_index_valid = out
+            .overlay
+            .text
+            .as_ref()
+            .and_then(|edit| edit.index)
+            .is_none_or(|index| index < ann.texts.len());
+        let local_text = out.text_dirty
+            && !out.dirty
+            && out.last_buffer == Some(idx)
+            && out.last_text_bounds.is_some()
+            && current_text_bounds.is_some()
+            && edit_index_valid;
+        let text_damage = local_text.then(|| {
+            out.last_text_bounds
+                .unwrap()
+                .union(current_text_bounds.unwrap())
+        });
+        let text_needs_full = out.overlay.text.is_some() && out.text_dirty && !local_text;
+        let skip_text = local_text
+            .then(|| out.overlay.text.as_ref().and_then(|edit| edit.index))
+            .flatten();
+        let damage = if out.dirty || out.last_buffer != Some(idx) || text_needs_full {
             None
+        } else if let Some(text_damage) = text_damage {
+            Some(damage_box_with_cache(
+                ann,
+                &out.overlay,
+                text_damage,
+                w as f32,
+                scale,
+                &mut out.text_cache,
+            ))
         } else if out.transient_dirty {
             let transient = match (out.last_transient, transient) {
                 (Some(a), Some(b)) => a.union(b),
@@ -765,7 +823,14 @@ impl App {
             };
             // The box has to contain everything that will be drawn, because nothing may be
             // painted outside it: those bytes still hold the previous frame, already swapped.
-            Some(damage_box(ann, &out.overlay, transient, w as f32))
+            Some(damage_box_with_cache(
+                ann,
+                &out.overlay,
+                transient,
+                w as f32,
+                scale,
+                &mut out.text_cache,
+            ))
         } else {
             // Nothing changed for this output; another output is why the daemon redrew.
             return;
@@ -776,7 +841,9 @@ impl App {
         };
         out.dirty = false;
         out.transient_dirty = false;
+        out.text_dirty = false;
         out.last_transient = transient;
+        out.last_text_bounds = current_text_bounds;
         out.last_buffer = Some(idx);
 
         {
@@ -786,8 +853,17 @@ impl App {
             };
             // Buffers are reused, so clear to transparent or the previous frame shows through.
             region.clear(canvas, px.0, px.1);
-            self.renderer
-                .render(canvas, px.0, px.1, scale, ann, &out.overlay, damage);
+            self.renderer.render_with_cache(
+                canvas,
+                px.0,
+                px.1,
+                scale,
+                ann,
+                &out.overlay,
+                damage,
+                &mut out.text_cache,
+                skip_text,
+            );
             // Only the ARGB8888 fallback is B, G, R, A; Abgr8888 is already tiny-skia's order.
             if swap {
                 region.swap_rb(canvas, px.0, px.1);

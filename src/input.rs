@@ -381,8 +381,12 @@ impl App {
     fn mark_edit_dirty(&mut self) {
         self.dirty = true;
         for out in self.outputs.values_mut() {
-            if out.overlay.text.is_some() {
-                out.dirty = true;
+            if let Some(edit) = &out.overlay.text {
+                if edit.preedit.is_empty() {
+                    out.text_dirty = true;
+                } else {
+                    out.dirty = true;
+                }
             }
         }
     }
@@ -495,6 +499,7 @@ impl App {
             }
         }
         if committed {
+            self.invalidate_text_caches();
             self.store.mark_dirty(Instant::now());
         }
         // The committed stroke, the erased element or the vanished marker: repaint whole.
