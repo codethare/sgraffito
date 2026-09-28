@@ -17,104 +17,141 @@ use crate::canvas::{
 };
 /// Radius of the eraser marker circle, in logical pixels.
 const ERASER_MARKER_RADIUS: f32 = 8.0;
-/// The edit-mode toolbar: a capsule in the macOS HUD idiom, built around the 13 pt control size
-/// the HIG gives as the macOS default. All of it is logical pixels.
+/// The edit-mode toolbar: a vertical rail of square blocks against the left edge, in the macOS
+/// HUD idiom, built around the 13 pt control size the HIG gives as the macOS default. All of it
+/// is logical pixels.
 ///
-/// It hugs the left edge (the side measured fastest for toolbar targets) with its vertical
+/// The rail hugs the left edge (the side measured fastest for toolbar targets) with its vertical
 /// centre at the optical centre, roughly 5% above the geometric centre, where the gaze rests.
 const TOOLBAR_MARGIN: f32 = 8.0;
 const TOOLBAR_CENTRE: f32 = 0.45;
-const TOOLBAR_PAD: [f32; 2] = [12.0, 6.0];
-const TOOLBAR_HEIGHT: f32 = 34.0;
-/// A capsule is a rectangle whose corner radius is half its height.
-const TOOLBAR_RADIUS: f32 = TOOLBAR_HEIGHT / 2.0;
+/// Side of one block: the rail is a column of these.
+const TOOLBAR_BLOCK: f32 = 30.0;
+/// Between two blocks of the same group.
+const TOOLBAR_GAP: f32 = 4.0;
+/// Between two groups: the palette, the tools, the size control, `Esc`.
+const TOOLBAR_GROUP_GAP: f32 = 10.0;
+/// Around the whole column.
+const TOOLBAR_PAD: f32 = 6.0;
+const TOOLBAR_RADIUS: f32 = 8.0;
+/// How far the glyph and the meaning of a stretched block are kept apart.
+const TOOLBAR_LABEL_GAP: f32 = 8.0;
 const TOOLBAR_HAIRLINE: f32 = 1.0;
 const TOOLBAR_LABEL_SIZE: f32 = 13.0;
-const TOOLBAR_KEY_SIZE: f32 = 12.0;
-const TOOLBAR_KEY_MIN: f32 = 8.0;
-const TOOLBAR_KEY_PAD: f32 = 7.0;
-const TOOLBAR_KEY_HEIGHT: f32 = 22.0;
-const TOOLBAR_KEY_RADIUS: f32 = 6.0;
-const TOOLBAR_GAP: f32 = 12.0;
-const TOOLBAR_SWATCH: f32 = 16.0;
-const TOOLBAR_SWATCH_GAP: f32 = 6.0;
-/// How far a swatch's hit area reaches past the swatch itself.
-const TOOLBAR_SWATCH_PAD: f32 = 3.0;
-const TOOLBAR_SWATCH_RADIUS: f32 = 4.0;
-/// Widest toolbar the damage accounting reserves room for. The drawn width depends on the font
-/// and on which meanings fit, so `damage_box` reserves this strip instead of the measured pill:
-/// a full-width strip unioned with a grown drawing box would cover nearly the whole surface and
-/// the fast path would disappear. The strip only joins a damage box that reaches it.
-const TOOLBAR_RESERVE: f32 = 1024.0;
+const TOOLBAR_KEY_SIZE: f32 = 14.0;
+/// Widest stretched block the damage accounting reserves room for, and the ceiling a label has
+/// to fit: the width of a block depends on the font, so `damage_box` reserves this strip instead
+/// of the drawn rail. The strip only joins a damage box that reaches it.
+const TOOLBAR_RESERVE: f32 = 224.0;
+/// Height of the whole column: twelve blocks, eight gaps inside the groups and three between
+/// them, all fixed, so the column's height never depends on the font, unlike the width a
+/// stretched block takes.
+const TOOLBAR_COLUMN: f32 =
+    2.0 * TOOLBAR_PAD + 12.0 * TOOLBAR_BLOCK + 8.0 * TOOLBAR_GAP + 3.0 * TOOLBAR_GROUP_GAP;
 const TOOLBAR_CACHE_CAP: usize = 16;
-/// `#rrggbbaa`. The pill fill stands in for a HUD material: a `wl_shm` layer surface cannot be
+/// `#rrggbbaa`. The block fill stands in for a HUD material: a `wl_shm` layer surface cannot be
 /// blurred, so there is translucency but no real vibrancy.
-const TOOLBAR_PILL_FILL: &str = "#1c1c1ec7";
-const TOOLBAR_PILL_EDGE: &str = "#ffffff1f";
-const TOOLBAR_KEY_FILL: &str = "#ffffff26";
-const TOOLBAR_KEY_EDGE: &str = "#ffffff2e";
-/// macOS system accent, used for the active tool's keycap and the active colour's ring.
+const TOOLBAR_BLOCK_FILL: &str = "#1c1c1ec7";
+const TOOLBAR_BLOCK_EDGE: &str = "#ffffff26";
+/// macOS system accent, used for the armed tool's block and the active colour's ring.
 const TOOLBAR_ACCENT: &str = "#0a84ffff";
 const TOOLBAR_KEY_TEXT: &str = "#ffffffee";
 const TOOLBAR_LABEL_TEXT: &str = "#ebebf59e";
-const TOOLBAR_LABEL_ACTIVE: &str = "#fffffff2";
 const TOOLBAR_SWATCH_EDGE: &str = "#ffffff4d";
 const UNDERLINE_HEIGHT: f32 = 1.5;
 const CURSOR_WIDTH: f32 = 2.0;
 const LINE_HEIGHT_SCALE: f32 = 1.2;
 
-/// One control of the toolbar, in the order it is drawn, after the palette row.
-enum Entry {
-    /// A keycap with its meaning, and what clicking the pair does.
-    Key {
-        glyph: &'static str,
-        label: String,
-        active: bool,
-        action: ToolbarAction,
-    },
-    /// A bare value between two keycaps, drawn even when the meanings are dropped, so the
-    /// active size stays readable on a narrow output.
-    Value(String),
+/// One block of the rail: what it shows when the pointer is elsewhere, what it says when the
+/// pointer is on it, and what clicking it does.
+#[derive(Clone)]
+struct Block {
+    /// What the square shows while it is not stretched: a key, or the size as a number. A colour
+    /// swatch has no glyph; its block is the colour.
+    glyph: String,
+    /// What the stretched block says: what the control does.
+    label: String,
+    /// `None` for the size readout between `[` and `]`: drawn, but the neighbouring block owns
+    /// the presses on its row.
+    action: Option<ToolbarAction>,
+    /// The armed tool's block, or the active colour's swatch: drawn with the accent.
+    active: bool,
+    /// Palette index when the block is a colour swatch.
+    swatch: Option<usize>,
+    /// Gap under the block, in column coordinates.
+    gap: f32,
 }
 
-/// The controls of the toolbar. Every keycap carries the key that does the same thing when
-/// tapped; `Esc` is the only two-stage one.
-fn toolbar_entries(toolbar: &Toolbar) -> Vec<Entry> {
-    let size_name = if toolbar.tool == Tool::Text {
+/// The blocks of the rail, top to bottom: the palette, the tools, the size control and `Esc`.
+fn toolbar_blocks(toolbar: &Toolbar) -> Vec<Block> {
+    let axis = if toolbar.tool == Tool::Text {
         "size"
     } else {
         "width"
     };
-    let key = |glyph: &'static str, label: &str, tool: Tool| Entry::Key {
-        glyph,
-        label: label.into(),
-        active: toolbar.tool == tool,
-        action: ToolbarAction::Tool(tool),
-    };
-    vec![
-        key("P", "pen", Tool::Pen),
-        key("E", "eraser", Tool::Eraser),
-        key("T", "text: click to place", Tool::Text),
-        Entry::Key {
-            glyph: "[",
-            label: String::new(),
-            active: false,
-            action: ToolbarAction::SizeStep(-1.0),
-        },
-        Entry::Value(format!("{size_name} {:.0}", toolbar.size)),
-        Entry::Key {
-            glyph: "]",
-            label: String::new(),
-            active: false,
-            action: ToolbarAction::SizeStep(1.0),
-        },
-        Entry::Key {
-            glyph: "Esc",
-            label: "end text, again locks".into(),
-            active: false,
-            action: ToolbarAction::Lock,
-        },
-    ]
+    let mut blocks: Vec<Block> = PALETTE
+        .iter()
+        .enumerate()
+        .map(|(index, color)| Block {
+            glyph: String::new(),
+            label: format!("colour {}", index + 1),
+            action: Some(ToolbarAction::Color(index)),
+            active: *color == toolbar.color,
+            swatch: Some(index),
+            gap: TOOLBAR_GAP,
+        })
+        .collect();
+    blocks[PALETTE.len() - 1].gap = TOOLBAR_GROUP_GAP;
+    for (tool, glyph, label) in [
+        (Tool::Pen, "P", "pen"),
+        (Tool::Eraser, "E", "eraser"),
+        (Tool::Text, "T", "text: click to place"),
+    ] {
+        blocks.push(Block {
+            glyph: glyph.into(),
+            label: label.into(),
+            action: Some(ToolbarAction::Tool(tool)),
+            active: toolbar.tool == tool,
+            swatch: None,
+            gap: TOOLBAR_GAP,
+        });
+    }
+    let last = blocks.len() - 1;
+    blocks[last].gap = TOOLBAR_GROUP_GAP;
+    blocks.push(Block {
+        glyph: "[".into(),
+        label: format!("{axis} -"),
+        action: Some(ToolbarAction::SizeStep(-1.0)),
+        active: false,
+        swatch: None,
+        gap: TOOLBAR_GAP,
+    });
+    blocks.push(Block {
+        glyph: format!("{:.0}", toolbar.size),
+        // Drawn, but no action owns it, so it never stretches to say anything.
+        label: String::new(),
+        action: None,
+        active: false,
+        swatch: None,
+        gap: TOOLBAR_GAP,
+    });
+    blocks.push(Block {
+        glyph: "]".into(),
+        label: format!("{axis} +"),
+        action: Some(ToolbarAction::SizeStep(1.0)),
+        active: false,
+        swatch: None,
+        gap: TOOLBAR_GROUP_GAP,
+    });
+    blocks.push(Block {
+        glyph: "Esc".into(),
+        label: "end text, again locks".into(),
+        action: Some(ToolbarAction::Lock),
+        active: false,
+        swatch: None,
+        gap: 0.0,
+    });
+    blocks
 }
 
 pub struct Renderer {
@@ -340,103 +377,105 @@ impl Renderer {
         }
     }
 
-    /// The edit-mode toolbar. macOS idiom: a capsule, controls drawn as palette swatches and
-    /// keycaps with their meaning as secondary label text, the active colour ringed and the
-    /// active tool's keycap in the system accent. Every control is also a target: the hit
-    /// rectangles the press path asks for are laid out with the pieces drawn here.
+    /// The edit-mode toolbar. macOS idiom: a rail of translucent blocks, the armed tool's block
+    /// and the active colour's swatch in the system accent. The block under the pointer stretches
+    /// into a capsule that says what it does; every block is also a target, so the rectangles the
+    /// press path asks for are laid out with the blocks drawn here.
     fn draw_toolbar(&mut self, pixmap: &mut PixmapMut, toolbar: &Toolbar, scale: f32) {
-        let surface = pixmap.width() as f32 / scale;
-        let Some(pill) = self.cached_toolbar_pill(toolbar, surface) else {
+        let Some(pill) = self.cached_toolbar_pill(toolbar, pixmap.width() as f32 / scale) else {
             return;
         };
         let (ox, oy) = toolbar_origin(pixmap.height() as f32 / scale);
-        round_rect(
-            pixmap,
-            Rect {
+        for control in &pill.controls {
+            let block = Rect {
                 x: ox * scale,
-                y: oy * scale,
-                w: pill.width * scale,
-                h: TOOLBAR_HEIGHT * scale,
-            },
-            TOOLBAR_RADIUS * scale,
-            parse_hex(TOOLBAR_PILL_FILL),
-            Some((parse_hex(TOOLBAR_PILL_EDGE), TOOLBAR_HAIRLINE * scale)),
-        );
-        for (piece, x, w) in &pill.pieces {
-            let x = ox + x;
-            match piece {
-                Piece::Swatch(index, active) => round_rect(
+                y: (oy + control.y) * scale,
+                w: control.width * scale,
+                h: TOOLBAR_BLOCK * scale,
+            };
+            // A stretched block is a capsule; a square block is a rounded square.
+            let radius = if control.stretched {
+                TOOLBAR_BLOCK / 2.0
+            } else {
+                TOOLBAR_RADIUS
+            } * scale;
+            if let Some(index) = control.block.swatch {
+                // The colour chip keeps its place; the capsule unfurls around it.
+                if control.stretched {
+                    round_rect(
+                        pixmap,
+                        block,
+                        radius,
+                        parse_hex(TOOLBAR_BLOCK_FILL),
+                        Some((parse_hex(TOOLBAR_BLOCK_EDGE), TOOLBAR_HAIRLINE * scale)),
+                    );
+                }
+                round_rect(
                     pixmap,
                     Rect {
-                        x: x * scale,
-                        y: (oy + (TOOLBAR_HEIGHT - TOOLBAR_SWATCH) / 2.0) * scale,
-                        w: TOOLBAR_SWATCH * scale,
-                        h: TOOLBAR_SWATCH * scale,
+                        y: block.y,
+                        x: block.x,
+                        w: TOOLBAR_BLOCK * scale,
+                        h: TOOLBAR_BLOCK * scale,
                     },
-                    TOOLBAR_SWATCH_RADIUS * scale,
-                    parse_hex(PALETTE[*index]),
+                    TOOLBAR_RADIUS * scale,
+                    parse_hex(PALETTE[index]),
                     Some((
-                        parse_hex(if *active {
+                        parse_hex(if control.block.active {
                             TOOLBAR_ACCENT
                         } else {
                             TOOLBAR_SWATCH_EDGE
                         }),
-                        if *active { 2.0 } else { TOOLBAR_HAIRLINE } * scale,
-                    )),
-                ),
-                Piece::Key(text, active) => {
-                    let top = oy + (TOOLBAR_HEIGHT - TOOLBAR_KEY_HEIGHT) / 2.0;
-                    let (fill, edge) = if *active {
-                        (TOOLBAR_ACCENT, TOOLBAR_ACCENT)
-                    } else {
-                        (TOOLBAR_KEY_FILL, TOOLBAR_KEY_EDGE)
-                    };
-                    round_rect(
-                        pixmap,
-                        Rect {
-                            x: x * scale,
-                            y: top * scale,
-                            w: w * scale,
-                            h: TOOLBAR_KEY_HEIGHT * scale,
-                        },
-                        TOOLBAR_KEY_RADIUS * scale,
-                        parse_hex(fill),
-                        Some((parse_hex(edge), TOOLBAR_HAIRLINE * scale)),
-                    );
-                    // Centre the glyph in its keycap.
-                    let glyph = self.text_width(text, TOOLBAR_KEY_SIZE);
-                    let item = toolbar_text(
-                        x + (w - glyph) / 2.0,
-                        top,
-                        TOOLBAR_KEY_HEIGHT,
-                        TOOLBAR_KEY_SIZE,
-                        TOOLBAR_KEY_TEXT,
-                        text,
-                    );
-                    self.draw_text(pixmap, &item, scale, None);
-                }
-                Piece::Label(text, active) => {
-                    let item = toolbar_text(
-                        x,
-                        oy,
-                        TOOLBAR_HEIGHT,
-                        TOOLBAR_LABEL_SIZE,
-                        if *active {
-                            TOOLBAR_LABEL_ACTIVE
+                        if control.block.active {
+                            2.0
                         } else {
-                            TOOLBAR_LABEL_TEXT
-                        },
-                        text,
-                    );
-                    self.draw_text(pixmap, &item, scale, None);
-                }
+                            TOOLBAR_HAIRLINE
+                        } * scale,
+                    )),
+                );
+            } else {
+                let (fill, edge) = if control.block.active {
+                    (TOOLBAR_ACCENT, TOOLBAR_ACCENT)
+                } else {
+                    (TOOLBAR_BLOCK_FILL, TOOLBAR_BLOCK_EDGE)
+                };
+                round_rect(
+                    pixmap,
+                    block,
+                    radius,
+                    parse_hex(fill),
+                    Some((parse_hex(edge), TOOLBAR_HAIRLINE * scale)),
+                );
+                // The glyph stays where it is and the capsule grows to its right, so the block
+                // reads as the same square, stretched.
+                let glyph = self.text_width(&control.block.glyph, TOOLBAR_KEY_SIZE);
+                let item = toolbar_text(
+                    ox + (TOOLBAR_BLOCK - glyph) / 2.0,
+                    oy + control.y,
+                    TOOLBAR_BLOCK,
+                    TOOLBAR_KEY_SIZE,
+                    TOOLBAR_KEY_TEXT,
+                    &control.block.glyph,
+                );
+                self.draw_text(pixmap, &item, scale, None);
+            }
+            if control.stretched {
+                let item = toolbar_text(
+                    ox + TOOLBAR_BLOCK + TOOLBAR_LABEL_GAP,
+                    oy + control.y,
+                    TOOLBAR_BLOCK,
+                    TOOLBAR_LABEL_SIZE,
+                    TOOLBAR_LABEL_TEXT,
+                    &control.block.label,
+                );
+                self.draw_text(pixmap, &item, scale, None);
             }
         }
     }
 
-    /// The toolbar control under a pointer position, in logical pixels, or `None` outside it.
-    /// The layout is the one the frame draws, so a control's hit rectangle is the rectangle it
-    /// paints.
+    /// The toolbar block under a pointer position, in logical pixels, or `None` outside the rail.
+    /// The layout is the one the frame drew, so a block's rectangle is the rectangle it paints --
+    /// including the capsule a stretched block has become.
     pub fn toolbar_hit(
         &mut self,
         toolbar: &Toolbar,
@@ -446,14 +485,19 @@ impl Renderer {
         y: f32,
     ) -> Option<ToolbarAction> {
         let (ox, oy) = toolbar_origin(height);
-        if y < oy || y >= oy + TOOLBAR_HEIGHT {
+        let (column_x, column_y) = (x - ox, y - oy);
+        if column_x < 0.0 || column_y < 0.0 || column_y >= TOOLBAR_COLUMN {
             return None;
         }
-        let column = x - ox;
         let pill = self.cached_toolbar_pill(toolbar, width)?;
         pill.hits
             .iter()
-            .find(|(hit, _)| column >= hit.x && column < hit.x + hit.w)
+            .find(|(hit, _)| {
+                column_x >= hit.x
+                    && column_x < hit.x + hit.w
+                    && column_y >= hit.y
+                    && column_y < hit.y + hit.h
+            })
             .map(|(_, action)| *action)
     }
 
@@ -465,11 +509,7 @@ impl Renderer {
         {
             return Some(cached.pill.clone());
         }
-        // The meanings are dropped first when the toolbar would not fit: the swatches and the
-        // keycaps alone still teach the shortcuts.
-        let pill = self
-            .toolbar_pill(toolbar, surface, true)
-            .or_else(|| self.toolbar_pill(toolbar, surface, false))?;
+        let pill = self.toolbar_pill(toolbar, surface);
         if self.toolbar_cache.len() == TOOLBAR_CACHE_CAP {
             self.toolbar_cache.remove(0);
         }
@@ -481,122 +521,58 @@ impl Renderer {
         Some(pill)
     }
 
-    /// Lay the toolbar out from left to right, measuring each keycap and label. `None` when the
-    /// result would not fit on the surface.
-    fn toolbar_pill(
-        &mut self,
-        toolbar: &Toolbar,
-        surface: f32,
-        labels: bool,
-    ) -> Option<ToolbarPill> {
-        let mut pieces = Vec::new();
+    /// Lay the rail out top to bottom. Only the block under the pointer is measured: every other
+    /// block is a square, and a block only stretches when its meaning fits the room the damage
+    /// accounting reserves for the rail.
+    fn toolbar_pill(&mut self, toolbar: &Toolbar, surface: f32) -> ToolbarPill {
+        let ceiling = (surface - 2.0 * TOOLBAR_MARGIN).min(TOOLBAR_RESERVE);
+        let mut controls = Vec::new();
         let mut hits = Vec::new();
-        let mut x = TOOLBAR_PAD[0];
-        // The palette is a row of targets; the keycap and its meaning stay in front of it, so
-        // the digit shortcuts are still taught. That first hit rectangle reaches back over them,
-        // because a press anywhere in the capsule belongs to a control (see below).
-        x = self.push_keycap(&mut pieces, x, "1-5", false);
-        if labels {
-            x += TOOLBAR_GAP;
-            let label_w = self.text_width("colour", TOOLBAR_LABEL_SIZE);
-            pieces.push((Piece::Label("colour".into(), false), x, label_w));
-            x += label_w;
-        }
-        x += TOOLBAR_GAP;
-        // One target per palette colour, and the swatches sit closer together than the control
-        // groups do.
-        for (index, color) in PALETTE.iter().enumerate() {
-            pieces.push((
-                Piece::Swatch(index, *color == toolbar.color),
-                x,
-                TOOLBAR_SWATCH,
-            ));
-            hits.push((
-                Rect {
-                    x: x - TOOLBAR_SWATCH_PAD,
-                    y: 0.0,
-                    w: TOOLBAR_SWATCH + 2.0 * TOOLBAR_SWATCH_PAD,
-                    h: TOOLBAR_HEIGHT,
-                },
-                ToolbarAction::Color(index),
-            ));
-            x += TOOLBAR_SWATCH + TOOLBAR_SWATCH_GAP;
-        }
-        x += TOOLBAR_GAP - TOOLBAR_SWATCH_GAP;
-        for entry in toolbar_entries(toolbar) {
-            match entry {
-                Entry::Key {
-                    glyph,
-                    label,
-                    active,
+        let mut y = TOOLBAR_PAD;
+        for block in toolbar_blocks(toolbar) {
+            let gap = block.gap;
+            let hovered = block.action.is_some() && block.action == toolbar.hover;
+            let label = hovered.then(|| self.text_width(&block.label, TOOLBAR_LABEL_SIZE));
+            let width = match label {
+                Some(label) if TOOLBAR_BLOCK + TOOLBAR_LABEL_GAP + label <= ceiling => {
+                    TOOLBAR_BLOCK + TOOLBAR_LABEL_GAP + label
+                }
+                _ => TOOLBAR_BLOCK,
+            };
+            if let Some(action) = block.action {
+                hits.push((
+                    Rect {
+                        x: 0.0,
+                        y,
+                        w: width,
+                        h: TOOLBAR_BLOCK,
+                    },
                     action,
-                } => {
-                    let start = x;
-                    x = self.push_keycap(&mut pieces, x, glyph, active);
-                    if labels && !label.is_empty() {
-                        x += TOOLBAR_GAP;
-                        let label_w = self.text_width(&label, TOOLBAR_LABEL_SIZE);
-                        pieces.push((Piece::Label(label, active), x, label_w));
-                        x += label_w;
-                    }
-                    hits.push((
-                        Rect {
-                            x: start,
-                            y: 0.0,
-                            w: x - start,
-                            h: TOOLBAR_HEIGHT,
-                        },
-                        action,
-                    ));
-                }
-                Entry::Value(text) => {
-                    let value_w = self.text_width(&text, TOOLBAR_LABEL_SIZE);
-                    pieces.push((Piece::Label(text, false), x, value_w));
-                    x += value_w;
-                }
+                ));
             }
-            x += TOOLBAR_GAP;
+            controls.push(Control {
+                block,
+                y,
+                width,
+                stretched: width > TOOLBAR_BLOCK,
+            });
+            y += TOOLBAR_BLOCK + gap;
         }
-        // Every control leaves its trailing gap, including the last one.
-        let width = x - TOOLBAR_GAP + TOOLBAR_PAD[0];
-        let available = (surface - 2.0 * TOOLBAR_MARGIN).min(TOOLBAR_RESERVE);
-        if width > available {
-            return None;
-        }
-        // The toolbar consumes every press inside it: the padding at either end and the gaps
-        // between two controls belong to a neighbour rather than starting a stroke under the
-        // capsule. The palette is laid out first, so the rects are already in order.
+        debug_assert_eq!(y + TOOLBAR_PAD, TOOLBAR_COLUMN);
+        // The rail consumes every press on a block, and the rows between blocks belong to a
+        // neighbour as well: a press on the size readout or in a gap has to step something
+        // rather than start a stroke under the rail.
         if let Some((first, _)) = hits.first_mut() {
-            first.w += first.x;
-            first.x = 0.0;
+            first.h += first.y;
+            first.y = 0.0;
         }
         for index in 0..hits.len().saturating_sub(1) {
-            hits[index].0.w = hits[index + 1].0.x - hits[index].0.x;
+            hits[index].0.h = hits[index + 1].0.y - hits[index].0.y;
         }
         if let Some((last, _)) = hits.last_mut() {
-            last.w = width - last.x;
+            last.h = TOOLBAR_COLUMN - last.y;
         }
-        Some(ToolbarPill {
-            width,
-            pieces,
-            hits,
-        })
-    }
-
-    /// Append a keycap and return the x after it.
-    fn push_keycap(
-        &mut self,
-        pieces: &mut Vec<(Piece, f32, f32)>,
-        x: f32,
-        glyph: &'static str,
-        active: bool,
-    ) -> f32 {
-        let width = self
-            .text_width(glyph, TOOLBAR_KEY_SIZE)
-            .max(TOOLBAR_KEY_MIN)
-            + 2.0 * TOOLBAR_KEY_PAD;
-        pieces.push((Piece::Key(glyph, active), x, width));
-        x + width
+        ToolbarPill { controls, hits }
     }
 
     /// Width of one line of text, in logical pixels. The shaped buffer is thrown away: the
@@ -923,23 +899,22 @@ pub fn transient_bounds(overlay: &Overlay) -> Option<Rect> {
     }
 }
 
-/// One laid-out element of the toolbar.
+/// One block of the rail as laid out: where it sits in the column, how wide it is drawn, and
+/// whether the pointer stretched it into a capsule.
 #[derive(Clone)]
-enum Piece {
-    /// A palette swatch: its palette index and whether it is the active colour.
-    Swatch(usize, bool),
-    /// A keycap: the glyph and whether it is the active tool's key.
-    Key(&'static str, bool),
-    /// The meaning of the keycap before it.
-    Label(String, bool),
+struct Control {
+    block: Block,
+    /// Top of the block, in column coordinates.
+    y: f32,
+    width: f32,
+    stretched: bool,
 }
 
-/// A laid-out toolbar: what to paint and what to hit, in logical pixels relative to the
-/// toolbar's own origin.
+/// A laid-out rail: what to paint and what to hit, in logical pixels relative to the rail's own
+/// origin at its top-left corner.
 #[derive(Clone)]
 struct ToolbarPill {
-    width: f32,
-    pieces: Vec<(Piece, f32, f32)>,
+    controls: Vec<Control>,
     hits: Vec<(Rect, ToolbarAction)>,
 }
 
@@ -954,27 +929,28 @@ fn toolbar_text(x: f32, top: f32, height: f32, size: f32, color: &str, text: &st
     }
 }
 
-/// Where the toolbar sits on an output of this logical height: `TOOLBAR_MARGIN` from the left
-/// edge, its vertical centre at the optical centre.
+/// Where the rail sits on an output of this logical height: `TOOLBAR_MARGIN` from the left edge,
+/// its vertical centre at the optical centre. Short outputs keep the top margin rather than
+/// pushing the rail off the screen.
 fn toolbar_origin(height: f32) -> (f32, f32) {
     (
         TOOLBAR_MARGIN,
-        height * TOOLBAR_CENTRE - TOOLBAR_HEIGHT / 2.0,
+        (height * TOOLBAR_CENTRE - TOOLBAR_COLUMN / 2.0).max(TOOLBAR_MARGIN),
     )
 }
 
-/// Everything the toolbar paints. The drawn width depends on the font, so the damage
-/// accounting reserves the widest toolbar `toolbar_pill` will build, as a strip on the left of
-/// the output; the strip only joins a damage box that reaches it.
+/// Everything the rail paints. A stretched block's width depends on the font, so the damage
+/// accounting reserves the widest block `toolbar_pill` will build, as a strip on the left of the
+/// output; the strip only joins a damage box that reaches it.
 pub fn toolbar_bounds(width: f32, height: f32) -> Rect {
     let (x, y) = toolbar_origin(height);
     Rect {
         // The hairline edge is stroked around the path, so it reaches one logical pixel past
-        // the capsule itself.
+        // the block itself.
         x: x - TOOLBAR_HAIRLINE,
         y: y - TOOLBAR_HAIRLINE,
         w: (width - 2.0 * TOOLBAR_MARGIN).clamp(0.0, TOOLBAR_RESERVE) + 2.0 * TOOLBAR_HAIRLINE,
-        h: TOOLBAR_HEIGHT + 2.0 * TOOLBAR_HAIRLINE,
+        h: TOOLBAR_COLUMN + 2.0 * TOOLBAR_HAIRLINE,
     }
 }
 
@@ -1269,6 +1245,7 @@ mod tests {
                 tool: Tool::Pen,
                 color: "#e01b24",
                 size: 3.0,
+                hover: None,
             }),
             ..Default::default()
         };

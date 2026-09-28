@@ -43,7 +43,8 @@ use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::ZwpTextIn
 
 use crate::input::stepped_size;
 use crate::render::{
-    DamageRegion, Renderer, TextLayoutCache, buffer_format, damage_box_with_cache, transient_bounds,
+    DamageRegion, Renderer, TextLayoutCache, buffer_format, damage_box_with_cache, toolbar_bounds,
+    transient_bounds,
 };
 use crate::store::{self, Store};
 
@@ -119,6 +120,9 @@ pub struct Output {
     pub(crate) dirty: bool,
     /// Only the transient overlay moved, so the next frame can damage just its box.
     pub(crate) transient_dirty: bool,
+    /// Only the toolbar moved (the pointer crossed onto another block), so the next frame can
+    /// damage just the rail's box.
+    pub(crate) toolbar_dirty: bool,
     /// Transient overlay box as drawn in the previous frame; it has to be erased next time.
     last_transient: Option<Rect>,
     /// A committed text edit can be localized only after its previous layout was measured.
@@ -190,6 +194,9 @@ pub struct App {
     /// Serial of the latest `wl_pointer.enter`; `set_shape` is ignored without it.
     pub(crate) cursor_serial: Option<u32>,
     pub(crate) pointer_over_toolbar: bool,
+    /// The block of the edit-mode toolbar the pointer is on, if any: it stretches to say what it
+    /// does.
+    pub(crate) toolbar_hover: Option<ToolbarAction>,
 }
 
 impl App {
@@ -243,6 +250,7 @@ impl App {
             cursor_device: None,
             cursor_serial: None,
             pointer_over_toolbar: false,
+            toolbar_hover: None,
         };
         app.bind_text_input_manager();
         app.bind_cursor_shape();
@@ -328,6 +336,7 @@ impl App {
                 configured: false,
                 dirty: true,
                 transient_dirty: false,
+                toolbar_dirty: false,
                 last_transient: None,
                 text_dirty: false,
                 last_text_bounds: None,
@@ -355,6 +364,7 @@ impl App {
         self.cancel_transients();
         self.keyboard_focus = None;
         self.pointer_over_toolbar = false;
+        self.toolbar_hover = None;
         self.sync_text_input();
         self.mode = mode;
         let keys: Vec<u32> = self.outputs.keys().copied().collect();
@@ -387,6 +397,7 @@ impl App {
                 tool: self.tool,
                 color: PALETTE[self.color_idx],
                 size: self.active_size(),
+                hover: self.toolbar_hover,
             }),
         }
     }
@@ -426,12 +437,24 @@ impl App {
     }
 
     /// Push the current toolbar into every output's transient overlay. Called when the mode,
-    /// the tool or the colour changes.
+    /// the tool or the colour changes, so the frame is a whole-surface one.
     fn refresh_toolbar(&mut self) {
         let toolbar = self.current_toolbar();
         for out in self.outputs.values_mut() {
             out.overlay.toolbar = toolbar;
             out.dirty = true;
+        }
+        self.dirty = true;
+    }
+
+    /// The pointer crossed onto another block, so the rail stretches a different one. Only the
+    /// rail's own box changed, and it is fixed while editing, so the frame can damage just that
+    /// box instead of the whole surface.
+    pub(crate) fn refresh_toolbar_hover(&mut self) {
+        let toolbar = self.current_toolbar();
+        for out in self.outputs.values_mut() {
+            out.overlay.toolbar = toolbar;
+            out.toolbar_dirty = true;
         }
         self.dirty = true;
     }
@@ -868,7 +891,7 @@ impl App {
                 scale,
                 &mut out.text_cache,
             ))
-        } else if out.transient_dirty {
+        } else if out.transient_dirty || out.toolbar_dirty {
             let transient = match (out.last_transient, transient) {
                 (Some(a), Some(b)) => a.union(b),
                 (Some(a), None) => a,
@@ -880,12 +903,19 @@ impl App {
                     h: 0.0,
                 },
             };
+            // The rail's box is fixed while editing, so the previous and the current frame agree
+            // on it and there is nothing to remember between frames.
+            let changed = if out.toolbar_dirty {
+                transient.union(toolbar_bounds(w as f32, h as f32))
+            } else {
+                transient
+            };
             // The box has to contain everything that will be drawn, because nothing may be
             // painted outside it: those bytes still hold the previous frame, already swapped.
             Some(damage_box_with_cache(
                 ann,
                 &out.overlay,
-                transient,
+                changed,
                 w as f32,
                 h as f32,
                 scale,
@@ -901,6 +931,7 @@ impl App {
         };
         out.dirty = false;
         out.transient_dirty = false;
+        out.toolbar_dirty = false;
         out.text_dirty = false;
         out.last_transient = transient;
         out.last_text_bounds = current_text_bounds;

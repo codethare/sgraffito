@@ -109,9 +109,9 @@ grep -q "wp_cursor_shape_v1 available" "$work/daemon.log" \
     || fail "the pointer shape protocol was not bound"
 echo "  pointer shape protocol ok"
 
-# 2c. while editing, the toolbar renders against the left edge at the optical centre and the
-# top strip stays clear. The seeded stroke sits at y=300 on this 600-tall output, so the band
-# sits above it and can only be the toolbar.
+# 2c. while editing, the toolbar is a vertical rail on the left edge: it paints two separated
+# bands of the left strip, and the top strip (where a horizontal bar used to sit) stays clear.
+# The seeded annotations start at x=100, so the strip x<60 can only hold the rail.
 "$bin" edit > /dev/null || fail "edit failed"
 sleep 0.5
 grim -o HEADLESS-1 -t ppm "$work/toolbar.ppm" 2>/dev/null || fail "grim on the toolbar failed"
@@ -124,11 +124,12 @@ px = d[d.index(b'255\n') + 4:]
 def ink(x0, y0, x1, y1):
     return sum(1 for y in range(y0, y1) for x in range(x0, x1)
                if max(px[(y * w + x) * 3:(y * w + x) * 3 + 3]) > 20)
-band = ink(0, int(h * 0.415), w // 2, int(h * 0.485))
+high = ink(0, int(h * 0.14), 60, int(h * 0.20))
+low = ink(0, int(h * 0.62), 60, int(h * 0.68))
 top = ink(0, 0, w, 20)
-assert band > 500, f"no toolbar at the optical centre (ink={band})"
+assert high > 100 and low > 100, f"no vertical rail on the left edge (high={high} low={low})"
 assert top == 0, f"the top strip is not clear (ink={top})"
-print(f"  toolbar ok: band={band} top={top}")
+print(f"  rail ok: high={high} low={low} top={top}")
 PY
 "$bin" lock > /dev/null || fail "lock failed"
 

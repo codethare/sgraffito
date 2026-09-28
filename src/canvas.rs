@@ -258,8 +258,8 @@ pub struct Overlay {
     pub toolbar: Option<Toolbar>,
 }
 
-/// What the edit-mode toolbar shows: the active tool, the active colour and the active size,
-/// in logical pixels.
+/// What the edit-mode toolbar shows: the active tool, the active colour, the active size in
+/// logical pixels, and the block the pointer is on, if any.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Toolbar {
     pub tool: Tool,
@@ -267,6 +267,8 @@ pub struct Toolbar {
     pub color: &'static str,
     /// Stroke width or text size, depending on the tool.
     pub size: f32,
+    /// The block under the pointer: it stretches to say what it does.
+    pub hover: Option<ToolbarAction>,
 }
 
 #[derive(Debug, Clone)]

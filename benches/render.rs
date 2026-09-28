@@ -148,6 +148,7 @@ fn main() {
             tool: Tool::Pen,
             color: "#e01b24",
             size: 3.0,
+            hover: None,
         }),
         ..Default::default()
     };

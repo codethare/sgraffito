@@ -300,6 +300,21 @@ fn frame(
     region.swap_rb(buf, w, h);
 }
 
+/// A toolbar state for the tests.
+fn toolbar(tool: Tool, color: &'static str, size: f32, hover: Option<ToolbarAction>) -> Toolbar {
+    Toolbar {
+        tool,
+        color,
+        size,
+        hover,
+    }
+}
+
+/// The rail with the pen armed and no block stretched.
+fn rail() -> Toolbar {
+    toolbar(Tool::Pen, PALETTE[0], 3.0, None)
+}
+
 fn dot(x: f32, y: f32) -> Overlay {
     Overlay {
         stroke: Some(Stroke {
@@ -315,32 +330,24 @@ fn dot(x: f32, y: f32) -> Overlay {
 fn toolbar_draws_ink_only_when_it_is_present() {
     let doc = OutputAnnotations::default();
     let with = Overlay {
-        toolbar: Some(Toolbar {
-            tool: Tool::Text,
-            color: "#33d17a",
-            size: 18.0,
-        }),
+        toolbar: Some(toolbar(Tool::Text, "#33d17a", 18.0, None)),
         ..Default::default()
     };
-    let mut buf = buffer(640, 400);
-    Renderer::new().render(&mut buf, 640, 400, 1.0, &doc, &with, None);
+    let mut buf = buffer(640, 900);
+    Renderer::new().render(&mut buf, 640, 900, 1.0, &doc, &with, None);
     assert!(ink(&buf) > 0);
 
-    let mut plain = buffer(640, 400);
-    Renderer::new().render(&mut plain, 640, 400, 1.0, &doc, &Overlay::default(), None);
+    let mut plain = buffer(640, 900);
+    Renderer::new().render(&mut plain, 640, 900, 1.0, &doc, &Overlay::default(), None);
     assert_eq!(ink(&plain), 0);
 }
 
 #[test]
-fn toolbar_is_a_left_anchored_capsule_at_the_optical_centre() {
-    let (w, h) = (640u32, 400u32);
+fn toolbar_is_a_left_edge_rail_at_the_optical_centre() {
+    let (w, h) = (640u32, 900u32);
     let mut buf = buffer(w, h);
     let overlay = Overlay {
-        toolbar: Some(Toolbar {
-            tool: Tool::Pen,
-            color: "#33d17a",
-            size: 3.0,
-        }),
+        toolbar: Some(toolbar(Tool::Pen, "#33d17a", 3.0, None)),
         ..Default::default()
     };
     Renderer::new().render(
@@ -352,72 +359,76 @@ fn toolbar_is_a_left_anchored_capsule_at_the_optical_centre() {
         &overlay,
         None,
     );
-    // The toolbar hugs the left edge and its vertical centre is at the optical centre, above
-    // the geometric one: the row through its middle is painted from the left margin, and the
-    // row through the middle of the surface is empty.
+    // The rail hangs on the left edge and fills its box top to bottom: column x 8..44 holds a
+    // block on every row of it.
     let band = toolbar_bounds(w as f32, h as f32);
-    let mid = (band.y + band.h / 2.0) as u32;
-    let painted: Vec<u32> = (0..w).filter(|x| alpha(&buf, w, *x, mid) > 0).collect();
-    assert!(!painted.is_empty());
-    let left = *painted.first().unwrap();
+    let column: Vec<u32> = (0..h).filter(|y| alpha(&buf, w, 20, *y) > 0).collect();
+    assert!(!column.is_empty());
+    let (top, bottom) = (*column.first().unwrap(), *column.last().unwrap());
     assert!(
-        left <= 12,
-        "the toolbar starts at {left}, not against the left edge"
+        top as f32 >= band.y
+            && top as f32 <= band.y + 8.0
+            && bottom as f32 <= band.y + band.h
+            && bottom as f32 >= band.y + band.h - 8.0,
+        "the rail is painted {top}..{bottom}, its box is {band:?}"
     );
+    // Its vertical centre is at the optical centre, above the geometric one.
+    let centre = (top + bottom) as f32 / 2.0;
+    let optical = h as f32 * 0.45;
     assert!(
-        band.y + band.h / 2.0 < h as f32 / 2.0,
-        "not above the geometric centre"
+        (centre - optical).abs() <= 8.0,
+        "the rail is centred on {centre}, not on the optical centre {optical}"
     );
-    // It is anchored to the left, not centred: the right edge of the surface stays empty.
-    let right = *painted.last().unwrap();
-    assert!(
-        right < w - 20,
-        "the toolbar reaches {right}, the surface is {w}"
-    );
-    // The old top strip is empty: this is not a top-edge capsule any more.
+    assert!(centre < h as f32 / 2.0, "not above the geometric centre");
+    // Only the rail is painted: the rest of its band, and the top strip, are empty.
     assert_eq!(ink(&buf[..(w * 16 * 4) as usize]), 0);
-    // The fill is translucent, so the wallpaper still reads through the toolbar.
-    let fill = alpha(&buf, w, left + 4, mid);
+    assert_eq!(alpha(&buf, w, 200, (band.y + band.h / 2.0) as u32), 0);
+    // A block fill is translucent, so the wallpaper still reads through the rail. The top block
+    // is a colour chip, which is opaque; the bottom one is a key.
+    let fill = alpha(&buf, w, 20, (band.y + band.h - 21.0) as u32);
     assert!(fill > 0 && fill < 255, "fill alpha {fill}");
 }
 
-#[test]
-fn every_point_inside_the_toolbar_resolves_to_a_control() {
-    let (w, h) = (1920.0f32, 1080.0f32);
-    let toolbar = Toolbar {
-        tool: Tool::Pen,
-        color: PALETTE[0],
-        size: 3.0,
-    };
-    let mut renderer = Renderer::new();
+/// One hit test per row of the rail, at `x` in column coordinates.
+fn sweep_rail(
+    renderer: &mut Renderer,
+    toolbar: &Toolbar,
+    w: f32,
+    h: f32,
+    column_x: f32,
+) -> Vec<Option<ToolbarAction>> {
     let band = toolbar_bounds(w, h);
-    let mid = band.y + band.h / 2.0;
-    let sweep: Vec<Option<ToolbarAction>> = (0..band.w as u32)
-        .map(|step| renderer.toolbar_hit(&toolbar, w, h, band.x + step as f32 + 0.5, mid))
-        .collect();
-    // The toolbar starts at its left margin, ends inside its reserve, and nothing between the
-    // two is a hole: a press on a gap would start a stroke under the capsule.
-    let first = sweep.iter().position(Option::is_some).expect("no toolbar");
-    assert!(first <= 2, "the toolbar starts {first} px in");
+    // `toolbar_bounds` starts one hairline left of the rail.
+    let x = band.x + 1.0 + column_x;
+    (0..band.h as u32)
+        .map(|step| renderer.toolbar_hit(toolbar, w, h, x, band.y + step as f32 + 0.5))
+        .collect()
+}
+
+#[test]
+fn every_block_of_the_rail_is_reachable_and_no_row_is_a_gap() {
+    let (w, h) = (1920.0f32, 1080.0f32);
+    let rail = rail();
+    let mut renderer = Renderer::new();
+    let sweep = sweep_rail(&mut renderer, &rail, w, h, 20.0);
+    // Only the hairline rows at either end of the box reach no block; nothing between them does,
+    // or a press on a gap would start a stroke under the rail.
+    let first = sweep.iter().position(Option::is_some).expect("no rail");
+    assert!(first <= 2, "the rail starts {first} rows in");
     let end = sweep[first..]
         .iter()
         .position(Option::is_none)
         .map_or(sweep.len(), |step| step + first);
     assert!(
         sweep[end..].iter().all(Option::is_none),
-        "a gap inside the toolbar reaches no control"
+        "a row inside the rail reaches no block"
     );
     let mut actions: Vec<ToolbarAction> = Vec::new();
     for action in sweep[first..end].iter().flatten() {
-        if !actions.contains(action) {
+        if actions.last() != Some(action) {
             actions.push(*action);
         }
     }
-    assert!(
-        end - first > 200,
-        "the toolbar is only {} px wide",
-        end - first
-    );
     for tool in [Tool::Pen, Tool::Eraser, Tool::Text] {
         assert!(actions.contains(&ToolbarAction::Tool(tool)), "{tool:?}");
     }
@@ -429,33 +440,148 @@ fn every_point_inside_the_toolbar_resolves_to_a_control() {
     }
     assert!(actions.contains(&ToolbarAction::SizeStep(-1.0)));
     assert!(actions.contains(&ToolbarAction::SizeStep(1.0)));
-    assert!(actions.contains(&ToolbarAction::Lock));
     assert_eq!(
-        sweep[first].unwrap(),
+        actions[0],
         ToolbarAction::Color(0),
-        "the left end is not the palette"
+        "the palette is not on top"
     );
-    assert_eq!(sweep[end - 1].unwrap(), ToolbarAction::Lock);
-    // Outside the band the toolbar takes nothing: those presses are drawing gestures.
     assert_eq!(
-        renderer.toolbar_hit(&toolbar, w, h, band.x + 4.0, band.y - 1.0),
+        *actions.last().unwrap(),
+        ToolbarAction::Lock,
+        "Esc is not last"
+    );
+    // Eleven clickable blocks: the size readout is drawn but owned by `[` above it.
+    assert_eq!(actions.len(), 11, "a drawn block cannot be hit");
+    // Outside the rail the toolbar takes nothing: those presses are drawing gestures.
+    let band = toolbar_bounds(w, h);
+    assert_eq!(
+        renderer.toolbar_hit(&rail, w, h, band.x + 20.0, band.y - 2.0),
         None
     );
     assert_eq!(
-        renderer.toolbar_hit(&toolbar, w, h, band.x + 4.0, band.y + band.h),
+        renderer.toolbar_hit(&rail, w, h, band.x + 20.0, band.y + band.h + 2.0),
         None
+    );
+    assert_eq!(
+        renderer.toolbar_hit(&rail, w, h, band.x - 2.0, band.y + 30.0),
+        None
+    );
+    // To the right of an unstretched block is canvas, not toolbar.
+    assert_eq!(
+        renderer.toolbar_hit(&rail, w, h, band.x + 80.0, band.y + 30.0),
+        None
+    );
+}
+
+#[test]
+fn a_hovered_block_stretches_to_say_what_it_does() {
+    let (w, h) = (1920u32, 1080u32);
+    let (fw, fh) = (w as f32, h as f32);
+    let rail = rail();
+    let mut renderer = Renderer::new();
+    let band = toolbar_bounds(fw, fh);
+    // The top block is the first colour. `inside` is on the square, `beyond` in the room the
+    // capsule it unfurls would take, both on that block's own row.
+    let row = band.y + 20.0;
+    let (inside, beyond) = (band.x + 22.0, band.x + 70.0);
+    assert_eq!(
+        renderer.toolbar_hit(&rail, fw, fh, inside, row),
+        Some(ToolbarAction::Color(0))
+    );
+    assert_eq!(renderer.toolbar_hit(&rail, fw, fh, beyond, row), None);
+
+    let hovered = Toolbar {
+        hover: Some(ToolbarAction::Color(0)),
+        ..rail
+    };
+    // Stretched, the block owns the capsule it unfurled: a press there is still the toolbar's,
+    // which is what keeps the pointer on the block while it reads the meaning.
+    assert_eq!(
+        renderer.toolbar_hit(&hovered, fw, fh, inside, row),
+        Some(ToolbarAction::Color(0))
+    );
+    assert_eq!(
+        renderer.toolbar_hit(&hovered, fw, fh, beyond, row),
+        Some(ToolbarAction::Color(0))
+    );
+    assert_eq!(
+        renderer.toolbar_hit(&hovered, fw, fh, beyond, row + 200.0),
+        None,
+        "the stretch is only on the block's own row"
+    );
+    // A block only stretches while its meaning fits what the damage accounting reserves.
+    let narrow = Toolbar {
+        hover: Some(ToolbarAction::Color(0)),
+        ..rail
+    };
+    assert_eq!(
+        renderer.toolbar_hit(&narrow, fw, fh, beyond, row),
+        Some(ToolbarAction::Color(0)),
+        "the label did not fit a 4K output"
+    );
+    assert_eq!(
+        renderer.toolbar_hit(&narrow, 60.0, fh, beyond, row),
+        None,
+        "a block stretched past the room reserved for it"
+    );
+
+    // Stretching paints the meaning: the square alone has no ink where the label goes.
+    let draw = |hover| {
+        let mut buf = buffer(w, h);
+        let overlay = Overlay {
+            toolbar: Some(Toolbar { hover, ..rail }),
+            ..Default::default()
+        };
+        Renderer::new().render(
+            &mut buf,
+            w,
+            h,
+            1.0,
+            &OutputAnnotations::default(),
+            &overlay,
+            None,
+        );
+        buf
+    };
+    let (square, capsule) = (draw(None), draw(Some(ToolbarAction::Color(0))));
+    let strip = |buf: &[u8]| {
+        (0..h)
+            .flat_map(|y| (50..200).map(move |x| (x, y)))
+            .filter(|(x, y)| alpha(buf, w, *x, *y) > 0)
+            .count()
+    };
+    assert!(
+        strip(&capsule) > strip(&square),
+        "the block did not stretch"
+    );
+    let outside = |buf: &[u8]| {
+        buf.as_chunks::<4>()
+            .0
+            .iter()
+            .enumerate()
+            .filter(|(_, pixel)| pixel[3] != 0)
+            .filter(|(index, _)| {
+                let (x, y) = ((*index as u32) % w, (*index as u32) / w);
+                x as f32 > band.x + band.w || y as f32 > band.y + band.h
+            })
+            .count()
+    };
+    assert_eq!(
+        outside(&capsule),
+        0,
+        "the stretched block paints outside the box the damage model reserves"
     );
 }
 
 #[test]
 fn the_eraser_cannot_reach_the_toolbar() {
     // The toolbar lives in the transient overlay, never in the document, so nothing at its
-    // position is there to delete -- including the palette swatches and the tool keycaps.
+    // position is there to delete -- including the palette swatches and the tool blocks.
     let (w, h) = (1920.0f32, 1080.0f32);
     let mut doc = OutputAnnotations::default();
     let band = toolbar_bounds(w, h);
-    for x in [band.x + 4.0, band.x + band.w / 2.0] {
-        assert!(!doc.erase(x, band.y + band.h / 2.0));
+    for y in [band.y + 20.0, band.y + band.h / 2.0] {
+        assert!(!doc.erase(band.x + 20.0, y));
     }
 }
 
@@ -580,11 +706,7 @@ fn bounding_box_frame_is_pixel_identical_to_a_whole_surface_frame() {
 #[test]
 fn a_toolbar_does_not_widen_a_drag_far_from_it() {
     let overlay = Overlay {
-        toolbar: Some(Toolbar {
-            tool: Tool::Pen,
-            color: "#ffffff",
-            size: 3.0,
-        }),
+        toolbar: Some(rail()),
         ..Default::default()
     };
     let transient = Rect {
@@ -611,19 +733,16 @@ fn a_toolbar_does_not_widen_a_drag_far_from_it() {
 fn bounding_box_frame_with_a_toolbar_matches_a_whole_surface_frame() {
     // The reserve has to hold the whole toolbar: a frame that damages only the box around a
     // drag into it must still paint every toolbar pixel the whole-surface frame paints.
-    let (w, h) = (1024u32, 200u32);
-    let toolbar = Toolbar {
-        tool: Tool::Text,
-        color: "#33d17a",
-        size: 72.0,
-    };
+    let (w, h) = (1024u32, 600u32);
+    let rail = rail();
+    // On the rail's own row: the damage box has to grow over the whole rail and repaint it.
     let first = Overlay {
-        toolbar: Some(toolbar),
-        ..dot(500.0, 80.0)
+        toolbar: Some(rail),
+        ..dot(140.0, 300.0)
     };
     let second = Overlay {
-        toolbar: Some(toolbar),
-        ..dot(504.0, 84.0)
+        toolbar: Some(rail),
+        ..dot(144.0, 304.0)
     };
     let damage = damage_box(
         &OutputAnnotations::default(),
@@ -669,13 +788,9 @@ fn a_drag_far_from_the_toolbar_leaves_the_toolbar_pixels_alone() {
     // force a whole-surface frame. A bounding-box frame that does not reach it may not paint it,
     // because those bytes lie outside the damage region and still hold the previous frame.
     let (w, h) = (1024u32, 600u32);
-    let toolbar = Toolbar {
-        tool: Tool::Pen,
-        color: "#33d17a",
-        size: 3.0,
-    };
+    let rail = rail();
     let with = |x: f32, y: f32| Overlay {
-        toolbar: Some(toolbar),
+        toolbar: Some(rail),
         ..dot(x, y)
     };
     let first = with(500.0, 500.0);

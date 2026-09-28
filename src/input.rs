@@ -252,8 +252,7 @@ impl PointerHandler for App {
                     // `set_shape` is ignored unless it carries this serial, so every cursor
                     // change while the pointer is inside reuses it.
                     self.cursor_serial = Some(serial);
-                    self.pointer_over_toolbar = self.toolbar_hit(&key, x, y).is_some();
-                    self.sync_cursor();
+                    self.update_toolbar_hover(&key, x, y);
                 }
                 PointerEventKind::Press { button, .. } if button == BTN_LEFT => {
                     self.pointer_press(&key, x, y)
@@ -264,6 +263,9 @@ impl PointerHandler for App {
                 PointerEventKind::Leave { .. } => {
                     // The release may never come back to this surface (multi-output drag), so finish here.
                     self.pointer_release(&key);
+                    if self.toolbar_hover.take().is_some() {
+                        self.refresh_toolbar_hover();
+                    }
                     self.pointer_over_toolbar = false;
                     // The tool shape must not follow the pointer onto another client's surface,
                     // and the request still needs the serial of the last enter to be honoured.
@@ -465,11 +467,7 @@ impl App {
         }
         // The toolbar is not drawing area: a drag passing over it neither draws under it nor
         // leaves the eraser marker on it, and the pointer takes the toolbar's own shape there.
-        let over_toolbar = self.toolbar_hit(key, x, y).is_some();
-        if over_toolbar != self.pointer_over_toolbar {
-            self.pointer_over_toolbar = over_toolbar;
-            self.sync_cursor();
-        }
+        let over_toolbar = self.update_toolbar_hover(key, x, y);
         let Some(out) = self.outputs.get_mut(key) else {
             return;
         };
@@ -499,6 +497,25 @@ impl App {
         // Only the transient overlay moved, so the next frame can damage just its box.
         out.transient_dirty = true;
         self.dirty = true;
+    }
+
+    /// Track the block of the toolbar under the pointer. The block stretches to say what it
+    /// does, so the rail is repainted while the pointer crosses from one block to another, and
+    /// the pointer takes the toolbar's own shape while it is on one.
+    fn update_toolbar_hover(&mut self, key: &u32, x: f32, y: f32) -> bool {
+        // The hit test uses the layout the frame drew, so a block that has already stretched
+        // keeps the pointer on itself out to the end of its capsule.
+        let hover = self.toolbar_hit(key, x, y);
+        if hover != self.toolbar_hover {
+            self.toolbar_hover = hover;
+            self.refresh_toolbar_hover();
+        }
+        let over = hover.is_some();
+        if over != self.pointer_over_toolbar {
+            self.pointer_over_toolbar = over;
+            self.sync_cursor();
+        }
+        over
     }
 
     /// Apply a toolbar click through the entry points the keys use, so a click and its key
