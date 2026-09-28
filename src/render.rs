@@ -11,66 +11,116 @@ use tiny_skia::{
 };
 use wayland_client::protocol::wl_shm::Format;
 
-use crate::canvas::{Hint, OutputAnnotations, Overlay, Rect, Stroke, TextItem, TextOverlay};
+use crate::canvas::{
+    OutputAnnotations, Overlay, PALETTE, Rect, Stroke, TextItem, TextOverlay, Tool, Toolbar,
+    ToolbarAction,
+};
 /// Radius of the eraser marker circle, in logical pixels.
 const ERASER_MARKER_RADIUS: f32 = 8.0;
-/// The edit-mode hint: a capsule in the macOS HUD idiom, built around the 13 pt control size
+/// The edit-mode toolbar: a capsule in the macOS HUD idiom, built around the 13 pt control size
 /// the HIG gives as the macOS default. All of it is logical pixels.
-const HINT_TOP: f32 = 16.0;
-const HINT_PAD: [f32; 2] = [12.0, 6.0];
-const HINT_HEIGHT: f32 = 34.0;
+///
+/// It hugs the left edge (the side measured fastest for toolbar targets) with its vertical
+/// centre at the optical centre, roughly 5% above the geometric centre, where the gaze rests.
+const TOOLBAR_MARGIN: f32 = 8.0;
+const TOOLBAR_CENTRE: f32 = 0.45;
+const TOOLBAR_PAD: [f32; 2] = [12.0, 6.0];
+const TOOLBAR_HEIGHT: f32 = 34.0;
 /// A capsule is a rectangle whose corner radius is half its height.
-const HINT_RADIUS: f32 = HINT_HEIGHT / 2.0;
-const HINT_HAIRLINE: f32 = 1.0;
-const HINT_LABEL_SIZE: f32 = 13.0;
-const HINT_KEY_SIZE: f32 = 12.0;
-const HINT_KEY_MIN: f32 = 8.0;
-const HINT_KEY_PAD: f32 = 7.0;
-const HINT_KEY_HEIGHT: f32 = 22.0;
-const HINT_KEY_RADIUS: f32 = 6.0;
-const HINT_GAP: f32 = 7.0;
-const HINT_ITEM_GAP: f32 = 14.0;
-const HINT_WELL: f32 = 16.0;
-/// Widest capsule the damage accounting reserves room for. It keeps the reserved box a
-/// centred strip instead of the full width of the output: a full-width strip unioned with a
-/// grown drawing box covers nearly the whole surface and the fast path disappears. The size
-/// key and its value grew the capsule from ~508 to ~707 px, hence the reserve.
-const HINT_RESERVE: f32 = 720.0;
-const HINT_CACHE_CAP: usize = 16;
-const HINT_WELL_RADIUS: f32 = 4.0;
+const TOOLBAR_RADIUS: f32 = TOOLBAR_HEIGHT / 2.0;
+const TOOLBAR_HAIRLINE: f32 = 1.0;
+const TOOLBAR_LABEL_SIZE: f32 = 13.0;
+const TOOLBAR_KEY_SIZE: f32 = 12.0;
+const TOOLBAR_KEY_MIN: f32 = 8.0;
+const TOOLBAR_KEY_PAD: f32 = 7.0;
+const TOOLBAR_KEY_HEIGHT: f32 = 22.0;
+const TOOLBAR_KEY_RADIUS: f32 = 6.0;
+const TOOLBAR_GAP: f32 = 12.0;
+const TOOLBAR_SWATCH: f32 = 16.0;
+const TOOLBAR_SWATCH_GAP: f32 = 6.0;
+/// How far a swatch's hit area reaches past the swatch itself.
+const TOOLBAR_SWATCH_PAD: f32 = 3.0;
+const TOOLBAR_SWATCH_RADIUS: f32 = 4.0;
+/// Widest toolbar the damage accounting reserves room for. The drawn width depends on the font
+/// and on which meanings fit, so `damage_box` reserves this strip instead of the measured pill:
+/// a full-width strip unioned with a grown drawing box would cover nearly the whole surface and
+/// the fast path would disappear. The strip only joins a damage box that reaches it.
+const TOOLBAR_RESERVE: f32 = 1024.0;
+const TOOLBAR_CACHE_CAP: usize = 16;
 /// `#rrggbbaa`. The pill fill stands in for a HUD material: a `wl_shm` layer surface cannot be
 /// blurred, so there is translucency but no real vibrancy.
-const HINT_PILL_FILL: &str = "#1c1c1ec7";
-const HINT_PILL_EDGE: &str = "#ffffff1f";
-const HINT_KEY_FILL: &str = "#ffffff26";
-const HINT_KEY_EDGE: &str = "#ffffff2e";
-/// macOS system accent, used for the active tool's keycap.
-const HINT_ACCENT: &str = "#0a84ffff";
-const HINT_KEY_TEXT: &str = "#ffffffee";
-const HINT_LABEL_TEXT: &str = "#ebebf59e";
-const HINT_LABEL_ACTIVE: &str = "#fffffff2";
-const HINT_WELL_EDGE: &str = "#ffffff4d";
-/// The keys and what they do, in the order the capsule shows them. The size key is
-/// contextual: it adjusts the pen width, or the text size while the text tool is active.
-fn hint_items(hint: &Hint) -> Vec<(&'static str, String)> {
-    let size_name = if hint.tool == "text" { "size" } else { "width" };
-    vec![
-        ("1-5", "colour".into()),
-        ("P", "pen".into()),
-        ("E", "eraser".into()),
-        ("T", "text: click to place".into()),
-        ("[ ]", format!("{size_name} {:.0}", hint.size)),
-        ("Esc", "end text, again locks".into()),
-    ]
-}
+const TOOLBAR_PILL_FILL: &str = "#1c1c1ec7";
+const TOOLBAR_PILL_EDGE: &str = "#ffffff1f";
+const TOOLBAR_KEY_FILL: &str = "#ffffff26";
+const TOOLBAR_KEY_EDGE: &str = "#ffffff2e";
+/// macOS system accent, used for the active tool's keycap and the active colour's ring.
+const TOOLBAR_ACCENT: &str = "#0a84ffff";
+const TOOLBAR_KEY_TEXT: &str = "#ffffffee";
+const TOOLBAR_LABEL_TEXT: &str = "#ebebf59e";
+const TOOLBAR_LABEL_ACTIVE: &str = "#fffffff2";
+const TOOLBAR_SWATCH_EDGE: &str = "#ffffff4d";
 const UNDERLINE_HEIGHT: f32 = 1.5;
 const CURSOR_WIDTH: f32 = 2.0;
 const LINE_HEIGHT_SCALE: f32 = 1.2;
 
+/// One control of the toolbar, in the order it is drawn, after the palette row.
+enum Entry {
+    /// A keycap with its meaning, and what clicking the pair does.
+    Key {
+        glyph: &'static str,
+        label: String,
+        active: bool,
+        action: ToolbarAction,
+    },
+    /// A bare value between two keycaps, drawn even when the meanings are dropped, so the
+    /// active size stays readable on a narrow output.
+    Value(String),
+}
+
+/// The controls of the toolbar. Every keycap carries the key that does the same thing when
+/// tapped; `Esc` is the only two-stage one.
+fn toolbar_entries(toolbar: &Toolbar) -> Vec<Entry> {
+    let size_name = if toolbar.tool == Tool::Text {
+        "size"
+    } else {
+        "width"
+    };
+    let key = |glyph: &'static str, label: &str, tool: Tool| Entry::Key {
+        glyph,
+        label: label.into(),
+        active: toolbar.tool == tool,
+        action: ToolbarAction::Tool(tool),
+    };
+    vec![
+        key("P", "pen", Tool::Pen),
+        key("E", "eraser", Tool::Eraser),
+        key("T", "text: click to place", Tool::Text),
+        Entry::Key {
+            glyph: "[",
+            label: String::new(),
+            active: false,
+            action: ToolbarAction::SizeStep(-1.0),
+        },
+        Entry::Value(format!("{size_name} {:.0}", toolbar.size)),
+        Entry::Key {
+            glyph: "]",
+            label: String::new(),
+            active: false,
+            action: ToolbarAction::SizeStep(1.0),
+        },
+        Entry::Key {
+            glyph: "Esc",
+            label: "end text, again locks".into(),
+            active: false,
+            action: ToolbarAction::Lock,
+        },
+    ]
+}
+
 pub struct Renderer {
     font_system: FontSystem,
     cache: SwashCache,
-    hint_cache: Vec<CachedHint>,
+    toolbar_cache: Vec<CachedToolbar>,
 }
 
 #[derive(Default)]
@@ -96,11 +146,10 @@ struct PreparedText {
 }
 
 #[derive(Clone)]
-struct CachedHint {
-    hint: Hint,
+struct CachedToolbar {
+    toolbar: Toolbar,
     surface: f32,
-    scale: f32,
-    pill: HintPill,
+    pill: ToolbarPill,
 }
 
 impl TextLayoutCache {
@@ -186,7 +235,7 @@ impl Renderer {
         Self {
             font_system: FontSystem::new(),
             cache: SwashCache::new(),
-            hint_cache: Vec::new(),
+            toolbar_cache: Vec::new(),
         }
     }
 
@@ -272,14 +321,18 @@ impl Renderer {
         if let Some(t) = &overlay.text {
             self.draw_text(&mut pixmap, &t.item, scale, Some(t));
         }
-        if let Some(hint) = &overlay.hint {
-            // The hint is static content: only a tool, colour, size or mode change repaints it,
-            // and those force a whole-surface frame. A bounding-box frame that does not reach it
-            // must leave it alone — those bytes are outside the damage region and still hold
-            // the previous frame.
-            let box_ = hint_bounds(pixmap.width() as f32 / scale);
+        if let Some(toolbar) = &overlay.toolbar {
+            // The toolbar is static content: only a tool, colour, size or mode change repaints
+            // it, and those force a whole-surface frame. A bounding-box frame that does not
+            // reach it must leave it alone: those bytes are outside the damage region and
+            // still hold the previous frame.
+            let (w, h) = (
+                pixmap.width() as f32 / scale,
+                pixmap.height() as f32 / scale,
+            );
+            let box_ = toolbar_bounds(w, h);
             if damage.is_none_or(|d| box_.intersects(d)) {
-                self.draw_hint(&mut pixmap, hint, scale);
+                self.draw_toolbar(&mut pixmap, toolbar, scale);
             }
         }
         if let Some([x, y]) = overlay.eraser {
@@ -287,80 +340,91 @@ impl Renderer {
         }
     }
 
-    /// The edit-mode affordance. macOS idiom: a capsule, keys drawn as keycaps and their
-    /// meaning as secondary label text, with the active tool's keycap in the system accent.
-    fn draw_hint(&mut self, pixmap: &mut PixmapMut, hint: &Hint, scale: f32) {
+    /// The edit-mode toolbar. macOS idiom: a capsule, controls drawn as palette swatches and
+    /// keycaps with their meaning as secondary label text, the active colour ringed and the
+    /// active tool's keycap in the system accent. Every control is also a target: the hit
+    /// rectangles the press path asks for are laid out with the pieces drawn here.
+    fn draw_toolbar(&mut self, pixmap: &mut PixmapMut, toolbar: &Toolbar, scale: f32) {
         let surface = pixmap.width() as f32 / scale;
-        let Some(pill) = self.cached_hint_pill(hint, surface, scale) else {
+        let Some(pill) = self.cached_toolbar_pill(toolbar, surface) else {
             return;
         };
+        let (ox, oy) = toolbar_origin(pixmap.height() as f32 / scale);
         round_rect(
             pixmap,
             Rect {
-                x: pill.x * scale,
-                y: HINT_TOP * scale,
+                x: ox * scale,
+                y: oy * scale,
                 w: pill.width * scale,
-                h: HINT_HEIGHT * scale,
+                h: TOOLBAR_HEIGHT * scale,
             },
-            HINT_RADIUS * scale,
-            parse_hex(HINT_PILL_FILL),
-            Some((parse_hex(HINT_PILL_EDGE), HINT_HAIRLINE * scale)),
+            TOOLBAR_RADIUS * scale,
+            parse_hex(TOOLBAR_PILL_FILL),
+            Some((parse_hex(TOOLBAR_PILL_EDGE), TOOLBAR_HAIRLINE * scale)),
         );
         for (piece, x, w) in &pill.pieces {
+            let x = ox + x;
             match piece {
-                Piece::Well => round_rect(
+                Piece::Swatch(index, active) => round_rect(
                     pixmap,
                     Rect {
-                        x: (pill.x + x) * scale,
-                        y: (HINT_TOP + (HINT_HEIGHT - HINT_WELL) / 2.0) * scale,
-                        w: HINT_WELL * scale,
-                        h: HINT_WELL * scale,
+                        x: x * scale,
+                        y: (oy + (TOOLBAR_HEIGHT - TOOLBAR_SWATCH) / 2.0) * scale,
+                        w: TOOLBAR_SWATCH * scale,
+                        h: TOOLBAR_SWATCH * scale,
                     },
-                    HINT_WELL_RADIUS * scale,
-                    parse_hex(hint.color),
-                    Some((parse_hex(HINT_WELL_EDGE), HINT_HAIRLINE * scale)),
+                    TOOLBAR_SWATCH_RADIUS * scale,
+                    parse_hex(PALETTE[*index]),
+                    Some((
+                        parse_hex(if *active {
+                            TOOLBAR_ACCENT
+                        } else {
+                            TOOLBAR_SWATCH_EDGE
+                        }),
+                        if *active { 2.0 } else { TOOLBAR_HAIRLINE } * scale,
+                    )),
                 ),
                 Piece::Key(text, active) => {
-                    let top = HINT_TOP + (HINT_HEIGHT - HINT_KEY_HEIGHT) / 2.0;
+                    let top = oy + (TOOLBAR_HEIGHT - TOOLBAR_KEY_HEIGHT) / 2.0;
                     let (fill, edge) = if *active {
-                        (HINT_ACCENT, HINT_ACCENT)
+                        (TOOLBAR_ACCENT, TOOLBAR_ACCENT)
                     } else {
-                        (HINT_KEY_FILL, HINT_KEY_EDGE)
+                        (TOOLBAR_KEY_FILL, TOOLBAR_KEY_EDGE)
                     };
                     round_rect(
                         pixmap,
                         Rect {
-                            x: (pill.x + x) * scale,
+                            x: x * scale,
                             y: top * scale,
                             w: w * scale,
-                            h: HINT_KEY_HEIGHT * scale,
+                            h: TOOLBAR_KEY_HEIGHT * scale,
                         },
-                        HINT_KEY_RADIUS * scale,
+                        TOOLBAR_KEY_RADIUS * scale,
                         parse_hex(fill),
-                        Some((parse_hex(edge), HINT_HAIRLINE * scale)),
+                        Some((parse_hex(edge), TOOLBAR_HAIRLINE * scale)),
                     );
                     // Centre the glyph in its keycap.
-                    let glyph = self.text_width(text, HINT_KEY_SIZE);
-                    let item = hint_text(
-                        pill.x + x + (w - glyph) / 2.0,
+                    let glyph = self.text_width(text, TOOLBAR_KEY_SIZE);
+                    let item = toolbar_text(
+                        x + (w - glyph) / 2.0,
                         top,
-                        HINT_KEY_HEIGHT,
-                        HINT_KEY_SIZE,
-                        HINT_KEY_TEXT,
+                        TOOLBAR_KEY_HEIGHT,
+                        TOOLBAR_KEY_SIZE,
+                        TOOLBAR_KEY_TEXT,
                         text,
                     );
                     self.draw_text(pixmap, &item, scale, None);
                 }
                 Piece::Label(text, active) => {
-                    let item = hint_text(
-                        pill.x + x,
-                        HINT_TOP,
-                        HINT_HEIGHT,
-                        HINT_LABEL_SIZE,
+                    let item = toolbar_text(
+                        x,
+                        oy,
+                        TOOLBAR_HEIGHT,
+                        TOOLBAR_LABEL_SIZE,
                         if *active {
-                            HINT_LABEL_ACTIVE
+                            TOOLBAR_LABEL_ACTIVE
                         } else {
-                            HINT_LABEL_TEXT
+                            TOOLBAR_LABEL_TEXT
                         },
                         text,
                     );
@@ -370,64 +434,173 @@ impl Renderer {
         }
     }
 
-    fn cached_hint_pill(&mut self, hint: &Hint, surface: f32, scale: f32) -> Option<HintPill> {
-        if let Some(cached) = self.hint_cache.iter().find(|cached| {
-            cached.hint == *hint && cached.surface == surface && cached.scale == scale
-        }) {
+    /// The toolbar control under a pointer position, in logical pixels, or `None` outside it.
+    /// The layout is the one the frame draws, so a control's hit rectangle is the rectangle it
+    /// paints.
+    pub fn toolbar_hit(
+        &mut self,
+        toolbar: &Toolbar,
+        width: f32,
+        height: f32,
+        x: f32,
+        y: f32,
+    ) -> Option<ToolbarAction> {
+        let (ox, oy) = toolbar_origin(height);
+        if y < oy || y >= oy + TOOLBAR_HEIGHT {
+            return None;
+        }
+        let column = x - ox;
+        let pill = self.cached_toolbar_pill(toolbar, width)?;
+        pill.hits
+            .iter()
+            .find(|(hit, _)| column >= hit.x && column < hit.x + hit.w)
+            .map(|(_, action)| *action)
+    }
+
+    fn cached_toolbar_pill(&mut self, toolbar: &Toolbar, surface: f32) -> Option<ToolbarPill> {
+        if let Some(cached) = self
+            .toolbar_cache
+            .iter()
+            .find(|cached| cached.toolbar == *toolbar && cached.surface == surface)
+        {
             return Some(cached.pill.clone());
         }
-        // The descriptions are dropped first when the capsule would not fit: the keycaps
-        // alone still teach the shortcuts.
+        // The meanings are dropped first when the toolbar would not fit: the swatches and the
+        // keycaps alone still teach the shortcuts.
         let pill = self
-            .hint_pill(hint, surface, true)
-            .or_else(|| self.hint_pill(hint, surface, false))?;
-        if self.hint_cache.len() == HINT_CACHE_CAP {
-            self.hint_cache.remove(0);
+            .toolbar_pill(toolbar, surface, true)
+            .or_else(|| self.toolbar_pill(toolbar, surface, false))?;
+        if self.toolbar_cache.len() == TOOLBAR_CACHE_CAP {
+            self.toolbar_cache.remove(0);
         }
-        self.hint_cache.push(CachedHint {
-            hint: *hint,
+        self.toolbar_cache.push(CachedToolbar {
+            toolbar: *toolbar,
             surface,
-            scale,
             pill: pill.clone(),
         });
         Some(pill)
     }
 
-    /// Lay the capsule out from left to right, measuring each keycap and label. `None` when
-    /// the result would not fit on the surface.
-    fn hint_pill(&mut self, hint: &Hint, surface: f32, labels: bool) -> Option<HintPill> {
-        let active = active_key(hint.tool);
-        let items = hint_items(hint);
-        let mut pieces = vec![(Piece::Well, HINT_PAD[0], HINT_WELL)];
-        let mut cursor = HINT_PAD[0] + HINT_WELL + HINT_ITEM_GAP;
-        for (i, (key, label)) in items.iter().enumerate() {
-            let is_active = *key == active;
-            let width = self.text_width(key, HINT_KEY_SIZE).max(HINT_KEY_MIN) + 2.0 * HINT_KEY_PAD;
-            pieces.push((Piece::Key(key, is_active), cursor, width));
-            cursor += width;
-            if labels {
-                cursor += HINT_GAP;
-                let width = self.text_width(label, HINT_LABEL_SIZE);
-                pieces.push((Piece::Label(label.clone(), is_active), cursor, width));
-                cursor += width;
-            }
-            if i + 1 < items.len() {
-                cursor += HINT_ITEM_GAP;
-            }
+    /// Lay the toolbar out from left to right, measuring each keycap and label. `None` when the
+    /// result would not fit on the surface.
+    fn toolbar_pill(
+        &mut self,
+        toolbar: &Toolbar,
+        surface: f32,
+        labels: bool,
+    ) -> Option<ToolbarPill> {
+        let mut pieces = Vec::new();
+        let mut hits = Vec::new();
+        let mut x = TOOLBAR_PAD[0];
+        // The palette is a row of targets; the keycap and its meaning stay in front of it, so
+        // the digit shortcuts are still taught. That first hit rectangle reaches back over them,
+        // because a press anywhere in the capsule belongs to a control (see below).
+        x = self.push_keycap(&mut pieces, x, "1-5", false);
+        if labels {
+            x += TOOLBAR_GAP;
+            let label_w = self.text_width("colour", TOOLBAR_LABEL_SIZE);
+            pieces.push((Piece::Label("colour".into(), false), x, label_w));
+            x += label_w;
         }
-        let width = cursor + HINT_PAD[0];
-        if width > surface.min(HINT_RESERVE) {
+        x += TOOLBAR_GAP;
+        // One target per palette colour, and the swatches sit closer together than the control
+        // groups do.
+        for (index, color) in PALETTE.iter().enumerate() {
+            pieces.push((
+                Piece::Swatch(index, *color == toolbar.color),
+                x,
+                TOOLBAR_SWATCH,
+            ));
+            hits.push((
+                Rect {
+                    x: x - TOOLBAR_SWATCH_PAD,
+                    y: 0.0,
+                    w: TOOLBAR_SWATCH + 2.0 * TOOLBAR_SWATCH_PAD,
+                    h: TOOLBAR_HEIGHT,
+                },
+                ToolbarAction::Color(index),
+            ));
+            x += TOOLBAR_SWATCH + TOOLBAR_SWATCH_GAP;
+        }
+        x += TOOLBAR_GAP - TOOLBAR_SWATCH_GAP;
+        for entry in toolbar_entries(toolbar) {
+            match entry {
+                Entry::Key {
+                    glyph,
+                    label,
+                    active,
+                    action,
+                } => {
+                    let start = x;
+                    x = self.push_keycap(&mut pieces, x, glyph, active);
+                    if labels && !label.is_empty() {
+                        x += TOOLBAR_GAP;
+                        let label_w = self.text_width(&label, TOOLBAR_LABEL_SIZE);
+                        pieces.push((Piece::Label(label, active), x, label_w));
+                        x += label_w;
+                    }
+                    hits.push((
+                        Rect {
+                            x: start,
+                            y: 0.0,
+                            w: x - start,
+                            h: TOOLBAR_HEIGHT,
+                        },
+                        action,
+                    ));
+                }
+                Entry::Value(text) => {
+                    let value_w = self.text_width(&text, TOOLBAR_LABEL_SIZE);
+                    pieces.push((Piece::Label(text, false), x, value_w));
+                    x += value_w;
+                }
+            }
+            x += TOOLBAR_GAP;
+        }
+        // Every control leaves its trailing gap, including the last one.
+        let width = x - TOOLBAR_GAP + TOOLBAR_PAD[0];
+        let available = (surface - 2.0 * TOOLBAR_MARGIN).min(TOOLBAR_RESERVE);
+        if width > available {
             return None;
         }
-        Some(HintPill {
-            x: (surface - width) / 2.0,
+        // The toolbar consumes every press inside it: the padding at either end and the gaps
+        // between two controls belong to a neighbour rather than starting a stroke under the
+        // capsule. The palette is laid out first, so the rects are already in order.
+        if let Some((first, _)) = hits.first_mut() {
+            first.w += first.x;
+            first.x = 0.0;
+        }
+        for index in 0..hits.len().saturating_sub(1) {
+            hits[index].0.w = hits[index + 1].0.x - hits[index].0.x;
+        }
+        if let Some((last, _)) = hits.last_mut() {
+            last.w = width - last.x;
+        }
+        Some(ToolbarPill {
             width,
             pieces,
+            hits,
         })
     }
 
+    /// Append a keycap and return the x after it.
+    fn push_keycap(
+        &mut self,
+        pieces: &mut Vec<(Piece, f32, f32)>,
+        x: f32,
+        glyph: &'static str,
+        active: bool,
+    ) -> f32 {
+        let width = self
+            .text_width(glyph, TOOLBAR_KEY_SIZE)
+            .max(TOOLBAR_KEY_MIN)
+            + 2.0 * TOOLBAR_KEY_PAD;
+        pieces.push((Piece::Key(glyph, active), x, width));
+        x + width
+    }
+
     /// Width of one line of text, in logical pixels. The shaped buffer is thrown away: the
-    /// hint is a handful of short strings and it is only drawn while editing.
+    /// toolbar is a handful of short strings and it is only drawn while editing.
     fn text_width(&mut self, text: &str, size: f32) -> f32 {
         let mut buffer = Buffer::new_empty(Metrics::new(size, size * LINE_HEIGHT_SCALE));
         buffer.set_text(text, &Attrs::new(), Shaping::Advanced, None);
@@ -668,9 +841,15 @@ pub fn buffer_format(formats: &[Format]) -> (Format, bool) {
 /// ponytail: growing can cascade into a large box when the drag touches a long stroke over a
 /// dense drawing, and then the frame costs nearly a whole-surface one. That is the honest
 /// price of redrawing that stroke where the box overlaps it.
-pub fn damage_box(ann: &OutputAnnotations, overlay: &Overlay, from: Rect, width: f32) -> Rect {
+pub fn damage_box(
+    ann: &OutputAnnotations,
+    overlay: &Overlay,
+    from: Rect,
+    width: f32,
+    height: f32,
+) -> Rect {
     let mut cache = TextLayoutCache::default();
-    damage_box_with_cache(ann, overlay, from, width, 1.0, &mut cache)
+    damage_box_with_cache(ann, overlay, from, width, height, 1.0, &mut cache)
 }
 
 pub(crate) fn damage_box_with_cache(
@@ -678,6 +857,7 @@ pub(crate) fn damage_box_with_cache(
     overlay: &Overlay,
     from: Rect,
     width: f32,
+    height: f32,
     scale: f32,
     cache: &mut TextLayoutCache,
 ) -> Rect {
@@ -706,14 +886,15 @@ pub(crate) fn damage_box_with_cache(
                 grown = grown.union(b);
             }
         }
-        // The hint is only repainted when the box grows into it, so the growth has to cover
-        // everything the hint paints. Reserving its box unconditionally would union a top strip
-        // with a drawing box far below it and swallow nearly the whole surface; the hint itself
-        // only changes on a tool, colour or mode switch, and those force a whole-surface frame.
-        if overlay.hint.is_some() {
-            let hint = hint_bounds(width);
-            if hint.intersects(grown) {
-                grown = grown.union(hint);
+        // The toolbar is only repainted when the box grows into it, so the growth has to cover
+        // everything the toolbar paints. Reserving its box unconditionally would union a left
+        // strip with a drawing box far from it and swallow nearly the whole surface; the toolbar
+        // itself only changes on a tool, colour or mode switch, and those force a whole-surface
+        // frame.
+        if overlay.toolbar.is_some() {
+            let toolbar = toolbar_bounds(width, height);
+            if toolbar.intersects(grown) {
+                grown = grown.union(toolbar);
             }
         }
         if grown == damage {
@@ -742,37 +923,28 @@ pub fn transient_bounds(overlay: &Overlay) -> Option<Rect> {
     }
 }
 
-/// The keycap of the tool the hint reports as the active one.
-fn active_key(tool: &str) -> &str {
-    match tool {
-        "pen" => "P",
-        "eraser" => "E",
-        "text" => "T",
-        _ => "",
-    }
-}
-
-/// One laid-out element of the hint.
+/// One laid-out element of the toolbar.
 #[derive(Clone)]
 enum Piece {
-    /// The active colour; macOS calls this a colour well.
-    Well,
+    /// A palette swatch: its palette index and whether it is the active colour.
+    Swatch(usize, bool),
     /// A keycap: the glyph and whether it is the active tool's key.
     Key(&'static str, bool),
     /// The meaning of the keycap before it.
     Label(String, bool),
 }
 
-/// A laid-out hint capsule: where it sits and what to paint, in logical pixels.
+/// A laid-out toolbar: what to paint and what to hit, in logical pixels relative to the
+/// toolbar's own origin.
 #[derive(Clone)]
-struct HintPill {
-    x: f32,
+struct ToolbarPill {
     width: f32,
     pieces: Vec<(Piece, f32, f32)>,
+    hits: Vec<(Rect, ToolbarAction)>,
 }
 
 /// A label vertically centred in a `height`-tall box whose top edge is `top`.
-fn hint_text(x: f32, top: f32, height: f32, size: f32, color: &str, text: &str) -> TextItem {
+fn toolbar_text(x: f32, top: f32, height: f32, size: f32, color: &str, text: &str) -> TextItem {
     TextItem {
         x,
         y: top + (height - size * LINE_HEIGHT_SCALE) / 2.0,
@@ -782,15 +954,27 @@ fn hint_text(x: f32, top: f32, height: f32, size: f32, color: &str, text: &str) 
     }
 }
 
-/// Everything the hint paints. The capsule is centred and its width depends on the font, so
-/// the damage accounting reserves a centred box of the widest capsule `hint_pill` will build.
-fn hint_bounds(width: f32) -> Rect {
-    let reserved = HINT_RESERVE.min(width);
+/// Where the toolbar sits on an output of this logical height: `TOOLBAR_MARGIN` from the left
+/// edge, its vertical centre at the optical centre.
+fn toolbar_origin(height: f32) -> (f32, f32) {
+    (
+        TOOLBAR_MARGIN,
+        height * TOOLBAR_CENTRE - TOOLBAR_HEIGHT / 2.0,
+    )
+}
+
+/// Everything the toolbar paints. The drawn width depends on the font, so the damage
+/// accounting reserves the widest toolbar `toolbar_pill` will build, as a strip on the left of
+/// the output; the strip only joins a damage box that reaches it.
+pub fn toolbar_bounds(width: f32, height: f32) -> Rect {
+    let (x, y) = toolbar_origin(height);
     Rect {
-        x: (width - reserved) / 2.0,
-        y: HINT_TOP - HINT_HAIRLINE,
-        w: reserved,
-        h: HINT_HEIGHT + 2.0 * HINT_HAIRLINE,
+        // The hairline edge is stroked around the path, so it reaches one logical pixel past
+        // the capsule itself.
+        x: x - TOOLBAR_HAIRLINE,
+        y: y - TOOLBAR_HAIRLINE,
+        w: (width - 2.0 * TOOLBAR_MARGIN).clamp(0.0, TOOLBAR_RESERVE) + 2.0 * TOOLBAR_HAIRLINE,
+        h: TOOLBAR_HEIGHT + 2.0 * TOOLBAR_HAIRLINE,
     }
 }
 
@@ -1077,21 +1261,21 @@ mod tests {
     }
 
     #[test]
-    fn warm_hint_cache_matches_cold_hint_render() {
+    fn warm_toolbar_cache_matches_cold_toolbar_render() {
         let mut renderer = Renderer::new();
         let annotations = OutputAnnotations::default();
         let overlay = Overlay {
-            hint: Some(Hint {
-                tool: "pen",
+            toolbar: Some(Toolbar {
+                tool: Tool::Pen,
                 color: "#e01b24",
                 size: 3.0,
             }),
             ..Default::default()
         };
-        let mut cold = vec![0; 640 * 120 * 4];
-        renderer.render(&mut cold, 640, 120, 1.0, &annotations, &overlay, None);
-        let mut warm = vec![0; 640 * 120 * 4];
-        renderer.render(&mut warm, 640, 120, 1.0, &annotations, &overlay, None);
+        let mut cold = vec![0; 640 * 400 * 4];
+        renderer.render(&mut cold, 640, 400, 1.0, &annotations, &overlay, None);
+        let mut warm = vec![0; 640 * 400 * 4];
+        renderer.render(&mut warm, 640, 400, 1.0, &annotations, &overlay, None);
         assert_eq!(cold, warm);
     }
 
@@ -1145,9 +1329,10 @@ mod tests {
             w: 4.0,
             h: 4.0,
         };
-        let expected = damage_box(&annotations, &overlay, from, 200.0);
+        let expected = damage_box(&annotations, &overlay, from, 200.0, 100.0);
         let mut cache = TextLayoutCache::default();
-        let actual = damage_box_with_cache(&annotations, &overlay, from, 200.0, 1.0, &mut cache);
+        let actual =
+            damage_box_with_cache(&annotations, &overlay, from, 200.0, 100.0, 1.0, &mut cache);
         assert_eq!(actual, expected);
     }
 

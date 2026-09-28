@@ -9,6 +9,7 @@ use smithay_client_toolkit::seat::keyboard::{
 use smithay_client_toolkit::seat::pointer::{PointerEvent, PointerEventKind, PointerHandler};
 use wayland_client::protocol::{wl_keyboard, wl_pointer, wl_seat, wl_surface};
 use wayland_client::{Connection, QueueHandle};
+use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape;
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3::{
     self, ZwpTextInputManagerV3,
 };
@@ -16,7 +17,7 @@ use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::{
     self, ContentHint, ContentPurpose, ZwpTextInputV3,
 };
 
-use crate::app::{App, BTN_LEFT, Mode, PALETTE, Tool, log};
+use crate::app::{App, BTN_LEFT, Mode, PALETTE, Tool, ToolbarAction, log};
 use crate::canvas::{Stroke, TextBuffer};
 
 /// What a local key does while a text box is focused.
@@ -247,6 +248,13 @@ impl PointerHandler for App {
             let (x, y) = (event.position.0 as f32, event.position.1 as f32);
             match event.kind {
                 PointerEventKind::Motion { .. } => self.pointer_motion(&key, x, y),
+                PointerEventKind::Enter { serial } => {
+                    // `set_shape` is ignored unless it carries this serial, so every cursor
+                    // change while the pointer is inside reuses it.
+                    self.cursor_serial = Some(serial);
+                    self.pointer_over_toolbar = self.toolbar_hit(&key, x, y).is_some();
+                    self.sync_cursor();
+                }
                 PointerEventKind::Press { button, .. } if button == BTN_LEFT => {
                     self.pointer_press(&key, x, y)
                 }
@@ -256,6 +264,11 @@ impl PointerHandler for App {
                 PointerEventKind::Leave { .. } => {
                     // The release may never come back to this surface (multi-output drag), so finish here.
                     self.pointer_release(&key);
+                    self.pointer_over_toolbar = false;
+                    // The tool shape must not follow the pointer onto another client's surface,
+                    // and the request still needs the serial of the last enter to be honoured.
+                    self.sync_cursor_default();
+                    self.cursor_serial = None;
                 }
                 _ => {}
             }
@@ -407,11 +420,17 @@ impl App {
 }
 
 impl App {
+    /// The toolbar consumes its own presses: a click on a control is not a drawing gesture, and
+    /// it returns before the press reaches the tools.
     fn pointer_press(&mut self, key: &u32, x: f32, y: f32) {
         if self.mode != Mode::Edit {
             return;
         }
-        // A click anywhere finishes the text edit and any previous stroke first, so typed
+        if let Some(action) = self.toolbar_hit(key, x, y) {
+            self.apply_toolbar_action(action);
+            return;
+        }
+        // A click anywhere else finishes the text edit and any previous stroke first, so typed
         // content is kept and a new gesture starts from a clean transient state.
         self.end_text_edit();
         self.commit_transient_strokes();
@@ -444,9 +463,23 @@ impl App {
         if self.mode != Mode::Edit {
             return;
         }
+        // The toolbar is not drawing area: a drag passing over it neither draws under it nor
+        // leaves the eraser marker on it, and the pointer takes the toolbar's own shape there.
+        let over_toolbar = self.toolbar_hit(key, x, y).is_some();
+        if over_toolbar != self.pointer_over_toolbar {
+            self.pointer_over_toolbar = over_toolbar;
+            self.sync_cursor();
+        }
         let Some(out) = self.outputs.get_mut(key) else {
             return;
         };
+        if over_toolbar {
+            if out.overlay.eraser.take().is_some() {
+                out.transient_dirty = true;
+                self.dirty = true;
+            }
+            return;
+        }
         match self.tool {
             // Only a press starts a stroke: hovering with no button held must not draw.
             Tool::Pen => {
@@ -466,6 +499,37 @@ impl App {
         // Only the transient overlay moved, so the next frame can damage just its box.
         out.transient_dirty = true;
         self.dirty = true;
+    }
+
+    /// Apply a toolbar click through the entry points the keys use, so a click and its key
+    /// cannot diverge in clamping or bounds. `Esc` is the same two-stage key it is on the
+    /// keyboard: the first click finishes the text box being edited, the next one locks.
+    fn apply_toolbar_action(&mut self, action: ToolbarAction) {
+        if action == ToolbarAction::Lock {
+            if self.focused_edit().is_some() {
+                self.end_text_edit();
+            } else {
+                self.set_mode(Mode::Locked);
+            }
+            return;
+        }
+        // Any other control finishes an edit in progress, exactly like a click anywhere else.
+        self.end_text_edit();
+        self.commit_transient_strokes();
+        match action {
+            ToolbarAction::Tool(tool) => self.set_tool(tool),
+            ToolbarAction::Color(index) => self.set_color(index),
+            ToolbarAction::SizeStep(dir) => self.nudge_size(dir),
+            ToolbarAction::Lock => {}
+        }
+    }
+
+    /// Leave the pointer to the compositor after it leaves our surface.
+    fn sync_cursor_default(&mut self) {
+        let Some((device, serial)) = self.cursor_device.as_ref().zip(self.cursor_serial) else {
+            return;
+        };
+        device.set_shape(serial, Shape::Default);
     }
 
     fn pointer_release(&mut self, key: &u32) {

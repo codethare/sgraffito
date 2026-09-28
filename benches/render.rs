@@ -2,7 +2,7 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use sgraffito::canvas::{
-    Hint, OutputAnnotations, Overlay, Rect, Stroke, TextBuffer, TextItem, TextOverlay,
+    OutputAnnotations, Overlay, Rect, Stroke, TextBuffer, TextItem, TextOverlay, Tool, Toolbar,
 };
 use sgraffito::render::{DamageRegion, Renderer, damage_box, transient_bounds};
 
@@ -113,11 +113,11 @@ fn measure(
     let median = samples[samples.len() / 2] as f64 / 1_000.0;
     let p95 = samples[(samples.len() * 95 / 100).min(samples.len() - 1)] as f64 / 1_000.0;
     println!(
-        "{name}: median={median:.1}us p95={p95:.1}us logical={logical_width}x{logical_height} scale={scale:.1} buffer={width}x{height} strokes={} texts={} damage={} hint={} text={}",
+        "{name}: median={median:.1}us p95={p95:.1}us logical={logical_width}x{logical_height} scale={scale:.1} buffer={width}x{height} strokes={} texts={} damage={} toolbar={} text={}",
         annotations.strokes.len(),
         annotations.texts.len(),
         region.is_some(),
-        overlay.hint.is_some(),
+        overlay.toolbar.is_some(),
         overlay.text.is_some(),
     );
 }
@@ -143,9 +143,9 @@ fn main() {
     let sparse = document(30, 3840.0, 2160.0);
     let small = document(30, 1920.0, 1080.0);
     let dense = document(200, 3840.0, 2160.0);
-    let hint = Overlay {
-        hint: Some(Hint {
-            tool: "pen",
+    let toolbar = Overlay {
+        toolbar: Some(Toolbar {
+            tool: Tool::Pen,
             color: "#e01b24",
             size: 3.0,
         }),
@@ -160,6 +160,7 @@ fn main() {
         &drag,
         transient_bounds(&drag).expect("drag has bounds"),
         3840.0,
+        2160.0,
     );
     measure(
         "sparse-drag",
@@ -171,7 +172,7 @@ fn main() {
         Some(drag_damage),
     );
     measure("dense-drag", 3840, 2160, 1.0, &dense, &drag, None);
-    measure("hint-full", 3840, 2160, 1.0, &sparse, &hint, None);
+    measure("toolbar-full", 3840, 2160, 1.0, &sparse, &toolbar, None);
     measure(
         "text-edit-full",
         1920,

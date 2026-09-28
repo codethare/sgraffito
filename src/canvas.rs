@@ -7,6 +7,29 @@ use serde::{Deserialize, Serialize};
 /// Eraser hit radius, in logical pixels.
 pub const ERASER_THRESHOLD: f32 = 8.0;
 
+/// Built-in palette (`#rrggbb`).
+pub const PALETTE: [&str; 5] = ["#e01b24", "#f6d32d", "#33d17a", "#3584e4", "#ffffff"];
+
+/// The tool the next gesture uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tool {
+    Pen,
+    Eraser,
+    Text,
+}
+
+/// What clicking one control of the edit-mode toolbar does. Each variant has exactly the
+/// effect of the key the control carries.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ToolbarAction {
+    Tool(Tool),
+    Color(usize),
+    /// Direction to step the active tool's size in, ±1.
+    SizeStep(f32),
+    /// The `Esc` control: finish the text box being edited first, lock on the next click.
+    Lock,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Stroke {
     /// `#rrggbb`
@@ -230,17 +253,17 @@ pub struct Overlay {
     pub eraser: Option<[f32; 2]>,
     /// Text box being edited, preedit included.
     pub text: Option<TextOverlay>,
-    /// Edit-mode affordance: the active tool and colour. Never part of the document, so it
+    /// Edit-mode toolbar: the active tool, colour and size. Never part of the document, so it
     /// cannot be persisted, erased or exported.
-    pub hint: Option<Hint>,
+    pub toolbar: Option<Toolbar>,
 }
 
-/// What the edit-mode hint shows: the active tool's label, the active colour and the
-/// active size, in logical pixels.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct Hint {
-    pub tool: &'static str,
-    /// `#rrggbb`
+/// What the edit-mode toolbar shows: the active tool, the active colour and the active size,
+/// in logical pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Toolbar {
+    pub tool: Tool,
+    /// `#rrggbb`, one of `PALETTE`.
     pub color: &'static str,
     /// Stroke width or text size, depending on the tool.
     pub size: f32,

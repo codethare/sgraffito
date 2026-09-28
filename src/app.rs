@@ -8,6 +8,7 @@ use std::time::Instant;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, Region},
     delegate_dispatch2, delegate_registry,
+    globals::GlobalData,
     output::{OutputHandler, OutputInfo, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
@@ -30,8 +31,13 @@ use wayland_client::{
 };
 
 use crate::canvas::{
-    Doc, Hint, OutputAnnotations, Overlay, Rect, TextBuffer, TextItem, TextOverlay,
+    Doc, OutputAnnotations, Overlay, Rect, TextBuffer, TextItem, TextOverlay, Toolbar,
 };
+pub use crate::canvas::{PALETTE, Tool, ToolbarAction};
+use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::{
+    Shape, WpCursorShapeDeviceV1,
+};
+use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1::WpCursorShapeManagerV1;
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3::ZwpTextInputManagerV3;
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::ZwpTextInputV3;
 
@@ -41,8 +47,6 @@ use crate::render::{
 };
 use crate::store::{self, Store};
 
-/// Built-in palette (`#rrggbb`).
-pub const PALETTE: [&str; 5] = ["#e01b24", "#f6d32d", "#33d17a", "#3584e4", "#ffffff"];
 /// Initial stroke width and the range `[`/`]` may adjust it within, in logical pixels.
 pub const PEN_WIDTH: f32 = 3.0;
 pub const PEN_WIDTH_MIN: f32 = 1.0;
@@ -100,13 +104,6 @@ impl Command {
             other => Err(format!("unknown command '{other}'")),
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tool {
-    Pen,
-    Eraser,
-    Text,
 }
 
 pub struct Output {
@@ -185,6 +182,14 @@ pub struct App {
     /// Shm format of every buffer and whether frames need the R/B swap. Decided once from the
     /// compositor's advertised list, because all buffers of an output have to agree.
     buffer_format: Option<(wl_shm::Format, bool)>,
+
+    // pointer shape (wp_cursor_shape_v1)
+    cursor_shape_manager: Option<WpCursorShapeManagerV1>,
+    /// The seat's pointer shape device; it outlives the layer surfaces.
+    pub(crate) cursor_device: Option<WpCursorShapeDeviceV1>,
+    /// Serial of the latest `wl_pointer.enter`; `set_shape` is ignored without it.
+    pub(crate) cursor_serial: Option<u32>,
+    pub(crate) pointer_over_toolbar: bool,
 }
 
 impl App {
@@ -234,8 +239,13 @@ impl App {
             im_preedit: None,
             im_delete: None,
             buffer_format: None,
+            cursor_shape_manager: None,
+            cursor_device: None,
+            cursor_serial: None,
+            pointer_over_toolbar: false,
         };
         app.bind_text_input_manager();
+        app.bind_cursor_shape();
         app.sync_outputs();
         Ok(app)
     }
@@ -285,7 +295,7 @@ impl App {
         // annotation lands scale times too far out and is clipped.
         let scale = output_scale(self.output_state.info(&output).as_ref());
         surface.set_buffer_scale(scale as i32);
-        let hint = self.current_hint();
+        let toolbar = self.current_toolbar();
         let layer = self.layer_shell.create_layer_surface(
             &self.qh,
             surface.clone(),
@@ -325,7 +335,7 @@ impl App {
                 buffers: Vec::new(),
                 buffer_size: (0, 0),
                 overlay: Overlay {
-                    hint,
+                    toolbar,
                     ..Default::default()
                 },
                 text_cache: TextLayoutCache::default(),
@@ -344,6 +354,7 @@ impl App {
         self.end_text_edit();
         self.cancel_transients();
         self.keyboard_focus = None;
+        self.pointer_over_toolbar = false;
         self.sync_text_input();
         self.mode = mode;
         let keys: Vec<u32> = self.outputs.keys().copied().collect();
@@ -362,15 +373,18 @@ impl App {
             }
         }
         log(&format!("mode switched to {mode:?}"));
-        self.refresh_hint();
+        self.refresh_toolbar();
+        // The shape device belongs to the seat, so it survives the recreated surfaces: re-apply
+        // the shape instead of losing it with the surface that was destroyed.
+        self.sync_cursor();
     }
 
-    /// The edit-mode hint of the current mode, tool, colour and size.
-    fn current_hint(&self) -> Option<Hint> {
+    /// The edit-mode toolbar of the current mode, tool, colour and size.
+    fn current_toolbar(&self) -> Option<Toolbar> {
         match self.mode {
             Mode::Locked => None,
-            Mode::Edit => Some(Hint {
-                tool: tool_label(self.tool),
+            Mode::Edit => Some(Toolbar {
+                tool: self.tool,
                 color: PALETTE[self.color_idx],
                 size: self.active_size(),
             }),
@@ -385,8 +399,8 @@ impl App {
         }
     }
 
-    /// `[` and `]` step the active tool's size, clamped to its range. The hint shows the value,
-    /// so it is repainted (a whole-surface frame, like a tool or colour change).
+    /// `[` and `]` step the active tool's size, clamped to its range. The toolbar shows the
+    /// value, so it is repainted (a whole-surface frame, like a tool or colour change).
     pub(crate) fn nudge_size(&mut self, dir: f32) {
         match self.tool {
             Tool::Text => {
@@ -408,18 +422,61 @@ impl App {
                 )
             }
         }
-        self.refresh_hint();
+        self.refresh_toolbar();
     }
 
-    /// Push the current hint into every output's transient overlay. Called when the mode,
+    /// Push the current toolbar into every output's transient overlay. Called when the mode,
     /// the tool or the colour changes.
-    fn refresh_hint(&mut self) {
-        let hint = self.current_hint();
+    fn refresh_toolbar(&mut self) {
+        let toolbar = self.current_toolbar();
         for out in self.outputs.values_mut() {
-            out.overlay.hint = hint;
+            out.overlay.toolbar = toolbar;
             out.dirty = true;
         }
         self.dirty = true;
+    }
+
+    /// The toolbar control under a pointer position on an output, if any.
+    pub(crate) fn toolbar_hit(&mut self, key: &u32, x: f32, y: f32) -> Option<ToolbarAction> {
+        let out = self.outputs.get(key)?;
+        let (toolbar, width, height) = (out.overlay.toolbar?, out.width as f32, out.height as f32);
+        self.renderer.toolbar_hit(&toolbar, width, height, x, y)
+    }
+
+    /// The shape the pointer should have now: the active tool's, or the compositor's own
+    /// default while the pointer is on the toolbar or the daemon is locked.
+    fn desired_cursor(&self) -> Shape {
+        if self.mode == Mode::Locked || self.pointer_over_toolbar {
+            return Shape::Default;
+        }
+        tool_cursor(self.tool)
+    }
+
+    /// Apply the current pointer shape, when the compositor offers the protocol and the pointer
+    /// has entered one of our surfaces. The request carries the latest enter serial, which the
+    /// compositor matches against the one it sent, so a tool change while the pointer is
+    /// already inside has to reuse it.
+    pub(crate) fn sync_cursor(&mut self) {
+        let Some((device, serial)) = self.cursor_device.as_ref().zip(self.cursor_serial) else {
+            return;
+        };
+        device.set_shape(serial, self.desired_cursor());
+    }
+
+    /// Bind `wp_cursor_shape_v1`; the pointer keeps the compositor's own shape without it.
+    fn bind_cursor_shape(&mut self) {
+        let bound = self
+            .registry_state
+            .bind_one::<WpCursorShapeManagerV1, App, GlobalData>(&self.qh, 1..=2, GlobalData);
+        match bound {
+            Ok(manager) => {
+                self.cursor_shape_manager = Some(manager);
+                log("pointer shape protocol wp_cursor_shape_v1 available");
+            }
+            Err(e) => log(&format!(
+                "compositor does not provide wp_cursor_shape_v1 ({e}); the pointer keeps the compositor's own shape"
+            )),
+        }
     }
 
     pub(crate) fn set_tool(&mut self, tool: Tool) {
@@ -429,7 +486,8 @@ impl App {
             self.tool = tool;
             log(&format!("tool switched to {tool:?}"));
             self.mark_all_dirty();
-            self.refresh_hint();
+            self.refresh_toolbar();
+            self.sync_cursor();
         }
     }
 
@@ -501,7 +559,7 @@ impl App {
     pub(crate) fn set_color(&mut self, idx: usize) {
         if idx < PALETTE.len() {
             self.color_idx = idx;
-            self.refresh_hint();
+            self.refresh_toolbar();
         }
     }
 
@@ -806,6 +864,7 @@ impl App {
                 &out.overlay,
                 text_damage,
                 w as f32,
+                h as f32,
                 scale,
                 &mut out.text_cache,
             ))
@@ -828,6 +887,7 @@ impl App {
                 &out.overlay,
                 transient,
                 w as f32,
+                h as f32,
                 scale,
                 &mut out.text_cache,
             ))
@@ -912,6 +972,16 @@ impl App {
     }
 }
 
+/// The pointer shape of a tool, as `wp_cursor_shape_v1` names it. The eraser takes the closest
+/// named shape to a region eraser; there are no custom cursor images.
+pub fn tool_cursor(tool: Tool) -> Shape {
+    match tool {
+        Tool::Pen => Shape::Crosshair,
+        Tool::Eraser => Shape::Cell,
+        Tool::Text => Shape::Text,
+    }
+}
+
 fn key_of(output: &wl_output::WlOutput) -> u32 {
     output.id().protocol_id()
 }
@@ -919,15 +989,6 @@ fn key_of(output: &wl_output::WlOutput) -> u32 {
 /// The output's scale factor, never below 1.
 fn output_scale(info: Option<&OutputInfo>) -> f32 {
     info.map(|i| i.scale_factor.max(1) as f32).unwrap_or(1.0)
-}
-
-/// The word the edit-mode hint shows for the active tool.
-fn tool_label(tool: Tool) -> &'static str {
-    match tool {
-        Tool::Pen => "pen",
-        Tool::Eraser => "eraser",
-        Tool::Text => "text",
-    }
 }
 
 fn apply_input_region(compositor: &CompositorState, surface: &wl_surface::WlSurface, mode: Mode) {
@@ -1108,7 +1169,14 @@ impl SeatHandler for App {
         capability: Capability,
     ) {
         if capability == Capability::Pointer {
-            let _ = self.seat_state.get_pointer(qh, &seat);
+            // The shape device is bound to this pointer and is what makes the pointer follow
+            // the active tool; without the protocol the compositor keeps its own cursor.
+            if let Ok(pointer) = self.seat_state.get_pointer(qh, &seat) {
+                self.cursor_device = self
+                    .cursor_shape_manager
+                    .as_ref()
+                    .map(|manager| manager.get_pointer(&pointer, qh, GlobalData));
+            }
         }
         if capability == Capability::Keyboard {
             let _ = self.seat_state.get_keyboard(qh, &seat, None);

@@ -71,3 +71,14 @@ fn delete_length_excludes_the_preedit() {
     // A request shorter than the preedit never deletes committed content.
     assert_eq!(bytes_to_delete(2, 6), 0);
 }
+
+#[test]
+fn each_tool_has_its_own_pointer_shape() {
+    use sgraffito::app::tool_cursor;
+    use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape;
+    // The three shapes have to differ, or a tool change would not show on the pointer.
+    assert_eq!(tool_cursor(Tool::Pen), Shape::Crosshair);
+    assert_eq!(tool_cursor(Tool::Text), Shape::Text);
+    assert_ne!(tool_cursor(Tool::Eraser), tool_cursor(Tool::Pen));
+    assert_ne!(tool_cursor(Tool::Eraser), tool_cursor(Tool::Text));
+}

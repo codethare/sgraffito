@@ -103,6 +103,35 @@ grep -q "mode switched to Edit" "$work/daemon.log" || fail "edit mode was never 
 kill -0 "$daemon_pid" 2>/dev/null || fail "daemon died after switching modes"
 echo "  mode switching ok"
 
+# 2b. the pointer follows the tool through wp_cursor_shape_v1; sway advertises it, so a
+# compositor without the global is the only case that logs the fallback instead.
+grep -q "wp_cursor_shape_v1 available" "$work/daemon.log" \
+    || fail "the pointer shape protocol was not bound"
+echo "  pointer shape protocol ok"
+
+# 2c. while editing, the toolbar renders against the left edge at the optical centre and the
+# top strip stays clear. The seeded stroke sits at y=300 on this 600-tall output, so the band
+# sits above it and can only be the toolbar.
+"$bin" edit > /dev/null || fail "edit failed"
+sleep 0.5
+grim -o HEADLESS-1 -t ppm "$work/toolbar.ppm" 2>/dev/null || fail "grim on the toolbar failed"
+python3 - "$work/toolbar.ppm" <<'PY' || exit 1
+import sys
+d = open(sys.argv[1], 'rb').read()
+hdr = d[:d.index(b'255\n') + 4].split()
+w, h = int(hdr[1]), int(hdr[2])
+px = d[d.index(b'255\n') + 4:]
+def ink(x0, y0, x1, y1):
+    return sum(1 for y in range(y0, y1) for x in range(x0, x1)
+               if max(px[(y * w + x) * 3:(y * w + x) * 3 + 3]) > 20)
+band = ink(0, int(h * 0.415), w // 2, int(h * 0.485))
+top = ink(0, 0, w, 20)
+assert band > 500, f"no toolbar at the optical centre (ink={band})"
+assert top == 0, f"the top strip is not clear (ink={top})"
+print(f"  toolbar ok: band={band} top={top}")
+PY
+"$bin" lock > /dev/null || fail "lock failed"
+
 # 3. an unknown command changes nothing and reports an error
 if "$bin" 2>/dev/null; then fail "no arguments should exit non-zero"; fi
 if printf 'frobnicate\n' | timeout 3 python3 -c "

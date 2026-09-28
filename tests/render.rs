@@ -1,7 +1,10 @@
 use sgraffito::canvas::{
-    Doc, Hint, OutputAnnotations, Overlay, Rect, Stroke, TextBuffer, TextItem, TextOverlay,
+    Doc, OutputAnnotations, Overlay, PALETTE, Rect, Stroke, TextBuffer, TextItem, TextOverlay,
+    Tool, Toolbar, ToolbarAction,
 };
-use sgraffito::render::{DamageRegion, Renderer, buffer_format, damage_box, transient_bounds};
+use sgraffito::render::{
+    DamageRegion, Renderer, buffer_format, damage_box, toolbar_bounds, transient_bounds,
+};
 use wayland_client::protocol::wl_shm::Format;
 
 const W: u32 = 200;
@@ -309,32 +312,32 @@ fn dot(x: f32, y: f32) -> Overlay {
 }
 
 #[test]
-fn hint_draws_ink_only_when_it_is_present() {
+fn toolbar_draws_ink_only_when_it_is_present() {
     let doc = OutputAnnotations::default();
     let with = Overlay {
-        hint: Some(Hint {
-            tool: "text",
+        toolbar: Some(Toolbar {
+            tool: Tool::Text,
             color: "#33d17a",
             size: 18.0,
         }),
         ..Default::default()
     };
-    let mut buf = buffer(640, 120);
-    Renderer::new().render(&mut buf, 640, 120, 1.0, &doc, &with, None);
+    let mut buf = buffer(640, 400);
+    Renderer::new().render(&mut buf, 640, 400, 1.0, &doc, &with, None);
     assert!(ink(&buf) > 0);
 
-    let mut plain = buffer(640, 120);
-    Renderer::new().render(&mut plain, 640, 120, 1.0, &doc, &Overlay::default(), None);
+    let mut plain = buffer(640, 400);
+    Renderer::new().render(&mut plain, 640, 400, 1.0, &doc, &Overlay::default(), None);
     assert_eq!(ink(&plain), 0);
 }
 
 #[test]
-fn hint_is_a_centred_translucent_capsule() {
-    let (w, h) = (640u32, 120u32);
+fn toolbar_is_a_left_anchored_capsule_at_the_optical_centre() {
+    let (w, h) = (640u32, 400u32);
     let mut buf = buffer(w, h);
     let overlay = Overlay {
-        hint: Some(Hint {
-            tool: "pen",
+        toolbar: Some(Toolbar {
+            tool: Tool::Pen,
             color: "#33d17a",
             size: 3.0,
         }),
@@ -349,28 +352,111 @@ fn hint_is_a_centred_translucent_capsule() {
         &overlay,
         None,
     );
-    // The capsule lives in the top strip and is centred: the row through its middle is
-    // painted in the middle of the surface and empty at the far left edge.
-    let painted: Vec<u32> = (0..w).filter(|x| alpha(&buf, w, *x, 33) > 0).collect();
+    // The toolbar hugs the left edge and its vertical centre is at the optical centre, above
+    // the geometric one: the row through its middle is painted from the left margin, and the
+    // row through the middle of the surface is empty.
+    let band = toolbar_bounds(w as f32, h as f32);
+    let mid = (band.y + band.h / 2.0) as u32;
+    let painted: Vec<u32> = (0..w).filter(|x| alpha(&buf, w, *x, mid) > 0).collect();
     assert!(!painted.is_empty());
-    let (left, right) = (*painted.first().unwrap(), *painted.last().unwrap());
+    let left = *painted.first().unwrap();
     assert!(
-        (left + right).abs_diff(w - 1) <= 2,
-        "pill {left}..{right} is not centred on {w}"
+        left <= 12,
+        "the toolbar starts at {left}, not against the left edge"
     );
-    assert_eq!(alpha(&buf, w, 2, 33), 0);
-    // The fill is translucent, so the wallpaper still reads through the capsule.
-    let fill = alpha(&buf, w, left + 4, 33);
+    assert!(
+        band.y + band.h / 2.0 < h as f32 / 2.0,
+        "not above the geometric centre"
+    );
+    // It is anchored to the left, not centred: the right edge of the surface stays empty.
+    let right = *painted.last().unwrap();
+    assert!(
+        right < w - 20,
+        "the toolbar reaches {right}, the surface is {w}"
+    );
+    // The old top strip is empty: this is not a top-edge capsule any more.
+    assert_eq!(ink(&buf[..(w * 16 * 4) as usize]), 0);
+    // The fill is translucent, so the wallpaper still reads through the toolbar.
+    let fill = alpha(&buf, w, left + 4, mid);
     assert!(fill > 0 && fill < 255, "fill alpha {fill}");
 }
 
 #[test]
-fn the_eraser_cannot_reach_the_hint() {
-    // The hint lives in the transient overlay, never in the document, so a click at its
-    // position has nothing to delete — including the colour swatch at the hint's origin.
+fn every_point_inside_the_toolbar_resolves_to_a_control() {
+    let (w, h) = (1920.0f32, 1080.0f32);
+    let toolbar = Toolbar {
+        tool: Tool::Pen,
+        color: PALETTE[0],
+        size: 3.0,
+    };
+    let mut renderer = Renderer::new();
+    let band = toolbar_bounds(w, h);
+    let mid = band.y + band.h / 2.0;
+    let sweep: Vec<Option<ToolbarAction>> = (0..band.w as u32)
+        .map(|step| renderer.toolbar_hit(&toolbar, w, h, band.x + step as f32 + 0.5, mid))
+        .collect();
+    // The toolbar starts at its left margin, ends inside its reserve, and nothing between the
+    // two is a hole: a press on a gap would start a stroke under the capsule.
+    let first = sweep.iter().position(Option::is_some).expect("no toolbar");
+    assert!(first <= 2, "the toolbar starts {first} px in");
+    let end = sweep[first..]
+        .iter()
+        .position(Option::is_none)
+        .map_or(sweep.len(), |step| step + first);
+    assert!(
+        sweep[end..].iter().all(Option::is_none),
+        "a gap inside the toolbar reaches no control"
+    );
+    let mut actions: Vec<ToolbarAction> = Vec::new();
+    for action in sweep[first..end].iter().flatten() {
+        if !actions.contains(action) {
+            actions.push(*action);
+        }
+    }
+    assert!(
+        end - first > 200,
+        "the toolbar is only {} px wide",
+        end - first
+    );
+    for tool in [Tool::Pen, Tool::Eraser, Tool::Text] {
+        assert!(actions.contains(&ToolbarAction::Tool(tool)), "{tool:?}");
+    }
+    for index in 0..PALETTE.len() {
+        assert!(
+            actions.contains(&ToolbarAction::Color(index)),
+            "colour {index}"
+        );
+    }
+    assert!(actions.contains(&ToolbarAction::SizeStep(-1.0)));
+    assert!(actions.contains(&ToolbarAction::SizeStep(1.0)));
+    assert!(actions.contains(&ToolbarAction::Lock));
+    assert_eq!(
+        sweep[first].unwrap(),
+        ToolbarAction::Color(0),
+        "the left end is not the palette"
+    );
+    assert_eq!(sweep[end - 1].unwrap(), ToolbarAction::Lock);
+    // Outside the band the toolbar takes nothing: those presses are drawing gestures.
+    assert_eq!(
+        renderer.toolbar_hit(&toolbar, w, h, band.x + 4.0, band.y - 1.0),
+        None
+    );
+    assert_eq!(
+        renderer.toolbar_hit(&toolbar, w, h, band.x + 4.0, band.y + band.h),
+        None
+    );
+}
+
+#[test]
+fn the_eraser_cannot_reach_the_toolbar() {
+    // The toolbar lives in the transient overlay, never in the document, so nothing at its
+    // position is there to delete -- including the palette swatches and the tool keycaps.
+    let (w, h) = (1920.0f32, 1080.0f32);
     let mut doc = OutputAnnotations::default();
-    assert!(!doc.erase(16.0, 16.0));
-    assert!(!doc.erase(40.0, 22.0));
+    let band = toolbar_bounds(w, h);
+    for x in [band.x + 4.0, band.x + band.w / 2.0] {
+        assert!(!doc.erase(x, band.y + band.h / 2.0));
+    }
 }
 
 #[test]
@@ -440,7 +526,7 @@ fn damage_box_grows_to_contain_the_element_it_overlaps() {
         w: 10.0,
         h: 10.0,
     };
-    let grown = damage_box(&a, &Overlay::default(), transient, W as f32);
+    let grown = damage_box(&a, &Overlay::default(), transient, W as f32, H as f32);
     // The line's box is 20..180 x 47..53 plus half the width and the anti-aliasing edge, and
     // the line is drawn whole, so the damage box has to reach past both of its ends: outside
     // the box those pixels would keep already-swapped bytes.
@@ -453,7 +539,10 @@ fn damage_box_grows_to_contain_the_element_it_overlaps() {
         w: 10.0,
         h: 10.0,
     };
-    assert_eq!(damage_box(&a, &Overlay::default(), far, W as f32), far);
+    assert_eq!(
+        damage_box(&a, &Overlay::default(), far, W as f32, H as f32),
+        far
+    );
 }
 
 #[test]
@@ -477,6 +566,7 @@ fn bounding_box_frame_is_pixel_identical_to_a_whole_surface_frame() {
             .unwrap()
             .union(transient_bounds(&second).unwrap()),
         W as f32,
+        H as f32,
     );
     // Both buffers start from the same frame, then get the second frame in the two ways.
     let mut whole = buffer(W, H);
@@ -488,10 +578,10 @@ fn bounding_box_frame_is_pixel_identical_to_a_whole_surface_frame() {
 }
 
 #[test]
-fn a_hint_does_not_widen_a_drag_far_from_it() {
+fn a_toolbar_does_not_widen_a_drag_far_from_it() {
     let overlay = Overlay {
-        hint: Some(Hint {
-            tool: "pen",
+        toolbar: Some(Toolbar {
+            tool: Tool::Pen,
             color: "#ffffff",
             size: 3.0,
         }),
@@ -499,34 +589,41 @@ fn a_hint_does_not_widen_a_drag_far_from_it() {
     };
     let transient = Rect {
         x: 100.0,
-        y: 300.0,
+        y: 900.0,
         w: 10.0,
         h: 10.0,
     };
-    // The hint sits in the top strip; a drag far below it must not drag it along.
+    // The toolbar sits on the left at the optical centre; a drag far below it must not drag it
+    // along.
     assert_eq!(
-        damage_box(&OutputAnnotations::default(), &overlay, transient, 1920.0),
+        damage_box(
+            &OutputAnnotations::default(),
+            &overlay,
+            transient,
+            1920.0,
+            1080.0
+        ),
         transient
     );
 }
 
 #[test]
-fn bounding_box_frame_with_a_hint_matches_a_whole_surface_frame() {
-    // The reserve has to hold the whole capsule: a frame that damages only the box around a
-    // drag into the hint must still paint every capsule pixel the whole-surface frame paints.
+fn bounding_box_frame_with_a_toolbar_matches_a_whole_surface_frame() {
+    // The reserve has to hold the whole toolbar: a frame that damages only the box around a
+    // drag into it must still paint every toolbar pixel the whole-surface frame paints.
     let (w, h) = (1024u32, 200u32);
-    let hint = Hint {
-        tool: "text",
+    let toolbar = Toolbar {
+        tool: Tool::Text,
         color: "#33d17a",
         size: 72.0,
     };
     let first = Overlay {
-        hint: Some(hint),
-        ..dot(500.0, 20.0)
+        toolbar: Some(toolbar),
+        ..dot(500.0, 80.0)
     };
     let second = Overlay {
-        hint: Some(hint),
-        ..dot(504.0, 24.0)
+        toolbar: Some(toolbar),
+        ..dot(504.0, 84.0)
     };
     let damage = damage_box(
         &OutputAnnotations::default(),
@@ -535,6 +632,7 @@ fn bounding_box_frame_with_a_hint_matches_a_whole_surface_frame() {
             .unwrap()
             .union(transient_bounds(&second).unwrap()),
         w as f32,
+        h as f32,
     );
     let mut whole = buffer(w, h);
     frame(
@@ -566,22 +664,22 @@ fn bounding_box_frame_with_a_hint_matches_a_whole_surface_frame() {
 }
 
 #[test]
-fn a_drag_far_from_the_hint_leaves_the_hint_pixels_alone() {
-    // The hint is static: only a tool, colour, size or mode change repaints it, and those force
-    // a whole-surface frame. A bounding-box frame that does not reach it may not paint it,
+fn a_drag_far_from_the_toolbar_leaves_the_toolbar_pixels_alone() {
+    // The toolbar is static: only a tool, colour, size or mode change repaints it, and those
+    // force a whole-surface frame. A bounding-box frame that does not reach it may not paint it,
     // because those bytes lie outside the damage region and still hold the previous frame.
     let (w, h) = (1024u32, 600u32);
-    let hint = Hint {
-        tool: "pen",
+    let toolbar = Toolbar {
+        tool: Tool::Pen,
         color: "#33d17a",
         size: 3.0,
     };
     let with = |x: f32, y: f32| Overlay {
-        hint: Some(hint),
+        toolbar: Some(toolbar),
         ..dot(x, y)
     };
-    let first = with(500.0, 400.0);
-    let second = with(504.0, 404.0);
+    let first = with(500.0, 500.0);
+    let second = with(504.0, 504.0);
     let damage = damage_box(
         &OutputAnnotations::default(),
         &second,
@@ -589,6 +687,7 @@ fn a_drag_far_from_the_hint_leaves_the_hint_pixels_alone() {
             .unwrap()
             .union(transient_bounds(&second).unwrap()),
         w as f32,
+        h as f32,
     );
     let mut whole = buffer(w, h);
     frame(
@@ -678,6 +777,7 @@ fn long_text_damage_contains_everything_rasterised() {
             .unwrap()
             .union(transient_bounds(&second).unwrap()),
         W as f32,
+        H as f32,
     );
     let mut whole = buffer(W, H);
     frame(&mut whole, W, H, &doc, &first, None);
