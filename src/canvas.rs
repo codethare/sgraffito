@@ -269,6 +269,9 @@ pub struct Toolbar {
     pub size: f32,
     /// The block under the pointer: it stretches to say what it does.
     pub hover: Option<ToolbarAction>,
+    /// How far that stretch has opened, 0 to 1. It moves only the capsule's trailing edge and
+    /// the text the edge uncovers, so a frame of the transition is a localized repaint.
+    pub grow: f32,
 }
 
 #[derive(Debug, Clone)]

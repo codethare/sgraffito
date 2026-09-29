@@ -508,6 +508,8 @@ impl App {
         let hover = self.toolbar_hit(key, x, y);
         if hover != self.toolbar_hover {
             self.toolbar_hover = hover;
+            // A fresh block opens from nothing; leaving the rail closes immediately.
+            self.toolbar_hover_since = hover.map(|_| Instant::now());
             self.refresh_toolbar_hover();
         }
         let over = hover.is_some();

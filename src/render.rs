@@ -25,7 +25,7 @@ const ERASER_MARKER_RADIUS: f32 = 8.0;
 /// centre at the optical centre, roughly 5% above the geometric centre, where the gaze rests.
 const TOOLBAR_MARGIN: f32 = 8.0;
 const TOOLBAR_CENTRE: f32 = 0.45;
-/// Side of one block: the rail is a column of these.
+/// Side of one block: the rail is a column of these, above the HIG's minimum pointer target.
 const TOOLBAR_BLOCK: f32 = 30.0;
 /// Between two blocks of the same group.
 const TOOLBAR_GAP: f32 = 4.0;
@@ -34,11 +34,14 @@ const TOOLBAR_GROUP_GAP: f32 = 10.0;
 /// Around the whole column.
 const TOOLBAR_PAD: f32 = 6.0;
 const TOOLBAR_RADIUS: f32 = 8.0;
-/// How far the glyph and the meaning of a stretched block are kept apart.
-const TOOLBAR_LABEL_GAP: f32 = 8.0;
 const TOOLBAR_HAIRLINE: f32 = 1.0;
-const TOOLBAR_LABEL_SIZE: f32 = 13.0;
-const TOOLBAR_KEY_SIZE: f32 = 14.0;
+/// One size for the glyph and for the label beside it: the HIG's 13 pt macOS control size, so
+/// the two share a size and a baseline instead of being matched by eye.
+const TOOLBAR_TEXT_SIZE: f32 = 13.0;
+/// How far the block and the meaning of a stretched block are kept apart.
+const TOOLBAR_LABEL_GAP: f32 = 6.0;
+/// Padding after a label, so text never touches the capsule's edge.
+const TOOLBAR_LABEL_PAD: f32 = 12.0;
 /// Widest stretched block the damage accounting reserves room for, and the ceiling a label has
 /// to fit: the width of a block depends on the font, so `damage_box` reserves this strip instead
 /// of the drawn rail. The strip only joins a damage box that reaches it.
@@ -50,8 +53,9 @@ const TOOLBAR_COLUMN: f32 =
     2.0 * TOOLBAR_PAD + 12.0 * TOOLBAR_BLOCK + 8.0 * TOOLBAR_GAP + 3.0 * TOOLBAR_GROUP_GAP;
 const TOOLBAR_CACHE_CAP: usize = 16;
 /// `#rrggbbaa`. The block fill stands in for a HUD material: a `wl_shm` layer surface cannot be
-/// blurred, so there is translucency but no real vibrancy.
-const TOOLBAR_BLOCK_FILL: &str = "#1c1c1ec7";
+/// blurred, so there is translucency but no real vibrancy. The alpha is the opacity that keeps
+/// a secondary label above 4.5:1 over any wallpaper; darken it rather than lighten it.
+const TOOLBAR_BLOCK_FILL: &str = "#1c1c1ce6";
 const TOOLBAR_BLOCK_EDGE: &str = "#ffffff26";
 /// macOS system accent, used for the armed tool's block and the active colour's ring.
 const TOOLBAR_ACCENT: &str = "#0a84ffff";
@@ -120,7 +124,7 @@ fn toolbar_blocks(toolbar: &Toolbar) -> Vec<Block> {
     blocks[last].gap = TOOLBAR_GROUP_GAP;
     blocks.push(Block {
         glyph: "[".into(),
-        label: format!("{axis} -"),
+        label: format!("smaller {axis}"),
         action: Some(ToolbarAction::SizeStep(-1.0)),
         active: false,
         swatch: None,
@@ -137,7 +141,7 @@ fn toolbar_blocks(toolbar: &Toolbar) -> Vec<Block> {
     });
     blocks.push(Block {
         glyph: "]".into(),
-        label: format!("{axis} +"),
+        label: format!("larger {axis}"),
         action: Some(ToolbarAction::SizeStep(1.0)),
         active: false,
         swatch: None,
@@ -145,7 +149,7 @@ fn toolbar_blocks(toolbar: &Toolbar) -> Vec<Block> {
     });
     blocks.push(Block {
         glyph: "Esc".into(),
-        label: "end text, again locks".into(),
+        label: "end text, then lock".into(),
         action: Some(ToolbarAction::Lock),
         active: false,
         swatch: None,
@@ -349,14 +353,14 @@ impl Renderer {
                 continue;
             }
             if let Some(layout) = text_cache.get_mut(index) {
-                self.draw_prepared_text(&mut pixmap, item, scale, layout);
+                self.draw_prepared_text(&mut pixmap, item, scale, layout, None);
             }
         }
         if let Some(s) = &overlay.stroke {
             draw_stroke(&mut pixmap, s, scale);
         }
         if let Some(t) = &overlay.text {
-            self.draw_text(&mut pixmap, &t.item, scale, Some(t));
+            self.draw_text(&mut pixmap, &t.item, scale, Some(t), None);
         }
         if let Some(toolbar) = &overlay.toolbar {
             // The toolbar is static content: only a tool, colour, size or mode change repaints
@@ -386,11 +390,19 @@ impl Renderer {
             return;
         };
         let (ox, oy) = toolbar_origin(pixmap.height() as f32 / scale);
+        // How far the block under the pointer has opened. The layout is settled, so a frame of the
+        // transition only moves the capsule's trailing edge and the text that edge uncovers.
+        let grow = toolbar.grow.clamp(0.0, 1.0);
         for control in &pill.controls {
+            let width = if control.stretched {
+                TOOLBAR_BLOCK + (control.width - TOOLBAR_BLOCK) * grow
+            } else {
+                control.width
+            };
             let block = Rect {
                 x: ox * scale,
                 y: (oy + control.y) * scale,
-                w: control.width * scale,
+                w: width * scale,
                 h: TOOLBAR_BLOCK * scale,
             };
             // A stretched block is a capsule; a square block is a rounded square.
@@ -448,27 +460,29 @@ impl Renderer {
                 );
                 // The glyph stays where it is and the capsule grows to its right, so the block
                 // reads as the same square, stretched.
-                let glyph = self.text_width(&control.block.glyph, TOOLBAR_KEY_SIZE);
+                let glyph = self.text_width(&control.block.glyph, TOOLBAR_TEXT_SIZE);
                 let item = toolbar_text(
                     ox + (TOOLBAR_BLOCK - glyph) / 2.0,
                     oy + control.y,
                     TOOLBAR_BLOCK,
-                    TOOLBAR_KEY_SIZE,
+                    TOOLBAR_TEXT_SIZE,
                     TOOLBAR_KEY_TEXT,
                     &control.block.glyph,
                 );
-                self.draw_text(pixmap, &item, scale, None);
+                self.draw_text(pixmap, &item, scale, None, None);
             }
-            if control.stretched {
+            if control.stretched && width > TOOLBAR_BLOCK + TOOLBAR_LABEL_GAP {
                 let item = toolbar_text(
                     ox + TOOLBAR_BLOCK + TOOLBAR_LABEL_GAP,
                     oy + control.y,
                     TOOLBAR_BLOCK,
-                    TOOLBAR_LABEL_SIZE,
+                    TOOLBAR_TEXT_SIZE,
                     TOOLBAR_LABEL_TEXT,
                     &control.block.label,
                 );
-                self.draw_text(pixmap, &item, scale, None);
+                // The label is uncovered by the capsule growing over it: a glyph appears once
+                // the edge has passed it, and at rest the edge is past its trailing padding.
+                self.draw_text(pixmap, &item, scale, None, Some(ox + width));
             }
         }
     }
@@ -505,7 +519,7 @@ impl Renderer {
         if let Some(cached) = self
             .toolbar_cache
             .iter()
-            .find(|cached| cached.toolbar == *toolbar && cached.surface == surface)
+            .find(|cached| same_layout(&cached.toolbar, toolbar) && cached.surface == surface)
         {
             return Some(cached.pill.clone());
         }
@@ -532,10 +546,13 @@ impl Renderer {
         for block in toolbar_blocks(toolbar) {
             let gap = block.gap;
             let hovered = block.action.is_some() && block.action == toolbar.hover;
-            let label = hovered.then(|| self.text_width(&block.label, TOOLBAR_LABEL_SIZE));
+            // The capsule is [block][gap][label][padding], so the text never touches its edge.
+            let label = hovered.then(|| self.text_width(&block.label, TOOLBAR_TEXT_SIZE));
             let width = match label {
-                Some(label) if TOOLBAR_BLOCK + TOOLBAR_LABEL_GAP + label <= ceiling => {
-                    TOOLBAR_BLOCK + TOOLBAR_LABEL_GAP + label
+                Some(label)
+                    if TOOLBAR_BLOCK + TOOLBAR_LABEL_GAP + label + TOOLBAR_LABEL_PAD <= ceiling =>
+                {
+                    TOOLBAR_BLOCK + TOOLBAR_LABEL_GAP + label + TOOLBAR_LABEL_PAD
                 }
                 _ => TOOLBAR_BLOCK,
             };
@@ -628,22 +645,29 @@ impl Renderer {
             .grown(CURSOR_WIDTH)
     }
 
+    /// `reveal` is the logical x a progress animation has uncovered: glyphs to its right are
+    /// left out, so the text appears as the shape around it grows.
     fn draw_prepared_text(
         &mut self,
         pixmap: &mut PixmapMut,
         item: &TextItem,
         scale: f32,
         prepared: &mut PreparedText,
+        reveal: Option<f32>,
     ) {
         let (ox, oy) = (item.x * scale, item.y * scale);
         let c = parse_hex(&item.color);
         let color = Color::rgba(c[0], c[1], c[2], c[3]);
         let (clip_w, clip_h) = (pixmap.width(), pixmap.height());
+        let reveal = reveal.map(|x| x * scale);
         prepared.buffer.draw(
             &mut self.font_system,
             &mut self.cache,
             color,
             |x, y, w, h, c| {
+                if reveal.is_some_and(|reveal| ox + x as f32 > reveal) {
+                    return;
+                }
                 blend(
                     pixmap,
                     clip_w,
@@ -664,6 +688,7 @@ impl Renderer {
         item: &TextItem,
         scale: f32,
         edit: Option<&TextOverlay>,
+        reveal: Option<f32>,
     ) {
         let (committed, preedit) = match edit {
             Some(e) => (e.buffer.text.as_str(), e.preedit.as_str()),
@@ -690,7 +715,7 @@ impl Renderer {
                 }
             }
         }
-        self.draw_prepared_text(pixmap, item, scale, &mut prepared);
+        self.draw_prepared_text(pixmap, item, scale, &mut prepared, reveal);
 
         if let Some(e) = edit {
             let size = item.size * scale;
@@ -897,6 +922,13 @@ pub fn transient_bounds(overlay: &Overlay) -> Option<Rect> {
         (Some(a), Some(b)) => Some(a.union(b)),
         (a, b) => a.or(b),
     }
+}
+
+/// Whether two toolbar states lay out the same rail. The transition progress is not part of the
+/// layout: a block's final width is settled before the pop-out opens, so its frames reuse the
+/// measured layout instead of measuring the label again.
+fn same_layout(a: &Toolbar, b: &Toolbar) -> bool {
+    a.tool == b.tool && a.color == b.color && a.size == b.size && a.hover == b.hover
 }
 
 /// One block of the rail as laid out: where it sits in the column, how wide it is drawn, and
@@ -1246,6 +1278,7 @@ mod tests {
                 color: "#e01b24",
                 size: 3.0,
                 hover: None,
+                grow: 1.0,
             }),
             ..Default::default()
         };

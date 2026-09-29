@@ -300,13 +300,14 @@ fn frame(
     region.swap_rb(buf, w, h);
 }
 
-/// A toolbar state for the tests.
+/// A toolbar state for the tests, with the pop-out fully open.
 fn toolbar(tool: Tool, color: &'static str, size: f32, hover: Option<ToolbarAction>) -> Toolbar {
     Toolbar {
         tool,
         color,
         size,
         hover,
+        grow: 1.0,
     }
 }
 
@@ -387,6 +388,28 @@ fn toolbar_is_a_left_edge_rail_at_the_optical_centre() {
     // is a colour chip, which is opaque; the bottom one is a key.
     let fill = alpha(&buf, w, 20, (band.y + band.h - 21.0) as u32);
     assert!(fill > 0 && fill < 255, "fill alpha {fill}");
+}
+
+/// Whether a pixel carries text rather than a block fill: the label is much lighter than the
+/// translucent dark fill, so a plain threshold separates them.
+fn bright(buf: &[u8], w: u32, x: u32, y: u32) -> bool {
+    let i = ((y * w + x) * 4) as usize;
+    buf[i] as u32 + buf[i + 1] as u32 + buf[i + 2] as u32 > 260
+}
+
+/// The y of the row whose block has this action, found by sweeping the rail.
+fn row_of(
+    renderer: &mut Renderer,
+    toolbar: &Toolbar,
+    w: f32,
+    h: f32,
+    action: ToolbarAction,
+) -> f32 {
+    let band = toolbar_bounds(w, h);
+    (0..band.h as u32)
+        .map(|step| band.y + step as f32 + 0.5)
+        .find(|y| renderer.toolbar_hit(toolbar, w, h, band.x + 30.0, *y) == Some(action))
+        .expect("the rail has no such block")
 }
 
 /// One hit test per row of the rail, at `x` in column coordinates.
@@ -919,4 +942,194 @@ fn doc_strokes_of_other_outputs_are_not_drawn() {
         None,
     );
     assert_eq!(ink(&buf), 0);
+}
+
+/// One frame of the rail with the given hover and pop-out progress.
+fn rail_frame(w: u32, h: u32, wheel: &Toolbar, hover: Option<ToolbarAction>, grow: f32) -> Vec<u8> {
+    let mut buf = buffer(w, h);
+    let overlay = Overlay {
+        toolbar: Some(Toolbar {
+            hover,
+            grow,
+            ..*wheel
+        }),
+        ..Default::default()
+    };
+    Renderer::new().render(
+        &mut buf,
+        w,
+        h,
+        1.0,
+        &OutputAnnotations::default(),
+        &overlay,
+        None,
+    );
+    buf
+}
+
+#[test]
+fn the_capsule_keeps_room_around_its_label() {
+    // The metrics CLAUDE.md fixes for a control: 6 pt between a block and its label, and 12 pt
+    // of padding after a label, so the text never touches the capsule's edge.
+    const GAP: f32 = 6.0;
+    const PAD: f32 = 12.0;
+    let (w, h) = (1920u32, 1080u32);
+    let (fw, fh) = (w as f32, h as f32);
+    let mut renderer = Renderer::new();
+    let wheel = rail();
+    let text = ToolbarAction::Tool(Tool::Text);
+    let row = (row_of(&mut renderer, &wheel, fw, fh, text) + 15.0) as u32;
+    let buf = rail_frame(w, h, &wheel, Some(text), 1.0);
+    let ox = toolbar_bounds(fw, fh).x + 1.0;
+    let painted: Vec<u32> = (0..w).filter(|x| alpha(&buf, w, *x, row) > 0).collect();
+    let glyphs: Vec<u32> = (0..w).filter(|x| bright(&buf, w, *x, row)).collect();
+    let (edge, label_end) = (
+        *painted.last().unwrap() as f32,
+        *glyphs.last().unwrap() as f32,
+    );
+    let label_start = *glyphs
+        .iter()
+        .find(|x| (**x as f32) > ox + 30.0)
+        .expect("the label was not drawn") as f32;
+    let block_end = ox + 30.0;
+    assert!(
+        label_start - block_end >= GAP - 1.0,
+        "only {:.1} pt between the block and its label",
+        label_start - block_end
+    );
+    assert!(
+        edge - label_end >= PAD - 2.0,
+        "only {:.1} pt of padding after the label",
+        edge - label_end
+    );
+    // The glyph stays where it was in the square, so the block reads as stretched, not moved.
+    assert!(
+        glyphs[0] as f32 > ox && (glyphs[0] as f32) < block_end,
+        "the glyph left its block"
+    );
+}
+
+#[test]
+fn the_pop_out_edge_uncovers_the_label() {
+    let (w, h) = (1920u32, 1080u32);
+    let (fw, fh) = (w as f32, h as f32);
+    let mut renderer = Renderer::new();
+    let wheel = rail();
+    let text = ToolbarAction::Tool(Tool::Text);
+    let row = (row_of(&mut renderer, &wheel, fw, fh, text) + 15.0) as u32;
+    let edge = |buf: &[u8]| (0..w).rfind(|x| alpha(buf, w, *x, row) > 0).unwrap_or(0);
+    let ox = toolbar_bounds(fw, fh).x + 1.0;
+    let label_end = |buf: &[u8]| {
+        (0..w)
+            .rev()
+            .find(|x| *x as f32 > ox + 30.0 && bright(buf, w, *x, row))
+    };
+    let (closed, half, open) = (
+        rail_frame(w, h, &wheel, Some(text), 0.0),
+        rail_frame(w, h, &wheel, Some(text), 0.5),
+        rail_frame(w, h, &wheel, Some(text), 1.0),
+    );
+    // A block with the pointer on it opens from its own square outwards, and the label appears
+    // only where the edge has already passed.
+    assert!(
+        edge(&closed) < edge(&half) && edge(&half) < edge(&open),
+        "the capsule edge went nowhere: {} {} {}",
+        edge(&closed),
+        edge(&half),
+        edge(&open)
+    );
+    assert!(
+        label_end(&closed).is_none(),
+        "the label was drawn while closed"
+    );
+    assert!(
+        label_end(&half) < label_end(&open),
+        "the label never revealed"
+    );
+    // The target does not move with the pop-out: the pointer stays on the block, and the room the
+    // capsule opens into is already its own, so the hover cannot flicker while it opens.
+    for grow in [0.0, 0.5, 1.0] {
+        let wheel_open = Toolbar {
+            hover: Some(text),
+            grow,
+            ..wheel
+        };
+        assert_eq!(
+            renderer.toolbar_hit(&wheel_open, fw, fh, ox + 100.0, row as f32),
+            Some(text),
+            "the block lost the pointer at grow {grow}"
+        );
+    }
+}
+
+#[test]
+fn the_pop_out_eases_from_nothing_to_open() {
+    use sgraffito::app::{ease_out, hover_grow};
+    use std::time::{Duration, Instant};
+    let now = Instant::now();
+    // No block under the pointer: nothing is drawn stretched, so its progress is complete.
+    assert_eq!(hover_grow(None, now), 1.0);
+    assert_eq!(hover_grow(Some(now), now), 0.0);
+    // Ease-out: past halfway at half the time, and settled once the time is up.
+    let half = hover_grow(Some(now - Duration::from_millis(70)), now);
+    assert!(half > 0.5 && half < 1.0, "half time gives {half}");
+    assert_eq!(hover_grow(Some(now - Duration::from_millis(140)), now), 1.0);
+    assert_eq!(hover_grow(Some(now - Duration::from_secs(9)), now), 1.0);
+    assert_eq!(ease_out(0.0), 0.0);
+    assert_eq!(ease_out(1.0), 1.0);
+    assert_eq!(ease_out(-3.0), 0.0);
+    assert_eq!(ease_out(7.0), 1.0);
+}
+
+#[test]
+fn a_label_keeps_aa_contrast_over_any_wallpaper() {
+    // The buffer holds one layer, so a pixel over a black wallpaper is the pixel itself and over
+    // a white one it is the pixel blended with white. Both have to keep secondary label text
+    // above 4.5:1 against the block it sits on.
+    fn over(pixel: &[u8], backdrop: f32) -> [f32; 3] {
+        let a = pixel[3] as f32 / 255.0;
+        [0, 1, 2].map(|i| pixel[i] as f32 + (1.0 - a) * backdrop)
+    }
+    fn luminance(c: [f32; 3]) -> f32 {
+        let channel = |v: f32| {
+            let v = v / 255.0;
+            if v <= 0.03928 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(c[0]) + 0.7152 * channel(c[1]) + 0.0722 * channel(c[2])
+    }
+    fn ratio(a: [f32; 3], b: [f32; 3]) -> f32 {
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    let (w, h) = (1920u32, 1080u32);
+    let (fw, fh) = (w as f32, h as f32);
+    let mut renderer = Renderer::new();
+    let wheel = rail();
+    let text = ToolbarAction::Tool(Tool::Text);
+    let row = (row_of(&mut renderer, &wheel, fw, fh, text) + 15.0) as u32;
+    let buf = rail_frame(w, h, &wheel, Some(text), 1.0);
+    let pixel = |x: u32| -> [u8; 4] {
+        let i = ((row * w + x) * 4) as usize;
+        [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]
+    };
+    let edge = (0..w).rfind(|x| alpha(&buf, w, *x, row) > 0).unwrap();
+    let fill = pixel(edge - 4);
+    let glyph = pixel(
+        (0..w)
+            .rfind(|x| bright(&buf, w, *x, row))
+            .expect("no label"),
+    );
+
+    for backdrop in [0.0, 128.0, 255.0] {
+        let label = ratio(over(&glyph, backdrop), over(&fill, backdrop));
+        assert!(
+            label >= 4.5,
+            "label contrast {label:.2}:1 over a {backdrop} backdrop"
+        );
+    }
 }

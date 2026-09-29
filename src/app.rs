@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, Region},
@@ -62,6 +62,11 @@ pub const TEXT_SIZE_STEP: f32 = 2.0;
 pub(crate) const BTN_LEFT: u32 = 0x110;
 /// Max shm buffers kept per output: the compositor may still hold the previous one.
 const MAX_BUFFERS: usize = 2;
+/// How long the pop-out of a hovered block takes, one frame of it, and the relaxed poll the
+/// event loop uses when nothing is moving.
+const TOOLBAR_ANIM: Duration = Duration::from_millis(140);
+const FRAME_WAIT: Duration = Duration::from_millis(16);
+pub const IDLE_WAIT: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -197,6 +202,9 @@ pub struct App {
     /// The block of the edit-mode toolbar the pointer is on, if any: it stretches to say what it
     /// does.
     pub(crate) toolbar_hover: Option<ToolbarAction>,
+    /// When that stretch started, while it is still opening. `None` when no block is under the
+    /// pointer, which is also what makes the collapse immediate.
+    pub(crate) toolbar_hover_since: Option<Instant>,
 }
 
 impl App {
@@ -251,6 +259,7 @@ impl App {
             cursor_serial: None,
             pointer_over_toolbar: false,
             toolbar_hover: None,
+            toolbar_hover_since: None,
         };
         app.bind_text_input_manager();
         app.bind_cursor_shape();
@@ -365,6 +374,7 @@ impl App {
         self.keyboard_focus = None;
         self.pointer_over_toolbar = false;
         self.toolbar_hover = None;
+        self.toolbar_hover_since = None;
         self.sync_text_input();
         self.mode = mode;
         let keys: Vec<u32> = self.outputs.keys().copied().collect();
@@ -398,6 +408,7 @@ impl App {
                 color: PALETTE[self.color_idx],
                 size: self.active_size(),
                 hover: self.toolbar_hover,
+                grow: self.toolbar_grow(Instant::now()),
             }),
         }
     }
@@ -447,9 +458,10 @@ impl App {
         self.dirty = true;
     }
 
-    /// The pointer crossed onto another block, so the rail stretches a different one. Only the
-    /// rail's own box changed, and it is fixed while editing, so the frame can damage just that
-    /// box instead of the whole surface.
+    /// The pointer crossed onto another block, or the pop-out moved on: the rail stretches a
+    /// different block, or the same one a little further. Only the rail's own box changed, and it
+    /// is fixed while editing, so the frame can damage just that box instead of the whole
+    /// surface.
     pub(crate) fn refresh_toolbar_hover(&mut self) {
         let toolbar = self.current_toolbar();
         for out in self.outputs.values_mut() {
@@ -457,6 +469,17 @@ impl App {
             out.toolbar_dirty = true;
         }
         self.dirty = true;
+    }
+
+    /// How far the pop-out of the block under the pointer has opened, 0 to 1.
+    fn toolbar_grow(&self, now: Instant) -> f32 {
+        hover_grow(self.toolbar_hover_since, now)
+    }
+
+    /// Whether a pop-out is still opening, and so whether the loop has to come back for the next
+    /// frame of it.
+    fn animating(&self) -> bool {
+        self.toolbar_grow(Instant::now()) < 1.0
     }
 
     /// The toolbar control under a pointer position on an output, if any.
@@ -708,19 +731,35 @@ impl App {
     }
 
     /// Called once per event loop iteration: flush pending writes and redraw.
-    pub fn tick(&mut self) {
+    /// Called once per event-loop iteration: flush pending writes and redraw. Returns how long
+    /// the loop may wait before the next iteration, which is a frame while a pop-out is opening.
+    pub fn tick(&mut self) -> Duration {
         if self.store.due(Instant::now())
             && let Err(e) = self.store.flush(&self.doc)
         {
             log(&format!("failed to write {}: {e}", self.path.display()));
         }
-        if !self.dirty {
-            return;
+        // The rail is the only thing that animates, and a frame of it is a localized repaint.
+        if self.animating() {
+            self.refresh_toolbar_hover();
         }
-        self.dirty = false;
-        let keys: Vec<u32> = self.outputs.keys().copied().collect();
-        for key in keys {
-            self.draw_output(&key);
+        if self.dirty {
+            self.dirty = false;
+            let keys: Vec<u32> = self.outputs.keys().copied().collect();
+            for key in keys {
+                self.draw_output(&key);
+            }
+        }
+        self.next_wait()
+    }
+
+    /// The wait until the loop is worth running again: a frame while a pop-out is opening, and
+    /// the idle wait otherwise.
+    fn next_wait(&self) -> Duration {
+        if self.animating() {
+            FRAME_WAIT
+        } else {
+            IDLE_WAIT
         }
     }
 
@@ -1001,6 +1040,24 @@ impl App {
             .find(|(_, o)| &o.layer == layer)
             .map(|(key, _)| *key)
     }
+}
+
+/// How far the pop-out of the block under the pointer has opened, 0 to 1. A block with no
+/// pointer on it is never drawn stretched, so its progress is simply complete: the collapse is
+/// immediate on purpose, and the pop-out is the one direction this transition animates.
+pub fn hover_grow(started: Option<Instant>, now: Instant) -> f32 {
+    let Some(started) = started else {
+        return 1.0;
+    };
+    let elapsed = now.saturating_duration_since(started);
+    ease_out((elapsed.as_secs_f32() / TOOLBAR_ANIM.as_secs_f32()).clamp(0.0, 1.0))
+}
+
+/// The curve of the pop-out: fast at first and settling, so the stretch reads as a response to
+/// the pointer rather than as a queue of frames. Apple's default easing decelerates.
+pub fn ease_out(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
 }
 
 /// The pointer shape of a tool, as `wp_cursor_shape_v1` names it. The eraser takes the closest

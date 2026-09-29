@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use sgraffito::canvas::{
     OutputAnnotations, Overlay, Rect, Stroke, TextBuffer, TextItem, TextOverlay, Tool, Toolbar,
+    ToolbarAction,
 };
 use sgraffito::render::{DamageRegion, Renderer, damage_box, transient_bounds};
 
@@ -139,17 +140,23 @@ fn render_frame(
     renderer.render(buffer, width, height, scale, annotations, overlay, damage);
 }
 
+/// The rail with the pen armed and no block under the pointer, fully open.
+fn rail_state() -> Toolbar {
+    Toolbar {
+        tool: Tool::Pen,
+        color: "#e01b24",
+        size: 3.0,
+        hover: None,
+        grow: 1.0,
+    }
+}
+
 fn main() {
     let sparse = document(30, 3840.0, 2160.0);
     let small = document(30, 1920.0, 1080.0);
     let dense = document(200, 3840.0, 2160.0);
     let toolbar = Overlay {
-        toolbar: Some(Toolbar {
-            tool: Tool::Pen,
-            color: "#e01b24",
-            size: 3.0,
-            hover: None,
-        }),
+        toolbar: Some(rail_state()),
         ..Default::default()
     };
     let drag = Overlay {
@@ -173,7 +180,16 @@ fn main() {
         Some(drag_damage),
     );
     measure("dense-drag", 3840, 2160, 1.0, &dense, &drag, None);
-    measure("toolbar-full", 3840, 2160, 1.0, &sparse, &toolbar, None);
+    measure("rail-full", 3840, 2160, 1.0, &sparse, &toolbar, None);
+    // The widest capsule the rail can open, the shape the pop-out animation draws every frame.
+    let hovered = Overlay {
+        toolbar: Some(Toolbar {
+            hover: Some(ToolbarAction::Tool(Tool::Text)),
+            ..rail_state()
+        }),
+        ..Default::default()
+    };
+    measure("rail-hover-full", 3840, 2160, 1.0, &sparse, &hovered, None);
     measure(
         "text-edit-full",
         1920,

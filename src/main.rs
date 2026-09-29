@@ -13,7 +13,7 @@ use calloop::EventLoop;
 use calloop::ping;
 use calloop::signals::{Signal, Signals};
 use calloop_wayland_source::WaylandSource;
-use sgraffito::app::{App, log};
+use sgraffito::app::{App, IDLE_WAIT, log};
 use sgraffito::store;
 use smithay_client_toolkit::compositor::CompositorState;
 use smithay_client_toolkit::output::OutputState;
@@ -255,12 +255,15 @@ fn run_daemon() -> anyhow::Result<()> {
     let stop = Arc::new(AtomicBool::new(false));
     let control_thread = spawn_control_server(listener, requests, ping, stop.clone());
 
+    // `tick` reports how long the loop may wait: a frame while the toolbar is opening, the idle
+    // wait otherwise.
+    let mut wait = IDLE_WAIT;
     while !app.exiting() {
-        if let Err(e) = event_loop.dispatch(Some(Duration::from_millis(200)), &mut app) {
+        if let Err(e) = event_loop.dispatch(Some(wait), &mut app) {
             log(&format!("event loop error: {e}"));
             break;
         }
-        app.tick();
+        wait = app.tick();
     }
 
     stop.store(true, Ordering::Relaxed);
