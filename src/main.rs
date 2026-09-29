@@ -16,6 +16,7 @@ use calloop_wayland_source::WaylandSource;
 use sgraffito::app::{App, IDLE_WAIT, log};
 use sgraffito::store;
 use smithay_client_toolkit::compositor::CompositorState;
+use smithay_client_toolkit::data_device_manager::DataDeviceManagerState;
 use smithay_client_toolkit::output::OutputState;
 use smithay_client_toolkit::registry::RegistryState;
 use smithay_client_toolkit::seat::SeatState;
@@ -210,9 +211,12 @@ fn run_daemon() -> anyhow::Result<()> {
     let compositor_state = CompositorState::bind(&globals, &qh)?;
     let layer_shell = LayerShell::bind(&globals, &qh)?;
     let shm = Shm::bind(&globals, &qh)?;
+    let data_device_manager = DataDeviceManagerState::bind(&globals, &qh)?;
     let output_state = OutputState::new(&globals, &qh);
     let seat_state = SeatState::new(&globals, &qh);
 
+    // The ping is how a worker gets the loop's attention, so it exists before the app does.
+    let (ping, ping_source) = ping::make_ping()?;
     let mut app = App::new(
         conn.clone(),
         qh,
@@ -222,6 +226,8 @@ fn run_daemon() -> anyhow::Result<()> {
         output_state,
         seat_state,
         shm,
+        data_device_manager,
+        ping.clone(),
     )?;
     log(&format!(
         "daemon started, mode {:?}, annotations {}",
@@ -236,7 +242,6 @@ fn run_daemon() -> anyhow::Result<()> {
     WaylandSource::new(conn.clone(), event_queue).insert(handle.clone())?;
 
     let (requests, request_rx) = mpsc::channel::<ControlRequest>();
-    let (ping, ping_source) = ping::make_ping()?;
     handle.insert_source(ping_source, move |_, _, app: &mut App| {
         while let Ok(request) = request_rx.try_recv() {
             let response = app.command(&request.command);

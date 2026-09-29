@@ -1133,3 +1133,129 @@ fn a_label_keeps_aa_contrast_over_any_wallpaper() {
         );
     }
 }
+
+/// A frame of one text box being edited, with the given caret position and preedit.
+fn edit_frame(w: u32, h: u32, text: &str, cursor: usize, preedit: &str) -> Vec<u8> {
+    let mut buf = buffer(w, h);
+    let overlay = Overlay {
+        text: Some(TextOverlay {
+            item: TextItem {
+                x: 10.0,
+                y: 10.0,
+                color: "#ffffff".into(),
+                size: 24.0,
+                text: text.into(),
+            },
+            buffer: TextBuffer {
+                text: text.into(),
+                cursor,
+            },
+            index: None,
+            preedit: preedit.into(),
+        }),
+        ..Default::default()
+    };
+    Renderer::new().render(
+        &mut buf,
+        w,
+        h,
+        1.0,
+        &OutputAnnotations::default(),
+        &overlay,
+        None,
+    );
+    buf
+}
+
+/// Rightmost painted column of a row band.
+fn rightmost(buf: &[u8], w: u32, y0: u32, y1: u32) -> u32 {
+    (y0..y1)
+        .flat_map(|y| (0..w).filter(move |x| alpha(buf, w, *x, y) > 0))
+        .max()
+        .unwrap_or(0)
+}
+
+#[test]
+fn the_caret_moves_with_the_cursor() {
+    let (w, h) = (200u32, 100u32);
+    let (y0, y1) = (10, 10 + 29);
+    // "a " ends in a space, so the ink of the text stops at "a": anything past it is the caret.
+    let at_end = edit_frame(w, h, "a ", 2, "");
+    let at_start = edit_frame(w, h, "a ", 0, "");
+    let (end, start) = (
+        rightmost(&at_end, w, y0, y1),
+        rightmost(&at_start, w, y0, y1),
+    );
+    assert!(
+        end > start + 4,
+        "the caret did not move with the cursor: {start} vs {end}"
+    );
+    // A caret at the start also paints the text's left edge, so nothing is lost either way.
+    assert!(alpha(&at_start, w, 10, 20) > 0, "no caret at the start");
+}
+
+#[test]
+fn the_preedit_renders_at_the_cursor() {
+    let (w, h) = (200u32, 100u32);
+    let (y0, y1) = (10, 10 + 29);
+    // The preedit is underlined, so its row is the widest run of ink in the line box.
+    let underline_start = |buf: &[u8]| {
+        let mut widest = (0usize, 0u32);
+        for y in y0..y1 {
+            let painted: Vec<u32> = (0..w).filter(|x| alpha(buf, w, *x, y) > 0).collect();
+            if painted.len() > widest.0 {
+                widest = (painted.len(), painted[0]);
+            }
+        }
+        widest.1
+    };
+    let middle = underline_start(&edit_frame(w, h, "ab", 1, "XX"));
+    let end = underline_start(&edit_frame(w, h, "ab", 2, "XX"));
+    assert!(
+        middle < end,
+        "the preedit did not render where the caret is: {middle} vs {end}"
+    );
+    assert!(middle > 10, "the preedit rendered before the text");
+}
+
+#[test]
+fn a_cjk_click_lands_inside_the_measured_box() {
+    // The click that re-enters a box is tested against what the renderer measures, because the
+    // font-size estimate the eraser uses is 0.6 em per character: too narrow for full-width
+    // scripts, which is why a click on such a glyph used to start a new box instead.
+    let item = TextItem {
+        x: 10.0,
+        y: 10.0,
+        color: "#ffffff".into(),
+        size: 24.0,
+        text: "买牛奶".into(),
+    };
+    let mut renderer = Renderer::new();
+    let measured = renderer.text_edit_bounds(&item.text, &item, 1.0);
+    let (w, h) = (200u32, 100u32);
+    let mut buf = buffer(w, h);
+    renderer.render(
+        &mut buf,
+        w,
+        h,
+        1.0,
+        &ann(vec![], vec![item.clone()]),
+        &Overlay::default(),
+        None,
+    );
+    let painted: Vec<(u32, u32)> = (0..h)
+        .flat_map(|y| (0..w).map(move |x| (x, y)))
+        .filter(|(x, y)| alpha(&buf, w, *x, *y) > 0)
+        .collect();
+    assert!(!painted.is_empty());
+    for (x, y) in painted {
+        assert!(
+            measured.contains(x as f32 + 0.5, y as f32 + 0.5),
+            "painted pixel {x},{y} is outside the box the click test uses: {measured:?}"
+        );
+    }
+    assert!(
+        item.bounds().w < measured.w,
+        "the estimate is not narrower here, so this checks nothing"
+    );
+}

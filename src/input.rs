@@ -1,5 +1,6 @@
 //! Input handling: pointer drawing, keyboard shortcuts, text input (`zwp_text_input_v3`).
 
+use std::thread;
 use std::time::Instant;
 
 use smithay_client_toolkit::dispatch2::Dispatch2;
@@ -17,8 +18,10 @@ use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::{
     self, ContentHint, ContentPurpose, ZwpTextInputV3,
 };
 
-use crate::app::{App, BTN_LEFT, Mode, PALETTE, Tool, ToolbarAction, log};
-use crate::canvas::{Stroke, TextBuffer};
+use crate::app::{
+    App, BTN_LEFT, Mode, PALETTE, Tool, ToolbarAction, log, read_selection, text_mime,
+};
+use crate::canvas::{Caret, Stroke, TextBuffer};
 
 /// What a local key does while a text box is focused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +30,10 @@ pub enum EditAction {
     EndText,
     Backspace,
     Newline,
+    /// Move the caret inside the text box.
+    Move(Caret),
+    /// Paste the compositor's selection at the caret.
+    Paste,
     /// Insert the key's text into the buffer.
     Local,
     /// The input method owns this key while a preedit is active; touch nothing.
@@ -36,14 +43,26 @@ pub enum EditAction {
 /// Decide a local key while a text box is focused. A non-empty preedit means the input method
 /// owns every key except `Esc`, which only ends the edit, so local `Backspace`/`Enter`/printable
 /// keys must not change the committed content.
-pub fn edit_action(keysym: Keysym, preedit_active: bool) -> EditAction {
+pub fn edit_action(keysym: Keysym, ctrl: bool, preedit_active: bool) -> EditAction {
     if preedit_active && keysym != Keysym::Escape {
         return EditAction::InputMethod;
     }
+    if keysym == Keysym::Escape {
+        return EditAction::EndText;
+    }
+    if ctrl {
+        return match keysym {
+            Keysym::v | Keysym::V => EditAction::Paste,
+            _ => EditAction::Local,
+        };
+    }
     match keysym {
-        Keysym::Escape => EditAction::EndText,
         Keysym::BackSpace => EditAction::Backspace,
         Keysym::Return | Keysym::KP_Enter => EditAction::Newline,
+        Keysym::Left => EditAction::Move(Caret::Left),
+        Keysym::Right => EditAction::Move(Caret::Right),
+        Keysym::Up => EditAction::Move(Caret::Up),
+        Keysym::Down => EditAction::Move(Caret::Down),
         _ => EditAction::Local,
     }
 }
@@ -174,12 +193,16 @@ impl KeyboardHandler for App {
         }
         // While a text box is edited, printable characters are content, not shortcuts.
         if self.focused_edit_mut().is_some() {
-            match edit_action(event.keysym, !self.preedit_is_empty()) {
+            match edit_action(event.keysym, self.ctrl, !self.preedit_is_empty()) {
                 EditAction::EndText => self.end_text_edit(),
                 EditAction::Backspace => self.edit_buffer(|b| {
                     b.backspace();
                 }),
                 EditAction::Newline => self.edit_buffer(|b| b.insert("\n")),
+                EditAction::Move(caret) => self.edit_buffer(|b| {
+                    b.move_cursor(caret);
+                }),
+                EditAction::Paste => self.paste(),
                 EditAction::Local => {
                     if let Some(text) = event.utf8 {
                         self.edit_buffer(|b| b.insert(&text));
@@ -226,10 +249,12 @@ impl KeyboardHandler for App {
         _: &QueueHandle<Self>,
         _: &wl_keyboard::WlKeyboard,
         _: u32,
-        _: Modifiers,
+        modifiers: Modifiers,
         _: RawModifiers,
         _: u32,
     ) {
+        // `Ctrl`+`V` pastes; the rest of the modifier state is not used yet.
+        self.ctrl = modifiers.ctrl;
     }
 }
 
@@ -540,6 +565,46 @@ impl App {
             ToolbarAction::Color(index) => self.set_color(index),
             ToolbarAction::SizeStep(dir) => self.nudge_size(dir),
             ToolbarAction::Lock => {}
+        }
+    }
+
+    /// Paste the compositor's selection at the caret, when a text box is being edited. The
+    /// bytes are read off the event loop: a thread reads the pipe and rings the loop when it has
+    /// them, so a slow clipboard owner cannot stall drawing or the control socket.
+    fn paste(&mut self) {
+        if self.focused_edit().is_none() {
+            return;
+        }
+        let Some(offer) = self.selection.clone() else {
+            log("nothing to paste: the compositor has no selection");
+            return;
+        };
+        let Some(mime) = offer.with_mime_types(text_mime) else {
+            log("nothing to paste: the selection offers no plain text");
+            return;
+        };
+        match offer.receive(mime) {
+            Ok(pipe) => {
+                let sender = self.paste_tx.clone();
+                let ping = self.ping.clone();
+                thread::spawn(move || {
+                    if sender.send(read_selection(pipe)).is_ok() {
+                        ping.ping();
+                    }
+                });
+            }
+            Err(e) => log(&format!("failed to read the clipboard: {e}")),
+        }
+    }
+
+    /// Insert whatever a reader thread has finished with, through the same path a local key
+    /// takes. Called from `tick`, which the ping wakes as soon as a paste is ready.
+    pub(crate) fn take_pasted(&mut self) {
+        while let Ok(text) = self.pasted.try_recv() {
+            if text.is_empty() {
+                continue;
+            }
+            self.edit_buffer(|buffer| buffer.insert(&text));
         }
     }
 

@@ -639,7 +639,9 @@ impl Renderer {
         }
     }
 
-    pub(crate) fn text_edit_bounds(&mut self, text: &str, item: &TextItem, scale: f32) -> Rect {
+    /// The region a text box's content occupies, which is what a click that re-enters it is
+    /// tested against.
+    pub fn text_edit_bounds(&mut self, text: &str, item: &TextItem, scale: f32) -> Rect {
         self.prepare_text(text, item, scale)
             .paint_bounds
             .grown(CURSOR_WIDTH)
@@ -690,47 +692,44 @@ impl Renderer {
         edit: Option<&TextOverlay>,
         reveal: Option<f32>,
     ) {
-        let (committed, preedit) = match edit {
-            Some(e) => (e.buffer.text.as_str(), e.preedit.as_str()),
-            None => (item.text.as_str(), ""),
+        let (committed, preedit, caret) = match edit {
+            Some(e) => (
+                e.buffer.text.as_str(),
+                e.preedit.as_str(),
+                Some(e.buffer.cursor_bytes()),
+            ),
+            None => (item.text.as_str(), "", None),
         };
         // Text uses explicit newlines only. The output clips long lines instead of wrapping
         // them behind the damage calculator's back.
-        let display = if preedit.is_empty() {
-            Cow::Borrowed(committed)
-        } else {
-            Cow::Owned(format!("{committed}{preedit}"))
+        // The preedit renders where the caret is, so the text after the caret stays after it.
+        let display = match caret.filter(|_| !preedit.is_empty()) {
+            Some(at) => Cow::Owned(format!(
+                "{}{}{}",
+                &committed[..at],
+                preedit,
+                &committed[at..]
+            )),
+            None => Cow::Borrowed(committed),
         };
         if display.is_empty() && edit.is_none() {
             return;
         }
         let mut prepared = self.prepare_text(display.as_ref(), item, scale);
-        let mut preedit_x0 = None;
-        if !preedit.is_empty() {
-            for run in prepared.buffer.layout_runs() {
-                for glyph in run.glyphs {
-                    if glyph.start >= committed.len() && preedit_x0.is_none() {
-                        preedit_x0 = Some(glyph.x);
-                    }
-                }
-            }
-        }
+        let geometry = caret_geometry(&prepared, caret.unwrap_or(committed.len()), preedit.len());
         self.draw_prepared_text(pixmap, item, scale, &mut prepared, reveal);
 
-        if let Some(e) = edit {
+        if edit.is_some() {
             let size = item.size * scale;
-            let color = {
-                let c = parse_hex(&item.color);
-                Color::rgba(c[0], c[1], c[2], c[3])
-            };
+            let c = parse_hex(&item.color);
+            let color = Color::rgba(c[0], c[1], c[2], c[3]);
             let (ox, oy) = (item.x * scale, item.y * scale);
-            if !e.preedit.is_empty() {
-                let x0 = ox + preedit_x0.unwrap_or(prepared.line_w);
+            if let Some((x0, x1)) = geometry.preedit {
                 fill(
                     pixmap,
-                    x0,
-                    oy + prepared.baseline + size * 0.15,
-                    (ox + prepared.line_w - x0).max(0.0),
+                    ox + x0,
+                    oy + (geometry.baseline + size * 0.15),
+                    (x1 - x0).max(0.0),
                     UNDERLINE_HEIGHT * scale,
                     color,
                 );
@@ -740,10 +739,10 @@ impl Renderer {
             // a real glyph's baseline are not the same fraction).
             fill(
                 pixmap,
-                ox + prepared.line_w,
-                oy + prepared.line_top,
+                ox + geometry.x,
+                oy + geometry.top,
                 CURSOR_WIDTH * scale,
-                prepared.line_height,
+                geometry.height,
                 color,
             );
         }
@@ -984,6 +983,68 @@ pub fn toolbar_bounds(width: f32, height: f32) -> Rect {
         w: (width - 2.0 * TOOLBAR_MARGIN).clamp(0.0, TOOLBAR_RESERVE) + 2.0 * TOOLBAR_HAIRLINE,
         h: TOOLBAR_COLUMN + 2.0 * TOOLBAR_HAIRLINE,
     }
+}
+
+/// Where the caret and the preedit sit in a shaped line, in logical pixels relative to the
+/// text's own origin.
+struct CaretGeometry {
+    /// Left edge of the caret.
+    x: f32,
+    /// Top and height of the line box the caret spans, and its baseline.
+    top: f32,
+    height: f32,
+    baseline: f32,
+    /// Start and end of the preedit's underline, when there is a preedit.
+    preedit: Option<(f32, f32)>,
+}
+
+/// Place the caret at a byte offset in the shaped text, and the preedit that starts there. The
+/// offset belongs to one of the lines cosmic-text laid out; an offset past every glyph of a line
+/// is that line's end, which is where a caret with nothing after it belongs. The last line is the
+/// fallback, so a caret at the end of the text lands exactly where it used to always be drawn.
+fn caret_geometry(prepared: &PreparedText, at: usize, preedit_len: usize) -> CaretGeometry {
+    let mut geometry = CaretGeometry {
+        x: prepared.line_w,
+        top: prepared.line_top,
+        height: prepared.line_height,
+        baseline: prepared.baseline,
+        preedit: None,
+    };
+    // The caret sits after the preedit while one is being composed, which is where the text
+    // being composed grows from; the underline covers the preedit itself.
+    let caret_at = at + preedit_len;
+    let mut placed = false;
+    // The lines are laid out in order, so their byte offsets accumulate.
+    let mut line_start = 0;
+    for run in prepared.buffer.layout_runs() {
+        let line_end = line_start + run.text.len();
+        if !placed && caret_at >= line_start && caret_at <= line_end {
+            placed = true;
+            geometry.x = run
+                .glyphs
+                .iter()
+                .find(|glyph| glyph.start >= caret_at)
+                .map_or(run.line_w, |glyph| glyph.x);
+            geometry.top = run.line_top;
+            geometry.height = run.line_height;
+            geometry.baseline = run.line_y;
+        }
+        if preedit_len > 0 {
+            for glyph in run
+                .glyphs
+                .iter()
+                .filter(|glyph| glyph.start >= at && glyph.start < at + preedit_len)
+            {
+                let (x0, x1) = (glyph.x, glyph.x + glyph.w);
+                geometry.preedit = Some(match geometry.preedit {
+                    Some((a, b)) => (a.min(x0), b.max(x1)),
+                    None => (x0, x1),
+                });
+            }
+        }
+        line_start = line_end + 1;
+    }
+    geometry
 }
 
 /// A rounded rectangle with a fill and an optional hairline edge, in device pixels. The

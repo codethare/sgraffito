@@ -2,11 +2,19 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use calloop::ping::Ping;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, Region},
+    data_device_manager::{
+        DataDeviceManagerState,
+        data_device::{DataDevice, DataDeviceHandler},
+        data_offer::{DataOfferHandler, DragOffer, SelectionOffer},
+    },
     delegate_dispatch2, delegate_registry,
     globals::GlobalData,
     output::{OutputHandler, OutputInfo, OutputState},
@@ -27,7 +35,10 @@ use smithay_client_toolkit::{
 };
 use wayland_client::{
     Connection, Proxy, QueueHandle,
-    protocol::{wl_output, wl_seat, wl_shm, wl_surface},
+    protocol::{
+        wl_data_device::WlDataDevice, wl_data_device_manager::DndAction, wl_output, wl_seat,
+        wl_shm, wl_surface,
+    },
 };
 
 use crate::canvas::{
@@ -192,6 +203,18 @@ pub struct App {
     /// compositor's advertised list, because all buffers of an output have to agree.
     buffer_format: Option<(wl_shm::Format, bool)>,
 
+    // clipboard (wl_data_device)
+    data_device_manager: DataDeviceManagerState,
+    data_device: Option<DataDevice>,
+    /// The compositor's current selection, replaced on every selection event.
+    pub(crate) selection: Option<SelectionOffer>,
+    /// Pasted text, read off the event loop by a thread and drained by `tick`.
+    pub(crate) paste_tx: mpsc::Sender<String>,
+    pub(crate) pasted: mpsc::Receiver<String>,
+    pub(crate) ping: Ping,
+    /// Whether `Ctrl` is held, which is what makes `V` a paste.
+    pub(crate) ctrl: bool,
+
     // pointer shape (wp_cursor_shape_v1)
     cursor_shape_manager: Option<WpCursorShapeManagerV1>,
     /// The seat's pointer shape device; it outlives the layer surfaces.
@@ -218,12 +241,15 @@ impl App {
         output_state: OutputState,
         seat_state: SeatState,
         shm: Shm,
+        data_device_manager: DataDeviceManagerState,
+        ping: Ping,
     ) -> anyhow::Result<Self> {
         let path = store::path().ok_or_else(|| {
             anyhow::anyhow!("need $XDG_DATA_HOME or $HOME to locate the annotation file")
         })?;
         let doc = store::load(&path);
         let pool = SlotPool::new(1 << 20, &shm)?;
+        let (paste_tx, pasted) = mpsc::channel();
         let mut app = Self {
             qh,
             connection,
@@ -254,6 +280,13 @@ impl App {
             im_preedit: None,
             im_delete: None,
             buffer_format: None,
+            data_device_manager,
+            data_device: None,
+            selection: None,
+            paste_tx,
+            pasted,
+            ping,
+            ctrl: false,
             cursor_shape_manager: None,
             cursor_device: None,
             cursor_serial: None,
@@ -656,11 +689,17 @@ impl App {
             return;
         };
         let bucket = out.bucket(id);
-        let existing = self
-            .doc
-            .outputs
-            .get(bucket.as_ref())
-            .and_then(|ann| ann.texts.iter().position(|t| t.bounds().contains(x, y)));
+        let scale = out.scale;
+        // The click is tested against the text the renderer measures, not against the font-size
+        // estimate the eraser uses: that estimate is 0.6 em per character, which is too narrow
+        // for CJK, so clicking such a glyph used to start a new box instead of editing it.
+        let existing = self.doc.outputs.get(bucket.as_ref()).and_then(|ann| {
+            ann.texts.iter().position(|t| {
+                self.renderer
+                    .text_edit_bounds(&t.text, t, scale)
+                    .contains(x, y)
+            })
+        });
         let (item, index) = match existing {
             Some(idx) => (
                 self.doc.outputs[bucket.as_ref()].texts[idx].clone(),
@@ -677,6 +716,14 @@ impl App {
                 None,
             ),
         };
+        log(&format!(
+            "text edit on {}",
+            if index.is_some() {
+                "an existing box"
+            } else {
+                "a new box"
+            }
+        ));
         if let Some(out) = self.outputs.get_mut(key) {
             out.overlay.text = Some(TextOverlay {
                 buffer: TextBuffer::new(item.text.clone()),
@@ -739,6 +786,8 @@ impl App {
         {
             log(&format!("failed to write {}: {e}", self.path.display()));
         }
+        // A paste arrives on a thread; the ping that woke this iteration put it here.
+        self.take_pasted();
         // The rail is the only thing that animates, and a frame of it is a localized repaint.
         if self.animating() {
             self.refresh_toolbar_hover();
@@ -1060,6 +1109,32 @@ pub fn ease_out(t: f32) -> f32 {
     1.0 - (1.0 - t).powi(3)
 }
 
+/// Longest selection the daemon reads. A clipboard belongs to another client, so a paste may
+/// not be able to grow this one without bound.
+pub const MAX_PASTE_BYTES: u64 = 256 * 1024;
+
+/// The plain-text type to ask a selection for, best first: what GTK and Qt offer first, then the
+/// `UTF8_STRING` older toolkits also publish, then plain `text/plain`.
+pub fn text_mime(mime_types: &[String]) -> Option<String> {
+    const WANTED: [&str; 3] = ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain"];
+    WANTED
+        .iter()
+        .find(|want| {
+            mime_types
+                .iter()
+                .any(|offered| offered.eq_ignore_ascii_case(want))
+        })
+        .map(|want| (*want).to_string())
+}
+
+/// Read a selection as text: capped, and without CR, so pasted CRLF text leaves no invisible
+/// characters in the box. Invalid UTF-8 is replaced rather than dropped.
+pub fn read_selection(reader: impl Read) -> String {
+    let mut bytes = Vec::new();
+    let _ = reader.take(MAX_PASTE_BYTES).read_to_end(&mut bytes);
+    String::from_utf8_lossy(&bytes).replace('\r', "")
+}
+
 /// The pointer shape of a tool, as `wp_cursor_shape_v1` names it. The eraser takes the closest
 /// named shape to a region eraser; there are no custom cursor images.
 pub fn tool_cursor(tool: Tool) -> Shape {
@@ -1247,7 +1322,11 @@ impl SeatHandler for App {
         &mut self.seat_state
     }
 
-    fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+    fn new_seat(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat) {
+        // One data device per seat: it is what the compositor tells about the clipboard, and
+        // what a paste reads the selection from.
+        self.data_device = Some(self.data_device_manager.get_data_device(qh, &seat));
+    }
 
     fn new_capability(
         &mut self,
@@ -1282,6 +1361,54 @@ impl SeatHandler for App {
     }
 
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+}
+
+impl DataDeviceHandler for App {
+    fn enter(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WlDataDevice,
+        _: f64,
+        _: f64,
+        _: &wl_surface::WlSurface,
+    ) {
+    }
+
+    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
+
+    fn motion(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice, _: f64, _: f64) {}
+
+    /// The compositor advertises the current selection; keep it for the next paste.
+    fn selection(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {
+        self.selection = self
+            .data_device
+            .as_ref()
+            .and_then(|device| device.data().selection_offer());
+    }
+
+    fn drop_performed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
+}
+
+impl DataOfferHandler for App {
+    /// Drag and drop is not supported: the rail has no drag sources and takes no drops.
+    fn source_actions(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &mut DragOffer,
+        _: DndAction,
+    ) {
+    }
+
+    fn selected_action(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &mut DragOffer,
+        _: DndAction,
+    ) {
+    }
 }
 
 impl ShmHandler for App {

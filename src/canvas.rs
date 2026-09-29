@@ -285,6 +285,17 @@ pub struct TextOverlay {
 }
 
 /// Text box content and cursor. The cursor counts chars, not bytes, and stays at the end.
+/// Where the caret moves to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Caret {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// Text box content and caret. The caret counts characters, not bytes, and starts at the end,
+/// which is where re-entering a box puts it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TextBuffer {
     pub text: String,
@@ -298,8 +309,10 @@ impl TextBuffer {
         Self { text, cursor }
     }
 
+    /// Insert `s` at the caret, which ends up after it.
     pub fn insert(&mut self, s: &str) {
-        self.text.push_str(s);
+        let at = self.cursor_bytes();
+        self.text.insert_str(at, s);
         self.cursor += s.chars().count();
     }
 
@@ -307,16 +320,58 @@ impl TextBuffer {
         self.delete_before(1)
     }
 
+    /// Delete the `n` characters before the caret, keeping what follows it.
     pub fn delete_before(&mut self, n: usize) -> bool {
         let n = n.min(self.cursor);
         if n == 0 {
             return false;
         }
-        let cut = char_boundary(&self.text, self.cursor - n);
-        self.text.truncate(cut);
+        let start = char_boundary(&self.text, self.cursor - n);
+        let end = self.cursor_bytes();
+        self.text.replace_range(start..end, "");
         self.cursor -= n;
         true
     }
+
+    /// Move the caret: one character left or right, crossing a line end to the line before or
+    /// after; or one line up or down keeping the column, clamped to the shorter line. Returns
+    /// whether the caret moved, so the caller can skip a repaint at the ends of the text.
+    pub fn move_cursor(&mut self, caret: Caret) -> bool {
+        let (line, column) = self.line_column();
+        let lines: Vec<&str> = self.text.split('\n').collect();
+        let (line, column) = match caret {
+            Caret::Left if column > 0 => (line, column - 1),
+            Caret::Left if line > 0 => (line - 1, lines[line - 1].chars().count()),
+            Caret::Right if column < lines[line].chars().count() => (line, column + 1),
+            Caret::Right if line + 1 < lines.len() => (line + 1, 0),
+            Caret::Up if line > 0 => (line - 1, column),
+            Caret::Down if line + 1 < lines.len() => (line + 1, column),
+            _ => return false,
+        };
+        let column = column.min(lines[line].chars().count());
+        self.cursor = lines[..line]
+            .iter()
+            .map(|line| line.chars().count() + 1)
+            .sum::<usize>()
+            + column;
+        true
+    }
+
+    /// The caret as a line index and a character column within that line.
+    fn line_column(&self) -> (usize, usize) {
+        let mut line = 0;
+        let mut column = 0;
+        for ch in self.text.chars().take(self.cursor) {
+            if ch == '\n' {
+                line += 1;
+                column = 0;
+            } else {
+                column += 1;
+            }
+        }
+        (line, column)
+    }
+
     pub fn surrounding(&self) -> (&str, usize) {
         (&self.text, self.cursor)
     }

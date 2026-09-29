@@ -1,4 +1,5 @@
-use sgraffito::app::Tool;
+use sgraffito::app::{MAX_PASTE_BYTES, Tool, read_selection, text_mime};
+use sgraffito::canvas::Caret;
 use sgraffito::input::{
     EditAction, bytes_to_delete, color_for_keysym, edit_action, size_step_for_keysym, stepped_size,
     tool_for_keysym, wants_sampling,
@@ -48,18 +49,93 @@ fn stepping_a_size_clamps_to_its_bounds() {
 #[test]
 fn a_focused_escape_only_ends_the_text_edit() {
     // Escape ends the text box, focused or not, preedit or not; the daemon locks on the next one.
-    assert_eq!(edit_action(Keysym::Escape, false), EditAction::EndText);
-    assert_eq!(edit_action(Keysym::Escape, true), EditAction::EndText);
+    assert_eq!(
+        edit_action(Keysym::Escape, false, false),
+        EditAction::EndText
+    );
+    assert_eq!(
+        edit_action(Keysym::Escape, false, true),
+        EditAction::EndText
+    );
+    assert_eq!(
+        edit_action(Keysym::Escape, true, false),
+        EditAction::EndText
+    );
 }
 
 #[test]
 fn a_preedit_gives_the_input_method_every_key_but_escape() {
-    for keysym in [Keysym::BackSpace, Keysym::Return, Keysym::p, Keysym::_1] {
-        assert_eq!(edit_action(keysym, true), EditAction::InputMethod);
+    for keysym in [
+        Keysym::BackSpace,
+        Keysym::Return,
+        Keysym::p,
+        Keysym::_1,
+        Keysym::Left,
+        Keysym::v,
+    ] {
+        assert_eq!(edit_action(keysym, false, true), EditAction::InputMethod);
+        assert_eq!(edit_action(keysym, true, true), EditAction::InputMethod);
     }
-    assert_eq!(edit_action(Keysym::BackSpace, false), EditAction::Backspace);
-    assert_eq!(edit_action(Keysym::Return, false), EditAction::Newline);
-    assert_eq!(edit_action(Keysym::p, false), EditAction::Local);
+    assert_eq!(
+        edit_action(Keysym::BackSpace, false, false),
+        EditAction::Backspace
+    );
+    assert_eq!(
+        edit_action(Keysym::Return, false, false),
+        EditAction::Newline
+    );
+    assert_eq!(edit_action(Keysym::p, false, false), EditAction::Local);
+}
+
+#[test]
+fn the_arrow_keys_move_the_caret() {
+    for (keysym, caret) in [
+        (Keysym::Left, Caret::Left),
+        (Keysym::Right, Caret::Right),
+        (Keysym::Up, Caret::Up),
+        (Keysym::Down, Caret::Down),
+    ] {
+        assert_eq!(edit_action(keysym, false, false), EditAction::Move(caret));
+    }
+}
+
+#[test]
+fn control_v_pastes_and_other_control_keys_do_not() {
+    assert_eq!(edit_action(Keysym::v, true, false), EditAction::Paste);
+    assert_eq!(edit_action(Keysym::V, true, false), EditAction::Paste);
+    // Without Control, `v` is text; with it, anything else is left to the ordinary path.
+    assert_eq!(edit_action(Keysym::v, false, false), EditAction::Local);
+    assert_eq!(edit_action(Keysym::c, true, false), EditAction::Local);
+}
+
+#[test]
+fn the_clipboard_mime_preference_is_utf8_first() {
+    let offered = |mimes: &[&str]| mimes.iter().map(|m| (*m).to_string()).collect::<Vec<_>>();
+    assert_eq!(
+        text_mime(&offered(&["text/plain;charset=utf-8", "UTF8_STRING"])).as_deref(),
+        Some("text/plain;charset=utf-8")
+    );
+    assert_eq!(
+        text_mime(&offered(&["UTF8_STRING", "text/plain"])).as_deref(),
+        Some("UTF8_STRING")
+    );
+    assert_eq!(
+        text_mime(&offered(&["text/plain", "image/png"])).as_deref(),
+        Some("text/plain")
+    );
+    // A selection with no plain text is not pasteable.
+    assert_eq!(text_mime(&offered(&["image/png"])), None);
+    assert_eq!(text_mime(&[]), None);
+}
+
+#[test]
+fn a_pasted_selection_loses_its_carriage_returns() {
+    assert_eq!(read_selection(&b"one\r\ntwo\rthree"[..]), "one\ntwothree");
+    // Invalid UTF-8 is replaced rather than dropped, so the box keeps a character for it.
+    assert_eq!(read_selection(&[0xff, b'a'][..]), "\u{fffd}a");
+    // The read is capped: a selection cannot grow the box without bound.
+    let huge = vec![b'x'; (MAX_PASTE_BYTES + 16) as usize];
+    assert_eq!(read_selection(&huge[..]).len(), MAX_PASTE_BYTES as usize);
 }
 
 #[test]
