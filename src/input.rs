@@ -21,7 +21,7 @@ use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::{
 use crate::app::{
     App, BTN_LEFT, Mode, PALETTE, Tool, ToolbarAction, log, read_selection, text_mime,
 };
-use crate::canvas::{Caret, Stroke, TextBuffer};
+use crate::canvas::{Caret, Rect, Stroke, TextBuffer};
 
 /// What a local key does while a text box is focused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -620,7 +620,9 @@ impl App {
         let tool = self.tool;
         let id = *key;
         let bucket = self.outputs.get(key).map(|o| o.bucket(id).into_owned());
-        let mut committed = false;
+        // What this gesture changed, so the frame that reports it can damage just that box: a
+        // committed stroke, the element the eraser removed, or both.
+        let mut changed: Option<Rect> = None;
         if let Some(bucket) = bucket {
             let transient = self
                 .outputs
@@ -630,30 +632,34 @@ impl App {
                 if let Some(stroke) = stroke
                     && !stroke.points.is_empty()
                 {
+                    changed = stroke.bounds();
                     self.doc
                         .outputs
                         .entry(bucket.clone())
                         .or_default()
                         .strokes
                         .push(stroke);
-                    committed = true;
                 }
                 if tool == Tool::Eraser
                     && let Some([x, y]) = eraser
                     && let Some(ann) = self.doc.outputs.get_mut(&bucket)
+                    && let Some(erased) = ann.erase(x, y)
                 {
-                    committed |= ann.erase(x, y);
+                    changed = Some(match changed {
+                        Some(changed) => changed.union(erased),
+                        None => erased,
+                    });
                 }
             }
         }
-        if committed {
-            self.invalidate_text_caches();
-            self.store.mark_dirty(Instant::now());
+        match changed {
+            Some(box_) => self.doc_changed_at(id, box_),
+            // The eraser marker was showing and is gone, with nothing erased.
+            None => self.dirty = true,
         }
-        // The committed stroke, the erased element or the vanished marker: repaint whole.
+        // The transient overlay is empty again, so this output is repainted from its own box.
         if let Some(out) = self.outputs.get_mut(key) {
-            out.dirty = true;
+            out.transient_dirty = true;
         }
-        self.dirty = true;
     }
 }

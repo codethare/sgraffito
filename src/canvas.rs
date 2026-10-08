@@ -82,17 +82,21 @@ impl OutputAnnotations {
     }
 
     /// Delete the hit item; returns whether anything was removed.
-    pub fn erase(&mut self, x: f32, y: f32) -> bool {
+    /// Remove the element under `(x, y)`, returning the box it occupied, so the frame that
+    /// repaints it knows what to damage.
+    pub fn erase(&mut self, x: f32, y: f32) -> Option<Rect> {
         match self.hit(x, y) {
             Some(ItemId::Stroke(i)) => {
+                let box_ = self.strokes[i].bounds();
                 self.strokes.remove(i);
-                true
+                box_
             }
             Some(ItemId::Text(i)) => {
+                let box_ = self.texts[i].paint_bounds();
                 self.texts.remove(i);
-                true
+                Some(box_)
             }
-            None => false,
+            None => None,
         }
     }
 }
@@ -134,7 +138,7 @@ impl Stroke {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Rect {
     pub x: f32,
     pub y: f32,

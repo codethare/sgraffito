@@ -94,6 +94,16 @@ assert 140 <= min(ys) and max(ys) <= 160, f"line y {min(ys)}..{max(ys)} is not a
 print(f"  scale 2 ok: red x {min(xs)}..{max(xs)} y {min(ys)}..{max(ys)}")
 PY
 
+# 1c. an idle daemon does not poll: the control thread waits in `accept()`, so the only wakeup
+# left is the loop's own 200 ms timer. Measured over a quiet window, the processor time it
+# accumulates is a fraction of a millisecond per second; the poll this replaced cost 8 ms/s.
+cpu_before=$(awk '{print $14 + $15}' "/proc/$daemon_pid/stat")
+sleep 5
+cpu_after=$(awk '{print $14 + $15}' "/proc/$daemon_pid/stat")
+idle_ms=$(( (cpu_after - cpu_before) * 1000 / $(getconf CLK_TCK) ))
+[ "$idle_ms" -le 30 ] || fail "the daemon used ${idle_ms}ms of processor time in 5 idle seconds (polling?)"
+echo "  idle cost ok: ${idle_ms}ms over 5s"
+
 # 2. mode switching is idempotent
 for cmd in toggle toggle edit lock lock; do
     out=$("$bin" "$cmd") || fail "$cmd exited non-zero"

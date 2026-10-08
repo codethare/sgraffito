@@ -5,7 +5,7 @@ use sgraffito::canvas::{
     OutputAnnotations, Overlay, Rect, Stroke, TextBuffer, TextItem, TextOverlay, Tool, Toolbar,
     ToolbarAction,
 };
-use sgraffito::render::{DamageRegion, Renderer, damage_box, transient_bounds};
+use sgraffito::render::{FrameCache, Renderer, toolbar_bounds, transient_bounds, transient_damage};
 
 const WARMUP: usize = 8;
 const SAMPLES: usize = 30;
@@ -63,6 +63,7 @@ fn text_overlay(width: f32, height: f32, preedit: &str) -> Overlay {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn measure(
     name: &str,
     logical_width: u32,
@@ -71,16 +72,21 @@ fn measure(
     annotations: &OutputAnnotations,
     overlay: &Overlay,
     damage: Option<Rect>,
+    cold_raster: bool,
 ) {
     let width = (logical_width as f32 * scale) as u32;
     let height = (logical_height as f32 * scale) as u32;
     let mut buffer = vec![0u8; (width * height * 4) as usize];
-    let region = damage.map(|d| DamageRegion::from_logical(d, scale, width, height));
     let mut renderer = Renderer::new();
+    let mut cache = FrameCache::default();
 
     for _ in 0..WARMUP {
+        if cold_raster {
+            cache.invalidate();
+        }
         render_frame(
             &mut renderer,
+            &mut cache,
             &mut buffer,
             width,
             height,
@@ -88,15 +94,18 @@ fn measure(
             annotations,
             overlay,
             damage,
-            region,
         );
     }
 
     let mut samples = Vec::with_capacity(SAMPLES);
     for _ in 0..SAMPLES {
+        if cold_raster {
+            cache.invalidate();
+        }
         let start = Instant::now();
         render_frame(
             &mut renderer,
+            &mut cache,
             &mut buffer,
             width,
             height,
@@ -104,7 +113,6 @@ fn measure(
             annotations,
             overlay,
             damage,
-            region,
         );
         samples.push(start.elapsed().as_nanos() as u64);
     }
@@ -114,18 +122,20 @@ fn measure(
     let median = samples[samples.len() / 2] as f64 / 1_000.0;
     let p95 = samples[(samples.len() * 95 / 100).min(samples.len() - 1)] as f64 / 1_000.0;
     println!(
-        "{name}: median={median:.1}us p95={p95:.1}us logical={logical_width}x{logical_height} scale={scale:.1} buffer={width}x{height} strokes={} texts={} damage={} toolbar={} text={}",
+        "{name}: median={median:.1}us p95={p95:.1}us logical={logical_width}x{logical_height} scale={scale:.1} buffer={width}x{height} strokes={} texts={} damage={} toolbar={} text={} raster={}",
         annotations.strokes.len(),
         annotations.texts.len(),
-        region.is_some(),
+        damage.is_some(),
         overlay.toolbar.is_some(),
         overlay.text.is_some(),
+        if cold_raster { "cold" } else { "warm" },
     );
 }
 
 #[allow(clippy::too_many_arguments)]
 fn render_frame(
     renderer: &mut Renderer,
+    cache: &mut FrameCache,
     buffer: &mut [u8],
     width: u32,
     height: u32,
@@ -133,11 +143,18 @@ fn render_frame(
     annotations: &OutputAnnotations,
     overlay: &Overlay,
     damage: Option<Rect>,
-    region: Option<DamageRegion>,
 ) {
-    let region = region.unwrap_or(DamageRegion::All);
-    region.clear(buffer, width, height);
-    renderer.render(buffer, width, height, scale, annotations, overlay, damage);
+    renderer.render_with_cache(
+        buffer,
+        width,
+        height,
+        scale,
+        annotations,
+        overlay,
+        damage,
+        cache,
+        None,
+    );
 }
 
 /// The rail with the pen armed and no block under the pointer, fully open.
@@ -163,13 +180,7 @@ fn main() {
         stroke: Some(live_stroke(3840.0, 2160.0)),
         ..Default::default()
     };
-    let drag_damage = damage_box(
-        &sparse,
-        &drag,
-        transient_bounds(&drag).expect("drag has bounds"),
-        3840.0,
-        2160.0,
-    );
+    let drag_damage = transient_damage(None, transient_bounds(&drag), None);
     measure(
         "sparse-drag",
         3840,
@@ -178,9 +189,32 @@ fn main() {
         &sparse,
         &drag,
         Some(drag_damage),
+        false,
     );
-    measure("dense-drag", 3840, 2160, 1.0, &dense, &drag, None);
-    measure("rail-full", 3840, 2160, 1.0, &sparse, &toolbar, None);
+    // The drag that used to grow its box into the drawing and cost a whole-surface frame.
+    measure(
+        "dense-drag-damaged",
+        3840,
+        2160,
+        1.0,
+        &dense,
+        &drag,
+        Some(drag_damage),
+        false,
+    );
+    measure("dense-full", 3840, 2160, 1.0, &dense, &drag, None, false);
+    measure("rail-full", 3840, 2160, 1.0, &sparse, &toolbar, None, false);
+    // A whole-surface frame that follows a document change: the document is rasterised again.
+    measure(
+        "rail-rebuild",
+        3840,
+        2160,
+        1.0,
+        &sparse,
+        &toolbar,
+        None,
+        true,
+    );
     // The widest capsule the rail can open, the shape the pop-out animation draws every frame.
     let hovered = Overlay {
         toolbar: Some(Toolbar {
@@ -189,7 +223,27 @@ fn main() {
         }),
         ..Default::default()
     };
-    measure("rail-hover-full", 3840, 2160, 1.0, &sparse, &hovered, None);
+    measure(
+        "rail-hover-full",
+        3840,
+        2160,
+        1.0,
+        &sparse,
+        &hovered,
+        None,
+        false,
+    );
+    // A frame of that animation: only the rail's box is damaged.
+    measure(
+        "rail-hover-damaged",
+        3840,
+        2160,
+        1.0,
+        &sparse,
+        &hovered,
+        Some(toolbar_bounds(3840.0, 2160.0)),
+        false,
+    );
     measure(
         "text-edit-full",
         1920,
@@ -198,6 +252,47 @@ fn main() {
         &small,
         &text_overlay(1920.0, 1080.0, ""),
         None,
+        false,
+    );
+    // A keystroke: the box of the text being edited is the only thing damaged.
+    let typing = text_overlay(1920.0, 1080.0, "");
+    let typing_damage = typing
+        .text
+        .as_ref()
+        .expect("text overlay")
+        .item
+        .paint_bounds();
+    measure(
+        "text-edit-damaged",
+        1920,
+        1080,
+        1.0,
+        &small,
+        &typing,
+        Some(typing_damage),
+        false,
+    );
+    // The frame that reports a committed stroke: the document is rasterised again, but only the
+    // stroke's own box is filled, so this is the one frame a change still costs.
+    measure(
+        "dense-commit",
+        3840,
+        2160,
+        1.0,
+        &dense,
+        &Overlay::default(),
+        Some(drag_damage),
+        true,
+    );
+    measure(
+        "text-edit-rebuild",
+        1920,
+        1080,
+        1.0,
+        &small,
+        &text_overlay(1920.0, 1080.0, ""),
+        None,
+        true,
     );
     measure(
         "preedit-full",
@@ -207,6 +302,7 @@ fn main() {
         &small,
         &text_overlay(1920.0, 1080.0, "ni"),
         None,
+        false,
     );
     measure(
         "scale2-full",
@@ -216,5 +312,6 @@ fn main() {
         &small,
         &Overlay::default(),
         None,
+        false,
     );
 }

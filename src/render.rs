@@ -6,8 +6,8 @@ use std::borrow::Cow;
 
 use cosmic_text::{Attrs, Buffer, Color, FontSystem, Metrics, Shaping, SwashCache};
 use tiny_skia::{
-    LineCap, LineJoin, Paint, PathBuilder, PixmapMut, PremultipliedColorU8, Stroke as SkStroke,
-    Transform,
+    Color as SkColor, LineCap, LineJoin, Paint, PathBuilder, Pixmap, PixmapMut,
+    PremultipliedColorU8, Stroke as SkStroke, Transform,
 };
 use wayland_client::protocol::wl_shm::Format;
 
@@ -43,8 +43,9 @@ const TOOLBAR_LABEL_GAP: f32 = 6.0;
 /// Padding after a label, so text never touches the capsule's edge.
 const TOOLBAR_LABEL_PAD: f32 = 12.0;
 /// Widest stretched block the damage accounting reserves room for, and the ceiling a label has
-/// to fit: the width of a block depends on the font, so `damage_box` reserves this strip instead
-/// of the drawn rail. The strip only joins a damage box that reaches it.
+/// to fit: the width of a block depends on the font, so the damage reserves this strip instead
+/// of the drawn rail. The strip is damaged whenever the rail changes, and joins a transient
+/// damage box that reaches it.
 const TOOLBAR_RESERVE: f32 = 224.0;
 /// Height of the whole column: twelve blocks, eight gaps inside the groups and three between
 /// them, all fixed, so the column's height never depends on the font, unlike the width a
@@ -168,7 +169,33 @@ pub struct Renderer {
 pub(crate) struct TextLayoutCache {
     scale: f32,
     entries: Vec<Option<TextCacheEntry>>,
-    stroke_bounds: Vec<Option<Rect>>,
+}
+
+/// Everything one frame reuses: the shaped lines of the committed text, and the committed
+/// document itself, rasterised once. The daemon holds one per output; a caller that only renders
+/// a single frame can let [`Renderer::render`] build a throwaway one.
+#[derive(Default)]
+pub struct FrameCache {
+    text: TextLayoutCache,
+    base: BaseLayer,
+}
+
+/// The committed document of one output, rasterised into a pixmap that every frame fills from.
+/// A frame therefore paints only the overlays, and its cost follows what changed rather than how
+/// much is drawn. The raster is rebuilt when the output's pixel size, its scale, or the text box
+/// under edit changes, and whenever the document changes. See [`TextLayoutCache`].
+#[derive(Default)]
+pub(crate) struct BaseLayer {
+    pixmap: Option<Pixmap>,
+    key: Option<BaseKey>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct BaseKey {
+    width: u32,
+    height: u32,
+    scale: f32,
+    skip_text: Option<usize>,
 }
 
 struct TextCacheEntry {
@@ -197,10 +224,9 @@ impl TextLayoutCache {
     pub(crate) fn invalidate(&mut self) {
         self.scale = 0.0;
         self.entries.clear();
-        self.stroke_bounds.clear();
     }
 
-    fn sync(&mut self, stroke_len: usize, text_len: usize, scale: f32) {
+    fn sync(&mut self, text_len: usize, scale: f32) {
         if self.scale != scale {
             self.invalidate();
             self.scale = scale;
@@ -208,20 +234,6 @@ impl TextLayoutCache {
         if self.entries.len() != text_len {
             self.entries.resize_with(text_len, || None);
         }
-        if self.stroke_bounds.len() != stroke_len {
-            self.stroke_bounds.resize_with(stroke_len, || None);
-        }
-    }
-
-    fn stroke_bounds(&mut self, index: usize, stroke: &Stroke) -> Option<Rect> {
-        if let Some(bounds) = self.stroke_bounds.get(index).and_then(Option::as_ref) {
-            return Some(*bounds);
-        }
-        let bounds = stroke.bounds();
-        if index < self.stroke_bounds.len() {
-            self.stroke_bounds[index] = bounds;
-        }
-        bounds
     }
 
     fn matches(&self, index: usize, item: &TextItem) -> bool {
@@ -229,21 +241,6 @@ impl TextLayoutCache {
             .get(index)
             .and_then(Option::as_ref)
             .is_some_and(|entry| entry.text == item.text && entry.size == item.size)
-    }
-
-    fn bounds(&self, index: usize) -> Option<Rect> {
-        self.entries
-            .get(index)
-            .and_then(Option::as_ref)
-            .map(|entry| entry.layout.paint_bounds)
-    }
-
-    fn text_bounds(&self, index: usize, item: &TextItem) -> Option<Rect> {
-        self.entries
-            .get(index)
-            .and_then(Option::as_ref)
-            .filter(|entry| entry.text == item.text && entry.size == item.size)
-            .map(|entry| entry.layout.paint_bounds)
     }
 
     fn insert(&mut self, index: usize, item: &TextItem, layout: PreparedText) {
@@ -265,6 +262,73 @@ impl TextLayoutCache {
     }
 }
 
+impl FrameCache {
+    /// Drop both caches; the next frame rebuilds them from the document. The daemon calls this
+    /// whenever the document changes, an output is resized or rescaled, or the output's bucket
+    /// changes.
+    pub fn invalidate(&mut self) {
+        self.text.invalidate();
+        self.base.invalidate();
+    }
+}
+
+impl BaseLayer {
+    /// Drop the raster; the next frame rebuilds it from the document.
+    pub(crate) fn invalidate(&mut self) {
+        self.key = None;
+    }
+
+    fn matches(&self, key: BaseKey) -> bool {
+        self.key == Some(key)
+    }
+
+    /// Rasterise the document, reusing the pixmap where it can. `false` when no pixmap could be
+    /// allocated, in which case the caller draws the document straight into the buffer.
+    fn rasterise(&mut self, key: BaseKey, draw: impl FnOnce(&mut PixmapMut)) -> bool {
+        let reuse = self
+            .pixmap
+            .as_ref()
+            .is_some_and(|pm| pm.width() == key.width && pm.height() == key.height);
+        if !reuse {
+            match Pixmap::new(key.width, key.height) {
+                Some(pixmap) => self.pixmap = Some(pixmap),
+                None => {
+                    self.key = None;
+                    return false;
+                }
+            }
+        }
+        let Some(pixmap) = self.pixmap.as_mut() else {
+            return false;
+        };
+        pixmap.fill(SkColor::TRANSPARENT);
+        draw(&mut pixmap.as_mut());
+        self.key = Some(key);
+        true
+    }
+
+    /// Fill the frame's region with the raster's pixels. The raster holds tiny-skia's
+    /// premultiplied RGBA and so does the buffer until the caller swaps R and B for the
+    /// `ARGB8888` fallback, so this is a row-wise copy.
+    fn fill(&self, buf: &mut [u8], region: DamageRegion, width: u32, height: u32) {
+        let Some(pixmap) = &self.pixmap else {
+            return;
+        };
+        let (x0, y0, x1, y1) = region.rows(width, height);
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        let src = pixmap.data();
+        for y in y0..y1 {
+            let (start, end) = (
+                ((y * width + x0) * 4) as usize,
+                ((y * width + x1) * 4) as usize,
+            );
+            buf[start..end].copy_from_slice(&src[start..end]);
+        }
+    }
+}
+
 impl Default for Renderer {
     fn default() -> Self {
         Self::new()
@@ -281,6 +345,8 @@ impl Renderer {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// One frame with a throwaway cache, so the document is rasterised again: the baseline a
+    /// caller that renders once wants, and what a frame that follows a document change costs.
     pub fn render(
         &mut self,
         buf: &mut [u8],
@@ -291,14 +357,17 @@ impl Renderer {
         overlay: &Overlay,
         damage: Option<Rect>,
     ) {
-        let mut cache = TextLayoutCache::default();
+        let mut cache = FrameCache::default();
         self.render_with_cache(
             buf, width, height, scale, ann, overlay, damage, &mut cache, None,
         );
     }
 
+    /// One frame, reusing `cache` across frames: the daemon's path, and the one the benchmark
+    /// measures. The committed document is filled in from the cache rather than drawn again, so a
+    /// frame costs what its damage region costs.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn render_with_cache(
+    pub fn render_with_cache(
         &mut self,
         buf: &mut [u8],
         width: u32,
@@ -307,54 +376,43 @@ impl Renderer {
         ann: &OutputAnnotations,
         overlay: &Overlay,
         damage: Option<Rect>,
-        text_cache: &mut TextLayoutCache,
+        cache: &mut FrameCache,
         skip_text: Option<usize>,
     ) {
+        let FrameCache { text, base } = cache;
+        text.sync(ann.texts.len(), scale);
+        let region = match damage {
+            None => DamageRegion::All,
+            Some(d) => DamageRegion::from_logical(d, scale, width, height),
+        };
+        // The committed document comes from the raster. Only a frame whose raster cannot be
+        // allocated draws it into the buffer itself.
+        let key = BaseKey {
+            width,
+            height,
+            scale,
+            skip_text,
+        };
+        let mut draw_document = false;
+        if base.matches(key) {
+            base.fill(buf, region, width, height);
+        } else {
+            let renderer = &mut *self;
+            let built = base.rasterise(key, |target| {
+                renderer.draw_document(target, ann, scale, text, skip_text)
+            });
+            if built {
+                base.fill(buf, region, width, height);
+            } else {
+                region.clear(buf, width, height);
+                draw_document = true;
+            }
+        }
         let Some(mut pixmap) = PixmapMut::from_bytes(buf, width, height) else {
             return;
         };
-        text_cache.sync(ann.strokes.len(), ann.texts.len(), scale);
-        for (index, s) in ann.strokes.iter().enumerate() {
-            // Strokes outside the damaged box already hold the right pixels in this buffer.
-            if let Some(damage) = damage
-                && !text_cache
-                    .stroke_bounds(index, s)
-                    .is_some_and(|b| b.intersects(damage))
-            {
-                continue;
-            }
-            draw_stroke(&mut pixmap, s, scale);
-        }
-        for (index, item) in ann.texts.iter().enumerate() {
-            if skip_text == Some(index) {
-                continue;
-            }
-            let cache_valid = text_cache.matches(index, item);
-            let bounds = if cache_valid {
-                text_cache.bounds(index)
-            } else {
-                Some(item.paint_bounds())
-            };
-            if let Some(damage) = damage
-                && !bounds.is_some_and(|bounds| bounds.intersects(damage))
-            {
-                continue;
-            }
-            if !cache_valid {
-                let layout = self.prepare_text(&item.text, item, scale);
-                text_cache.insert(index, item, layout);
-            }
-            let Some(bounds) = text_cache.bounds(index) else {
-                continue;
-            };
-            if let Some(damage) = damage
-                && !bounds.intersects(damage)
-            {
-                continue;
-            }
-            if let Some(layout) = text_cache.get_mut(index) {
-                self.draw_prepared_text(&mut pixmap, item, scale, layout, None);
-            }
+        if draw_document {
+            self.draw_document(&mut pixmap, ann, scale, text, skip_text);
         }
         if let Some(s) = &overlay.stroke {
             draw_stroke(&mut pixmap, s, scale);
@@ -378,6 +436,36 @@ impl Renderer {
         }
         if let Some([x, y]) = overlay.eraser {
             draw_eraser_marker(&mut pixmap, x * scale, y * scale, scale);
+        }
+    }
+
+    /// Draw the committed document into `pixmap`: the raster build, and the fallback for a frame
+    /// whose raster could not be allocated. The shaped-line cache is filled here, once per
+    /// document change, so a frame that reuses the raster shapes no text at all.
+    fn draw_document(
+        &mut self,
+        pixmap: &mut PixmapMut,
+        ann: &OutputAnnotations,
+        scale: f32,
+        text: &mut TextLayoutCache,
+        skip_text: Option<usize>,
+    ) {
+        for s in ann.strokes.iter() {
+            draw_stroke(pixmap, s, scale);
+        }
+        for (index, item) in ann.texts.iter().enumerate() {
+            // The box under edit is the overlay's, and the raster must not hold the committed
+            // text of it: a live text that has become shorter would leave its glyphs behind.
+            if skip_text == Some(index) {
+                continue;
+            }
+            if !text.matches(index, item) {
+                let layout = self.prepare_text(&item.text, item, scale);
+                text.insert(index, item, layout);
+            }
+            if let Some(layout) = text.get_mut(index) {
+                self.draw_prepared_text(pixmap, item, scale, layout, None);
+            }
         }
     }
 
@@ -833,75 +921,26 @@ pub fn buffer_format(formats: &[Format]) -> (Format, bool) {
     }
 }
 
-/// Damage box for a bounding-box frame: `from` grown until it contains every element the
-/// renderer will paint inside it. Painting outside the box is not allowed, because those
-/// bytes still hold the previous frame's pixels; `render` culls the elements left outside,
-/// which is why they may keep those pixels.
-///
-/// ponytail: growing can cascade into a large box when the drag touches a long stroke over a
-/// dense drawing, and then the frame costs nearly a whole-surface one. That is the honest
-/// price of redrawing that stroke where the box overlaps it.
-pub fn damage_box(
-    ann: &OutputAnnotations,
-    overlay: &Overlay,
-    from: Rect,
-    width: f32,
-    height: f32,
-) -> Rect {
-    let mut cache = TextLayoutCache::default();
-    damage_box_with_cache(ann, overlay, from, width, height, 1.0, &mut cache)
-}
-
-pub(crate) fn damage_box_with_cache(
-    ann: &OutputAnnotations,
-    overlay: &Overlay,
-    from: Rect,
-    width: f32,
-    height: f32,
-    scale: f32,
-    cache: &mut TextLayoutCache,
-) -> Rect {
-    cache.sync(ann.strokes.len(), ann.texts.len(), scale);
-    let mut damage = from;
-    loop {
-        let mut grown = damage;
-        for (index, stroke) in ann.strokes.iter().enumerate() {
-            if let Some(bounds) = cache.stroke_bounds(index, stroke)
-                && bounds.intersects(grown)
-            {
-                grown = grown.union(bounds);
-            }
-        }
-        for (index, text) in ann.texts.iter().enumerate() {
-            let bounds = cache
-                .text_bounds(index, text)
-                .unwrap_or_else(|| text.paint_bounds());
-            if bounds.intersects(grown) {
-                grown = grown.union(bounds);
-            }
-        }
-        if let Some(t) = &overlay.text {
-            let b = t.item.paint_bounds();
-            if b.intersects(grown) {
-                grown = grown.union(b);
-            }
-        }
-        // The toolbar is only repainted when the box grows into it, so the growth has to cover
-        // everything the toolbar paints. Reserving its box unconditionally would union a left
-        // strip with a drawing box far from it and swallow nearly the whole surface; the toolbar
-        // itself only changes on a tool, colour or mode switch, and those force a whole-surface
-        // frame.
-        if overlay.toolbar.is_some() {
-            let toolbar = toolbar_bounds(width, height);
-            if toolbar.intersects(grown) {
-                grown = grown.union(toolbar);
-            }
-        }
-        if grown == damage {
-            return damage;
-        }
-        damage = grown;
+/// Damage box of a transient frame: the union of the element's previous and current position,
+/// plus the rail's box when the rail is what changed. It stays this small because a frame paints
+/// no document element — the ones under the box come back from the raster — so it never has to
+/// grow to cover them the way `damage_box` used to.
+pub fn transient_damage(last: Option<Rect>, now: Option<Rect>, rail: Option<Rect>) -> Rect {
+    let mut box_ = match (last, now) {
+        (Some(a), Some(b)) => a.union(b),
+        (Some(a), None) => a,
+        (None, Some(b)) => b,
+        (None, None) => Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 0.0,
+        },
+    };
+    if let Some(rail) = rail {
+        box_ = box_.union(rail);
     }
+    box_
 }
 
 /// Bounding box of the transient overlay elements of a frame, in logical pixels: the
@@ -1278,7 +1317,7 @@ mod tests {
 
     fn render_cached(
         renderer: &mut Renderer,
-        cache: &mut TextLayoutCache,
+        cache: &mut FrameCache,
         annotations: &OutputAnnotations,
         buffer: &mut [u8],
     ) {
@@ -1295,10 +1334,23 @@ mod tests {
         );
     }
 
+    /// A document with a stroke and a text item, so a frame has something of both kinds to fill
+    /// in from the cache.
+    fn document() -> OutputAnnotations {
+        OutputAnnotations {
+            strokes: vec![Stroke {
+                color: "#e01b24".into(),
+                width: 4.0,
+                points: vec![[10.0, 50.0], [190.0, 60.0]],
+            }],
+            texts: vec![text_item("cached text")],
+        }
+    }
+
     #[test]
     fn warm_text_cache_matches_cold_text_cache() {
         let mut renderer = Renderer::new();
-        let mut cache = TextLayoutCache::default();
+        let mut cache = FrameCache::default();
         let annotations = OutputAnnotations {
             strokes: vec![],
             texts: vec![text_item("cached text")],
@@ -1311,9 +1363,89 @@ mod tests {
     }
 
     #[test]
-    fn text_cache_notices_changed_text_without_external_invalidation() {
+    fn the_document_raster_is_reused_until_it_is_invalidated() {
+        // What a frame costs stands or falls on this: the second frame must fill from the raster
+        // instead of rasterising the document again.
         let mut renderer = Renderer::new();
-        let mut cache = TextLayoutCache::default();
+        let mut cache = FrameCache::default();
+        let annotations = document();
+        let mut first = vec![0; 200 * 100 * 4];
+        render_cached(&mut renderer, &mut cache, &annotations, &mut first);
+        assert!(cache.base.matches(BaseKey {
+            width: 200,
+            height: 100,
+            scale: 1.0,
+            skip_text: None,
+        }));
+
+        let mut second = vec![0; 200 * 100 * 4];
+        render_cached(&mut renderer, &mut cache, &annotations, &mut second);
+        assert_eq!(first, second, "a reused raster draws the same pixels");
+
+        // Invalidating drops it, and the frame that follows is built from the document again.
+        cache.invalidate();
+        assert!(cache.base.key.is_none());
+        let mut rebuilt = vec![0; 200 * 100 * 4];
+        render_cached(&mut renderer, &mut cache, &annotations, &mut rebuilt);
+        assert_eq!(first, rebuilt, "a rebuilt raster draws the same pixels");
+    }
+
+    #[test]
+    fn a_changed_document_reaches_the_next_frame_after_invalidation() {
+        let mut renderer = Renderer::new();
+        let mut cache = FrameCache::default();
+        let before = document();
+        let mut stale = vec![0; 200 * 100 * 4];
+        render_cached(&mut renderer, &mut cache, &before, &mut stale);
+
+        let mut after = before.clone();
+        after.texts[0].text = "after".into();
+        cache.invalidate();
+        let mut warm = vec![0; 200 * 100 * 4];
+        render_cached(&mut renderer, &mut cache, &after, &mut warm);
+        let mut cold = vec![0; 200 * 100 * 4];
+        let mut cold_cache = FrameCache::default();
+        render_cached(&mut renderer, &mut cold_cache, &after, &mut cold);
+        assert_eq!(cold, warm);
+        assert_ne!(stale, warm, "the old document may not survive the change");
+    }
+
+    #[test]
+    fn the_box_under_edit_is_left_out_of_the_raster() {
+        // The live text is the overlay's, so the committed text has to be absent from the raster:
+        // a live text that has become shorter would otherwise leave glyphs behind.
+        let mut renderer = Renderer::new();
+        let mut cache = FrameCache::default();
+        let annotations = document();
+        let mut with_item = vec![0; 200 * 100 * 4];
+        render_cached(&mut renderer, &mut cache, &annotations, &mut with_item);
+        let mut without_item = vec![0; 200 * 100 * 4];
+        renderer.render_with_cache(
+            &mut without_item,
+            200,
+            100,
+            1.0,
+            &annotations,
+            &Overlay::default(),
+            None,
+            &mut cache,
+            Some(0),
+        );
+        assert_ne!(
+            with_item, without_item,
+            "the edited item's pixels are not in the raster"
+        );
+        // The stroke that is not under edit survives in both.
+        assert!(without_item.chunks(4).any(|p| p[3] != 0));
+    }
+
+    #[test]
+    fn a_changed_text_item_is_reshaped_without_invalidating_the_layout_cache() {
+        // The layout cache compares the text and the size itself, so the shaped lines survive a
+        // change; it is the document raster that has to be dropped, which is what
+        // `App::doc_changed` does for the whole output.
+        let mut renderer = Renderer::new();
+        let mut cache = FrameCache::default();
         let mut annotations = OutputAnnotations {
             strokes: vec![],
             texts: vec![text_item("before")],
@@ -1321,10 +1453,11 @@ mod tests {
         let mut first = vec![0; 200 * 100 * 4];
         render_cached(&mut renderer, &mut cache, &annotations, &mut first);
         annotations.texts[0].text = "after".into();
+        cache.base.invalidate();
         let mut warm = vec![0; 200 * 100 * 4];
         render_cached(&mut renderer, &mut cache, &annotations, &mut warm);
         let mut cold = vec![0; 200 * 100 * 4];
-        let mut fresh_cache = TextLayoutCache::default();
+        let mut fresh_cache = FrameCache::default();
         render_cached(&mut renderer, &mut fresh_cache, &annotations, &mut cold);
         assert_eq!(cold, warm);
     }
@@ -1368,7 +1501,7 @@ mod tests {
         let mut expected = vec![0; 200 * 100 * 4];
         renderer.render(&mut expected, 200, 100, 1.0, &annotations, &overlay, None);
         let mut actual = vec![0; 200 * 100 * 4];
-        let mut cache = TextLayoutCache::default();
+        let mut cache = FrameCache::default();
         renderer.render_with_cache(
             &mut actual,
             200,
@@ -1380,30 +1513,6 @@ mod tests {
             &mut cache,
             None,
         );
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn cached_damage_box_matches_uncached_damage_box() {
-        let annotations = OutputAnnotations {
-            strokes: vec![Stroke {
-                color: "#ffffff".into(),
-                width: 3.0,
-                points: vec![[20.0, 50.0], [180.0, 50.0]],
-            }],
-            texts: vec![text_item("cached text")],
-        };
-        let overlay = Overlay::default();
-        let from = Rect {
-            x: 100.0,
-            y: 48.0,
-            w: 4.0,
-            h: 4.0,
-        };
-        let expected = damage_box(&annotations, &overlay, from, 200.0, 100.0);
-        let mut cache = TextLayoutCache::default();
-        let actual =
-            damage_box_with_cache(&annotations, &overlay, from, 200.0, 100.0, 1.0, &mut cache);
         assert_eq!(actual, expected);
     }
 
@@ -1461,8 +1570,7 @@ mod tests {
         );
 
         let mut actual = old_frame;
-        DamageRegion::from_logical(damage, 1.0, 200, 100).clear(&mut actual, 200, 100);
-        let mut cache = TextLayoutCache::default();
+        let mut cache = FrameCache::default();
         renderer.render_with_cache(
             &mut actual,
             200,

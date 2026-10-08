@@ -40,9 +40,10 @@ fn misses_far_away_point() {
     let a = ann(vec![line(100.0, 0.0, 200.0)], vec![]);
     assert_eq!(a.hit(50.0, 120.0), None);
     assert!(
-        !ann(vec![line(100.0, 0.0, 200.0)], vec![])
+        ann(vec![line(100.0, 0.0, 200.0)], vec![])
             .clone()
             .erase(400.0, 400.0)
+            .is_none()
     );
 }
 
@@ -83,16 +84,17 @@ fn erase_removes_only_hit_item() {
         vec![line(100.0, 0.0, 200.0), line(140.0, 0.0, 200.0)],
         vec![],
     );
-    assert!(a.erase(50.0, 101.0));
+    // The erased element's box comes back, so the frame that reports it knows what to damage.
+    assert!(a.erase(50.0, 101.0).is_some());
     assert_eq!(a.strokes.len(), 1);
     assert_eq!(a.strokes[0].points[0][1], 140.0);
-    assert!(!a.erase(50.0, 101.0));
+    assert!(a.erase(50.0, 101.0).is_none());
 }
 
 #[test]
 fn erase_removes_text_box() {
     let mut a = ann(vec![], vec![text(100.0, 200.0, "note")]);
-    assert!(a.erase(110.0, 210.0));
+    assert!(a.erase(110.0, 210.0).is_some());
     assert!(a.texts.is_empty());
 }
 

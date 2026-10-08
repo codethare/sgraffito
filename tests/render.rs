@@ -3,7 +3,7 @@ use sgraffito::canvas::{
     Tool, Toolbar, ToolbarAction,
 };
 use sgraffito::render::{
-    DamageRegion, Renderer, buffer_format, damage_box, toolbar_bounds, transient_bounds,
+    DamageRegion, Renderer, buffer_format, toolbar_bounds, transient_bounds, transient_damage,
 };
 use wayland_client::protocol::wl_shm::Format;
 
@@ -281,8 +281,8 @@ fn single_sample_stroke_is_a_dot() {
     assert_eq!(alpha(&buf, W, 60, 50), 0);
 }
 
-/// One frame exactly as the daemon composes it: clear the damaged region, draw, then
-/// swap the R and B bytes of that region.
+/// One frame exactly as the daemon composes it: the renderer fills the damaged region from the
+/// document cache, draws the overlays, then swaps the R and B bytes of that region.
 fn frame(
     buf: &mut [u8],
     w: u32,
@@ -295,7 +295,6 @@ fn frame(
         None => DamageRegion::All,
         Some(d) => DamageRegion::from_logical(d, 1.0, w, h),
     };
-    region.clear(buf, w, h);
     Renderer::new().render(buf, w, h, 1.0, ann, overlay, damage);
     region.swap_rb(buf, w, h);
 }
@@ -604,7 +603,7 @@ fn the_eraser_cannot_reach_the_toolbar() {
     let mut doc = OutputAnnotations::default();
     let band = toolbar_bounds(w, h);
     for y in [band.y + 20.0, band.y + band.h / 2.0] {
-        assert!(!doc.erase(band.x + 20.0, y));
+        assert!(doc.erase(band.x + 20.0, y).is_none());
     }
 }
 
@@ -667,30 +666,40 @@ fn damage_region_clears_and_swaps_only_its_rectangle() {
 }
 
 #[test]
-fn damage_box_grows_to_contain_the_element_it_overlaps() {
-    let a = ann(vec![line(50.0, 20.0, 180.0)], vec![]);
-    let transient = Rect {
+fn the_damage_box_is_the_element_that_changed() {
+    // A transient frame paints no document element, so its box never grows: the strokes under it
+    // come back from the document cache. This is the rule that used to make a drag on a dense
+    // drawing cost nearly a whole-surface frame.
+    let here = Rect {
         x: 100.0,
         y: 40.0,
         w: 10.0,
         h: 10.0,
     };
-    let grown = damage_box(&a, &Overlay::default(), transient, W as f32, H as f32);
-    // The line's box is 20..180 x 47..53 plus half the width and the anti-aliasing edge, and
-    // the line is drawn whole, so the damage box has to reach past both of its ends: outside
-    // the box those pixels would keep already-swapped bytes.
-    assert!(grown.x <= 17.0 && grown.x + grown.w >= 183.0, "{grown:?}");
-    assert!(grown.y <= 40.0 && grown.y + grown.h >= 53.0, "{grown:?}");
-    // An element that does not overlap leaves the box alone.
-    let far = Rect {
-        x: 300.0,
-        y: 300.0,
+    let moved = Rect {
+        x: 140.0,
+        y: 60.0,
         w: 10.0,
         h: 10.0,
     };
+    assert_eq!(transient_damage(None, Some(here), None), here);
     assert_eq!(
-        damage_box(&a, &Overlay::default(), far, W as f32, H as f32),
-        far
+        transient_damage(Some(here), Some(here), None),
+        here,
+        "standing still repaints one box"
+    );
+    assert_eq!(
+        transient_damage(Some(here), Some(moved), None),
+        here.union(moved),
+        "moving on has to erase the box it left"
+    );
+    // The rail joins the box only when the rail is what changed: a drag far from it leaves it
+    // alone, and a drag that reaches it repaints it whole.
+    let rail_box = toolbar_bounds(1024.0, 600.0);
+    assert_eq!(transient_damage(None, Some(here), None), here);
+    assert_eq!(
+        transient_damage(None, Some(here), Some(rail_box)),
+        here.union(rail_box)
     );
 }
 
@@ -708,15 +717,7 @@ fn bounding_box_frame_is_pixel_identical_to_a_whole_surface_frame() {
     );
     let first = dot(100.0, 45.0);
     let second = dot(104.0, 48.0);
-    let damage = damage_box(
-        &doc,
-        &second,
-        transient_bounds(&first)
-            .unwrap()
-            .union(transient_bounds(&second).unwrap()),
-        W as f32,
-        H as f32,
-    );
+    let damage = transient_damage(transient_bounds(&first), transient_bounds(&second), None);
     // Both buffers start from the same frame, then get the second frame in the two ways.
     let mut whole = buffer(W, H);
     frame(&mut whole, W, H, &doc, &first, None);
@@ -727,29 +728,23 @@ fn bounding_box_frame_is_pixel_identical_to_a_whole_surface_frame() {
 }
 
 #[test]
-fn a_toolbar_does_not_widen_a_drag_far_from_it() {
-    let overlay = Overlay {
-        toolbar: Some(rail()),
-        ..Default::default()
-    };
-    let transient = Rect {
-        x: 100.0,
-        y: 900.0,
-        w: 10.0,
-        h: 10.0,
-    };
-    // The toolbar sits on the left at the optical centre; a drag far below it must not drag it
-    // along.
-    assert_eq!(
-        damage_box(
-            &OutputAnnotations::default(),
-            &overlay,
-            transient,
-            1920.0,
-            1080.0
-        ),
-        transient
-    );
+fn a_small_box_over_a_dense_document_keeps_the_document_pixels() {
+    // The case that used to collapse into a whole-surface frame: a drag over a drawing whose
+    // strokes all cross the drag's box. Every stroke under the box comes back from the document
+    // cache, so a box the size of the drag is enough.
+    let strokes = (0..60)
+        .map(|i| line(10.0 + i as f32 * 1.4, 5.0, 195.0))
+        .collect();
+    let doc = ann(strokes, vec![]);
+    let first = dot(100.0, 45.0);
+    let second = dot(104.0, 48.0);
+    let damage = transient_damage(transient_bounds(&first), transient_bounds(&second), None);
+    let mut whole = buffer(W, H);
+    frame(&mut whole, W, H, &doc, &first, None);
+    let mut boxed = whole.clone();
+    frame(&mut whole, W, H, &doc, &second, None);
+    frame(&mut boxed, W, H, &doc, &second, Some(damage));
+    assert_eq!(whole, boxed);
 }
 
 #[test]
@@ -767,14 +762,10 @@ fn bounding_box_frame_with_a_toolbar_matches_a_whole_surface_frame() {
         toolbar: Some(rail),
         ..dot(144.0, 304.0)
     };
-    let damage = damage_box(
-        &OutputAnnotations::default(),
-        &second,
-        transient_bounds(&first)
-            .unwrap()
-            .union(transient_bounds(&second).unwrap()),
-        w as f32,
-        h as f32,
+    let damage = transient_damage(
+        transient_bounds(&first),
+        transient_bounds(&second),
+        Some(toolbar_bounds(w as f32, h as f32)),
     );
     let mut whole = buffer(w, h);
     frame(
@@ -818,15 +809,7 @@ fn a_drag_far_from_the_toolbar_leaves_the_toolbar_pixels_alone() {
     };
     let first = with(500.0, 500.0);
     let second = with(504.0, 504.0);
-    let damage = damage_box(
-        &OutputAnnotations::default(),
-        &second,
-        transient_bounds(&first)
-            .unwrap()
-            .union(transient_bounds(&second).unwrap()),
-        w as f32,
-        h as f32,
-    );
+    let damage = transient_damage(transient_bounds(&first), transient_bounds(&second), None);
     let mut whole = buffer(w, h);
     frame(
         &mut whole,
@@ -908,15 +891,7 @@ fn long_text_damage_contains_everything_rasterised() {
     );
     let first = dot(100.0, 50.0);
     let second = dot(104.0, 54.0);
-    let damage = damage_box(
-        &doc,
-        &Overlay { ..second.clone() },
-        transient_bounds(&first)
-            .unwrap()
-            .union(transient_bounds(&second).unwrap()),
-        W as f32,
-        H as f32,
-    );
+    let damage = transient_damage(transient_bounds(&first), transient_bounds(&second), None);
     let mut whole = buffer(W, H);
     frame(&mut whole, W, H, &doc, &first, None);
     let mut boxed = whole.clone();

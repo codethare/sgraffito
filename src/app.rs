@@ -54,8 +54,8 @@ use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::ZwpTextIn
 
 use crate::input::stepped_size;
 use crate::render::{
-    DamageRegion, Renderer, TextLayoutCache, buffer_format, damage_box_with_cache, toolbar_bounds,
-    transient_bounds,
+    DamageRegion, FrameCache, Renderer, buffer_format, toolbar_bounds, transient_bounds,
+    transient_damage,
 };
 use crate::store::{self, Store};
 
@@ -141,6 +141,9 @@ pub struct Output {
     pub(crate) toolbar_dirty: bool,
     /// Transient overlay box as drawn in the previous frame; it has to be erased next time.
     last_transient: Option<Rect>,
+    /// A document change waiting to be repainted. Its box is what the next frame damages: the
+    /// rest of the surface still holds the right pixels, which came from the document raster.
+    pending: Option<Rect>,
     /// A committed text edit can be localized only after its previous layout was measured.
     pub(crate) text_dirty: bool,
     last_text_bounds: Option<Rect>,
@@ -149,7 +152,7 @@ pub struct Output {
     buffers: Vec<Buffer>,
     buffer_size: (u32, u32),
     pub(crate) overlay: Overlay,
-    text_cache: TextLayoutCache,
+    cache: FrameCache,
 }
 
 impl Output {
@@ -383,13 +386,14 @@ impl App {
                 text_dirty: false,
                 last_text_bounds: None,
                 last_buffer: None,
+                pending: None,
                 buffers: Vec::new(),
                 buffer_size: (0, 0),
                 overlay: Overlay {
                     toolbar,
                     ..Default::default()
                 },
-                text_cache: TextLayoutCache::default(),
+                cache: FrameCache::default(),
             },
         );
     }
@@ -480,13 +484,14 @@ impl App {
         self.refresh_toolbar();
     }
 
-    /// Push the current toolbar into every output's transient overlay. Called when the mode,
-    /// the tool or the colour changes, so the frame is a whole-surface one.
+    /// Push the current toolbar into every output's transient overlay. The rail lives in the
+    /// left strip and the document does not change with it, so its box is the only thing the
+    /// next frame has to damage; the rest of the surface comes back from the document raster.
     fn refresh_toolbar(&mut self) {
         let toolbar = self.current_toolbar();
         for out in self.outputs.values_mut() {
             out.overlay.toolbar = toolbar;
-            out.dirty = true;
+            out.toolbar_dirty = true;
         }
         self.dirty = true;
     }
@@ -564,7 +569,8 @@ impl App {
             self.commit_transient_strokes();
             self.tool = tool;
             log(&format!("tool switched to {tool:?}"));
-            self.mark_all_dirty();
+            // The document is untouched: the frame repaints the rail and whatever the finished
+            // edit or stroke left behind, not the surface.
             self.refresh_toolbar();
             self.sync_cursor();
         }
@@ -579,7 +585,28 @@ impl App {
 
     pub(crate) fn invalidate_text_caches(&mut self) {
         for out in self.outputs.values_mut() {
-            out.text_cache.invalidate();
+            out.cache.invalidate();
+        }
+    }
+
+    /// The document changed: schedule the debounced write and drop every output's raster, so the
+    /// next frame of each one is rebuilt from the new document. Every mutation of the document
+    /// goes through here, which is what keeps a stale raster from surviving a change.
+    pub(crate) fn doc_changed(&mut self) {
+        self.store.mark_dirty(Instant::now());
+        self.invalidate_text_caches();
+        self.dirty = true;
+    }
+
+    /// A document change whose box is known: the frame that follows damages that box instead of
+    /// the whole surface, because nothing outside it changed.
+    pub(crate) fn doc_changed_at(&mut self, key: u32, box_: Rect) {
+        self.doc_changed();
+        if let Some(out) = self.outputs.get_mut(&key) {
+            out.pending = Some(match out.pending {
+                Some(pending) => pending.union(box_),
+                None => box_,
+            });
         }
     }
 
@@ -590,7 +617,7 @@ impl App {
         for (key, out) in self.outputs.iter_mut() {
             if let Some(stroke) = out.overlay.stroke.take() {
                 if !stroke.points.is_empty() {
-                    pending.push((out.bucket(*key).into_owned(), stroke));
+                    pending.push((*key, out.bucket(*key).into_owned(), stroke));
                 }
                 overlay_changed = true;
             }
@@ -598,8 +625,18 @@ impl App {
                 overlay_changed = true;
             }
         }
+        // The first output to commit reports the change; every output is drawn every iteration
+        // anyway, and their rasters were all dropped by `doc_changed_at`.
+        let key = pending.first().map(|(key, _, _)| *key).unwrap_or_default();
+        let mut committed_box: Option<Rect> = None;
         let committed = !pending.is_empty();
-        for (bucket, stroke) in pending {
+        for (_, bucket, stroke) in pending {
+            if let Some(box_) = stroke.bounds() {
+                committed_box = Some(match committed_box {
+                    Some(pending) => pending.union(box_),
+                    None => box_,
+                });
+            }
             self.doc
                 .outputs
                 .entry(bucket)
@@ -608,9 +645,11 @@ impl App {
                 .push(stroke);
         }
         if committed {
-            self.store.mark_dirty(Instant::now());
+            self.doc_changed_at(key, committed_box.unwrap_or_default());
         }
-        if overlay_changed || committed {
+        // A committed stroke is repainted from its own box; anything else here only lost a
+        // transient element, which is a whole-surface frame as before.
+        if overlay_changed && !committed {
             self.mark_all_dirty();
         }
     }
@@ -656,15 +695,27 @@ impl App {
             };
             out.overlay.eraser = None;
             out.text_dirty = false;
+            // The box the edit occupied: the caret and the live text were painted there, and the
+            // committed item takes their place. Nothing outside it moves, so the frame that
+            // reports the commit damages it and fills the rest from the raster.
+            let previous = out.last_text_bounds;
             out.last_text_bounds = None;
-            // The caret disappears and the box may be committed: repaint this output whole.
-            out.dirty = true;
+            let box_ = previous.unwrap_or_default();
             if edit.buffer.text.is_empty() {
+                out.pending = Some(match out.pending {
+                    Some(pending) => pending.union(box_),
+                    None => box_,
+                });
                 continue;
             }
             let bucket = out.bucket(id).into_owned();
             let mut item = edit.item.clone();
             item.text = edit.buffer.text.clone();
+            let box_ = box_.union(item.paint_bounds());
+            out.pending = Some(match out.pending {
+                Some(pending) => pending.union(box_),
+                None => box_,
+            });
             let ann = self.doc.outputs.entry(bucket).or_default();
             match edit.index {
                 Some(idx) if idx < ann.texts.len() => ann.texts[idx] = item,
@@ -673,8 +724,7 @@ impl App {
             changed = true;
         }
         if changed {
-            self.invalidate_text_caches();
-            self.store.mark_dirty(Instant::now());
+            self.doc_changed();
         }
         self.im_preedit = None;
         self.im_commit.clear();
@@ -871,10 +921,11 @@ impl App {
         }
         out.scale = scale;
         out.surface.set_buffer_scale(scale as i32);
-        out.text_cache.invalidate();
+        out.cache.invalidate();
         out.buffers.clear();
         out.last_buffer = None;
         out.last_transient = None;
+        out.pending = None;
         out.dirty = true;
         self.dirty = true;
     }
@@ -894,6 +945,7 @@ impl App {
             out.buffers.clear();
             out.last_buffer = None;
             out.last_transient = None;
+            out.pending = None;
             out.buffer_size = px;
         }
 
@@ -935,7 +987,7 @@ impl App {
 
         // What this frame has to touch. Painting a box is only valid on the buffer that holds
         // the previous frame: on any other buffer the pixels outside the box are older. If the
-        // previous buffer is in flight we fell back to the other one, so redraw everything.
+        // previous buffer is in flight we fell back to the other one, so fill everything.
         let transient = transient_bounds(&out.overlay);
         let bucket = out.bucket(id);
         let empty = OutputAnnotations::default();
@@ -959,56 +1011,41 @@ impl App {
             && current_text_bounds.is_some()
             && edit_index_valid;
         let text_damage = local_text.then(|| {
+            // The overlay paints the whole box of the item, which can be a little wider than the
+            // region a click is tested against, so the box has to hold both.
             out.last_text_bounds
                 .unwrap()
                 .union(current_text_bounds.unwrap())
+                .union(out.overlay.text.as_ref().unwrap().item.paint_bounds())
         });
         let text_needs_full = out.overlay.text.is_some() && out.text_dirty && !local_text;
-        let skip_text = local_text
+        // The raster never holds the box under edit: its live text is the overlay's, and a text
+        // that has become shorter would otherwise leave the committed glyphs behind.
+        let skip_text = edit_index_valid
             .then(|| out.overlay.text.as_ref().and_then(|edit| edit.index))
             .flatten();
         let damage = if out.dirty || out.last_buffer != Some(idx) || text_needs_full {
             None
+        } else if let Some(pending) = out.pending {
+            // A document change with a known box: the changed element is in the rebuilt raster,
+            // and outside the box the previous frame is still right, so the box is enough.
+            let mut box_ = pending;
+            for extra in [out.last_transient, transient].into_iter().flatten() {
+                box_ = box_.union(extra);
+            }
+            if out.toolbar_dirty {
+                box_ = box_.union(toolbar_bounds(w as f32, h as f32));
+            }
+            Some(box_)
         } else if let Some(text_damage) = text_damage {
-            Some(damage_box_with_cache(
-                ann,
-                &out.overlay,
-                text_damage,
-                w as f32,
-                h as f32,
-                scale,
-                &mut out.text_cache,
-            ))
+            Some(text_damage)
         } else if out.transient_dirty || out.toolbar_dirty {
-            let transient = match (out.last_transient, transient) {
-                (Some(a), Some(b)) => a.union(b),
-                (Some(a), None) => a,
-                (None, Some(b)) => b,
-                (None, None) => Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    w: 0.0,
-                    h: 0.0,
-                },
-            };
             // The rail's box is fixed while editing, so the previous and the current frame agree
             // on it and there is nothing to remember between frames.
-            let changed = if out.toolbar_dirty {
-                transient.union(toolbar_bounds(w as f32, h as f32))
-            } else {
-                transient
-            };
-            // The box has to contain everything that will be drawn, because nothing may be
-            // painted outside it: those bytes still hold the previous frame, already swapped.
-            Some(damage_box_with_cache(
-                ann,
-                &out.overlay,
-                changed,
-                w as f32,
-                h as f32,
-                scale,
-                &mut out.text_cache,
-            ))
+            let rail = out
+                .toolbar_dirty
+                .then(|| toolbar_bounds(w as f32, h as f32));
+            Some(transient_damage(out.last_transient, transient, rail))
         } else {
             // Nothing changed for this output; another output is why the daemon redrew.
             return;
@@ -1021,6 +1058,7 @@ impl App {
         out.transient_dirty = false;
         out.toolbar_dirty = false;
         out.text_dirty = false;
+        out.pending = None;
         out.last_transient = transient;
         out.last_text_bounds = current_text_bounds;
         out.last_buffer = Some(idx);
@@ -1030,8 +1068,8 @@ impl App {
             let Some(canvas) = buffer.canvas(&mut self.pool) else {
                 return;
             };
-            // Buffers are reused, so clear to transparent or the previous frame shows through.
-            region.clear(canvas, px.0, px.1);
+            // Buffers are reused. The renderer fills the region this frame repaints from the
+            // output's document raster, which is what makes the buffer's other bytes irrelevant.
             self.renderer.render_with_cache(
                 canvas,
                 px.0,
@@ -1040,7 +1078,7 @@ impl App {
                 ann,
                 &out.overlay,
                 damage,
-                &mut out.text_cache,
+                &mut out.cache,
                 skip_text,
             );
             // Only the ARGB8888 fallback is B, G, R, A; Abgr8888 is already tiny-skia's order.
