@@ -451,7 +451,7 @@ fn every_block_of_the_rail_is_reachable_and_no_row_is_a_gap() {
             actions.push(*action);
         }
     }
-    for tool in [Tool::Pen, Tool::Eraser, Tool::Text] {
+    for tool in [Tool::Pen, Tool::Eraser, Tool::Text, Tool::Selection] {
         assert!(actions.contains(&ToolbarAction::Tool(tool)), "{tool:?}");
     }
     for index in 0..PALETTE.len() {
@@ -472,8 +472,8 @@ fn every_block_of_the_rail_is_reachable_and_no_row_is_a_gap() {
         ToolbarAction::Lock,
         "Esc is not last"
     );
-    // Eleven clickable blocks: the size readout is drawn but owned by `[` above it.
-    assert_eq!(actions.len(), 11, "a drawn block cannot be hit");
+    // Twelve clickable blocks: the size readout is drawn but owned by `[` above it.
+    assert_eq!(actions.len(), 12, "a drawn block cannot be hit");
     // Outside the rail the toolbar takes nothing: those presses are drawing gestures.
     let band = toolbar_bounds(w, h);
     assert_eq!(

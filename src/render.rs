@@ -12,8 +12,8 @@ use tiny_skia::{
 use wayland_client::protocol::wl_shm::Format;
 
 use crate::canvas::{
-    OutputAnnotations, Overlay, PALETTE, Rect, Stroke, TextItem, TextOverlay, Tool, Toolbar,
-    ToolbarAction,
+    Handle, ItemId, OutputAnnotations, Overlay, PALETTE, Rect, SELECT_HANDLE, Stroke, TextItem,
+    TextOverlay, Tool, Toolbar, ToolbarAction, rotate_handle, selection_frame,
 };
 /// Radius of the eraser marker circle, in logical pixels.
 const ERASER_MARKER_RADIUS: f32 = 8.0;
@@ -47,11 +47,11 @@ const TOOLBAR_LABEL_PAD: f32 = 12.0;
 /// of the drawn rail. The strip is damaged whenever the rail changes, and joins a transient
 /// damage box that reaches it.
 const TOOLBAR_RESERVE: f32 = 224.0;
-/// Height of the whole column: twelve blocks, eight gaps inside the groups and three between
+/// Height of the whole column: thirteen blocks, nine gaps inside the groups and three between
 /// them, all fixed, so the column's height never depends on the font, unlike the width a
 /// stretched block takes.
 const TOOLBAR_COLUMN: f32 =
-    2.0 * TOOLBAR_PAD + 12.0 * TOOLBAR_BLOCK + 8.0 * TOOLBAR_GAP + 3.0 * TOOLBAR_GROUP_GAP;
+    2.0 * TOOLBAR_PAD + 13.0 * TOOLBAR_BLOCK + 9.0 * TOOLBAR_GAP + 3.0 * TOOLBAR_GROUP_GAP;
 const TOOLBAR_CACHE_CAP: usize = 16;
 /// `#rrggbbaa`. The block fill stands in for a HUD material: a `wl_shm` layer surface cannot be
 /// blurred, so there is translucency but no real vibrancy. The alpha is the opacity that keeps
@@ -111,6 +111,7 @@ fn toolbar_blocks(toolbar: &Toolbar) -> Vec<Block> {
         (Tool::Pen, "P", "pen"),
         (Tool::Eraser, "E", "eraser"),
         (Tool::Text, "T", "text: click to place"),
+        (Tool::Selection, "S", "select: drag to move"),
     ] {
         blocks.push(Block {
             glyph: glyph.into(),
@@ -150,7 +151,7 @@ fn toolbar_blocks(toolbar: &Toolbar) -> Vec<Block> {
     });
     blocks.push(Block {
         glyph: "Esc".into(),
-        label: "end text, then lock".into(),
+        label: "cancel, then lock".into(),
         action: Some(ToolbarAction::Lock),
         active: false,
         swatch: None,
@@ -190,12 +191,15 @@ pub(crate) struct BaseLayer {
     key: Option<BaseKey>,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, PartialEq)]
 struct BaseKey {
     width: u32,
     height: u32,
     scale: f32,
-    skip_text: Option<usize>,
+    /// The elements the raster has to leave out: the text box under edit, and the elements a live
+    /// selection gesture is dragging. The overlay draws each of them instead, so a frame paints an
+    /// element exactly once, in the position it is live at.
+    skip: Vec<ItemId>,
 }
 
 struct TextCacheEntry {
@@ -278,8 +282,8 @@ impl BaseLayer {
         self.key = None;
     }
 
-    fn matches(&self, key: BaseKey) -> bool {
-        self.key == Some(key)
+    fn matches(&self, key: &BaseKey) -> bool {
+        self.key.as_ref() == Some(key)
     }
 
     /// Rasterise the document, reusing the pixmap where it can. `false` when no pixmap could be
@@ -357,9 +361,17 @@ impl Renderer {
         overlay: &Overlay,
         damage: Option<Rect>,
     ) {
-        let mut cache = FrameCache::default();
+        let mut render_cache = FrameCache::default();
         self.render_with_cache(
-            buf, width, height, scale, ann, overlay, damage, &mut cache, None,
+            buf,
+            width,
+            height,
+            scale,
+            ann,
+            overlay,
+            damage,
+            &mut render_cache,
+            &[],
         );
     }
 
@@ -377,7 +389,7 @@ impl Renderer {
         overlay: &Overlay,
         damage: Option<Rect>,
         cache: &mut FrameCache,
-        skip_text: Option<usize>,
+        skip: &[ItemId],
     ) {
         let FrameCache { text, base } = cache;
         text.sync(ann.texts.len(), scale);
@@ -391,15 +403,15 @@ impl Renderer {
             width,
             height,
             scale,
-            skip_text,
+            skip: skip.to_vec(),
         };
         let mut draw_document = false;
-        if base.matches(key) {
+        if base.matches(&key) {
             base.fill(buf, region, width, height);
         } else {
             let renderer = &mut *self;
             let built = base.rasterise(key, |target| {
-                renderer.draw_document(target, ann, scale, text, skip_text)
+                renderer.draw_document(target, ann, scale, text, skip)
             });
             if built {
                 base.fill(buf, region, width, height);
@@ -412,13 +424,43 @@ impl Renderer {
             return;
         };
         if draw_document {
-            self.draw_document(&mut pixmap, ann, scale, text, skip_text);
+            self.draw_document(&mut pixmap, ann, scale, text, skip);
         }
         if let Some(s) = &overlay.stroke {
             draw_stroke(&mut pixmap, s, scale);
         }
         if let Some(t) = &overlay.text {
             self.draw_text(&mut pixmap, &t.item, scale, Some(t), None);
+        }
+        // The elements a live gesture is dragging, at the position the gesture puts them. They are
+        // the same copies the release writes into the document, so the preview cannot lie.
+        if let Some(selection) = &overlay.selection
+            && let Some(transform) = selection.transform
+        {
+            for id in &selection.items {
+                match id {
+                    ItemId::Stroke(i) => {
+                        if let Some(s) = ann.strokes.get(*i) {
+                            draw_stroke(&mut pixmap, &transform.stroke(s), scale);
+                        }
+                    }
+                    ItemId::Text(i) => {
+                        if let Some(item) = ann.texts.get(*i) {
+                            self.draw_text(&mut pixmap, &transform.text(item), scale, None, None);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(frame) = overlay
+            .selection
+            .as_ref()
+            .and_then(|s| selection_frame(ann, &s.items, s.transform))
+        {
+            draw_selection(&mut pixmap, frame, scale);
+        }
+        if let Some(marquee) = overlay.marquee {
+            draw_marquee(&mut pixmap, marquee, scale);
         }
         if let Some(toolbar) = &overlay.toolbar {
             // The toolbar is static content: only a tool, colour, size or mode change repaints
@@ -448,15 +490,20 @@ impl Renderer {
         ann: &OutputAnnotations,
         scale: f32,
         text: &mut TextLayoutCache,
-        skip_text: Option<usize>,
+        skip: &[ItemId],
     ) {
-        for s in ann.strokes.iter() {
+        for (index, s) in ann.strokes.iter().enumerate() {
+            if skip.contains(&ItemId::Stroke(index)) {
+                continue;
+            }
             draw_stroke(pixmap, s, scale);
         }
         for (index, item) in ann.texts.iter().enumerate() {
-            // The box under edit is the overlay's, and the raster must not hold the committed
-            // text of it: a live text that has become shorter would leave its glyphs behind.
-            if skip_text == Some(index) {
+            // The box under edit is the overlay's, and a box a gesture is dragging is drawn with
+            // the live gesture: the raster must not hold either, because the live one is what the
+            // frame paints over it. A live text that has become shorter would otherwise leave the
+            // committed glyphs behind.
+            if skip.contains(&ItemId::Text(index)) {
                 continue;
             }
             if !text.matches(index, item) {
@@ -944,7 +991,8 @@ pub fn transient_damage(last: Option<Rect>, now: Option<Rect>, rail: Option<Rect
 }
 
 /// Bounding box of the transient overlay elements of a frame, in logical pixels: the
-/// in-progress stroke and the eraser marker. `None` when the overlay draws neither.
+/// in-progress stroke, the eraser marker and the marquee. `None` when the overlay draws none of
+/// them. The selection's own box needs the document, so the caller adds it.
 pub fn transient_bounds(overlay: &Overlay) -> Option<Rect> {
     let stroke = overlay.stroke.as_ref().and_then(Stroke::bounds);
     let eraser = overlay.eraser.map(|[x, y]| {
@@ -956,10 +1004,69 @@ pub fn transient_bounds(overlay: &Overlay) -> Option<Rect> {
         }
         .grown(ERASER_MARKER_RADIUS + 2.0)
     });
-    match (stroke, eraser) {
-        (Some(a), Some(b)) => Some(a.union(b)),
-        (a, b) => a.or(b),
+    let marquee = overlay.marquee.map(|m| m.grown(SELECT_HANDLE));
+    [stroke, eraser, marquee]
+        .into_iter()
+        .flatten()
+        .reduce(Rect::union)
+}
+
+/// The selection frame and its handles, in logical pixels: one hairline and accent-filled
+/// capsules, so the interface gains no shape and no colour it did not already have.
+fn draw_selection(pixmap: &mut PixmapMut, frame: Rect, scale: f32) {
+    let c = parse_hex(TOOLBAR_ACCENT);
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(c[0], c[1], c[2], c[3]);
+    paint.anti_alias = true;
+    let hairline = SkStroke {
+        width: scale,
+        ..Default::default()
+    };
+    if let Some(path) = rounded_rect_path(frame, 0.0) {
+        pixmap.stroke_path(&path, &paint, &hairline, Transform::identity(), None);
     }
+    // The stem is what makes the rotation handle read as part of the frame rather than as a dot
+    // that floats above it.
+    let knob = rotate_handle(frame);
+    let mut stem = PathBuilder::new();
+    stem.move_to((frame.x + frame.w / 2.0) * scale, frame.y * scale);
+    stem.line_to(knob[0] * scale, knob[1] * scale);
+    if let Some(path) = stem.finish() {
+        pixmap.stroke_path(&path, &paint, &hairline, Transform::identity(), None);
+    }
+    for point in Handle::ALL.iter().map(|h| h.point(frame)).chain([knob]) {
+        let mut dot = PathBuilder::new();
+        dot.push_circle(
+            point[0] * scale,
+            point[1] * scale,
+            SELECT_HANDLE / 2.0 * scale,
+        );
+        if let Some(path) = dot.finish() {
+            pixmap.fill_path(
+                &path,
+                &paint,
+                tiny_skia::FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
+        }
+    }
+}
+
+/// The marquee of a selection drag: the same hairline, with no fill of its own.
+fn draw_marquee(pixmap: &mut PixmapMut, marquee: Rect, scale: f32) {
+    let Some(path) = rounded_rect_path(marquee, 0.0) else {
+        return;
+    };
+    let c = parse_hex(TOOLBAR_ACCENT);
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(c[0], c[1], c[2], c[3]);
+    paint.anti_alias = true;
+    let hairline = SkStroke {
+        width: scale,
+        ..Default::default()
+    };
+    pixmap.stroke_path(&path, &paint, &hairline, Transform::identity(), None);
 }
 
 /// Whether two toolbar states lay out the same rail. The transition progress is not part of the
@@ -1303,7 +1410,7 @@ fn parse_hex(s: &str) -> [u8; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::canvas::TextBuffer;
+    use crate::canvas::{Selection, TextBuffer, Transform};
 
     fn text_item(text: &str) -> TextItem {
         TextItem {
@@ -1330,7 +1437,7 @@ mod tests {
             &Overlay::default(),
             None,
             cache,
-            None,
+            &[],
         );
     }
 
@@ -1371,11 +1478,11 @@ mod tests {
         let annotations = document();
         let mut first = vec![0; 200 * 100 * 4];
         render_cached(&mut renderer, &mut cache, &annotations, &mut first);
-        assert!(cache.base.matches(BaseKey {
+        assert!(cache.base.matches(&BaseKey {
             width: 200,
             height: 100,
             scale: 1.0,
-            skip_text: None,
+            skip: Vec::new(),
         }));
 
         let mut second = vec![0; 200 * 100 * 4];
@@ -1429,7 +1536,7 @@ mod tests {
             &Overlay::default(),
             None,
             &mut cache,
-            Some(0),
+            &[crate::canvas::ItemId::Text(0)],
         );
         assert_ne!(
             with_item, without_item,
@@ -1511,7 +1618,7 @@ mod tests {
             &overlay,
             Some(bounds),
             &mut cache,
-            None,
+            &[],
         );
         assert_eq!(actual, expected);
     }
@@ -1580,8 +1687,65 @@ mod tests {
             &overlay,
             Some(damage),
             &mut cache,
-            Some(0),
+            &[crate::canvas::ItemId::Text(0)],
         );
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn a_live_gesture_draws_its_element_once() {
+        // The raster leaves the held element out and the overlay draws it with the live
+        // transform, so a dragged element is painted exactly once. A frame drawn that way has to
+        // be pixel-identical to the same frame drawn from a document that already holds the moved
+        // element and nothing live: twice the ink, or none, would show up as a difference.
+        let stored = document();
+        let held = [ItemId::Stroke(0)];
+        let transform = Transform::Translate {
+            dx: 40.0,
+            dy: -10.0,
+        };
+        let mut renderer = Renderer::new();
+        let live = Overlay {
+            selection: Some(Selection {
+                items: held.to_vec(),
+                transform: Some(transform),
+            }),
+            ..Default::default()
+        };
+        let mut dragged = vec![0; 200 * 100 * 4];
+        renderer.render_with_cache(
+            &mut dragged,
+            200,
+            100,
+            1.0,
+            &stored,
+            &live,
+            None,
+            &mut FrameCache::default(),
+            &held,
+        );
+
+        let mut moved = stored.clone();
+        moved.strokes[0] = transform.stroke(&stored.strokes[0]);
+        let settled = Overlay {
+            selection: Some(Selection {
+                items: held.to_vec(),
+                transform: None,
+            }),
+            ..Default::default()
+        };
+        let mut committed = vec![0; 200 * 100 * 4];
+        renderer.render_with_cache(
+            &mut committed,
+            200,
+            100,
+            1.0,
+            &moved,
+            &settled,
+            None,
+            &mut FrameCache::default(),
+            &[],
+        );
+        assert_eq!(dragged, committed);
     }
 }

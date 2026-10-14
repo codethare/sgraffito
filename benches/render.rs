@@ -153,7 +153,7 @@ fn render_frame(
         overlay,
         damage,
         cache,
-        None,
+        &[],
     );
 }
 

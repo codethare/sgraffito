@@ -21,7 +21,7 @@ use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::{
 use crate::app::{
     App, BTN_LEFT, Mode, PALETTE, Tool, ToolbarAction, log, read_selection, text_mime,
 };
-use crate::canvas::{Caret, Rect, Stroke, TextBuffer};
+use crate::canvas::{Caret, OutputAnnotations, Rect, Stroke, TextBuffer, grab_at, selection_frame};
 
 /// What a local key does while a text box is focused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +94,7 @@ pub fn tool_for_keysym(keysym: Keysym) -> Option<Tool> {
         Keysym::p | Keysym::P => Some(Tool::Pen),
         Keysym::e | Keysym::E => Some(Tool::Eraser),
         Keysym::t | Keysym::T => Some(Tool::Text),
+        Keysym::s | Keysym::S => Some(Tool::Selection),
         _ => None,
     }
 }
@@ -213,7 +214,7 @@ impl KeyboardHandler for App {
             return;
         }
         if event.keysym == Keysym::Escape {
-            self.set_mode(Mode::Locked);
+            self.escape();
         } else if let Some(tool) = tool_for_keysym(event.keysym) {
             self.set_tool(tool);
         } else if let Some(idx) = color_for_keysym(event.keysym) {
@@ -444,6 +445,55 @@ impl App {
     fn preedit_is_empty(&self) -> bool {
         self.focused_edit().is_none_or(|t| t.preedit.is_empty())
     }
+
+    /// `Esc` undoes the state the daemon is in, one step at a time. A gesture being dragged is
+    /// abandoned rather than written — a keystroke is a request to abort, unlike the interruptions
+    /// that commit — then a text box under edit ends, then a selection is dropped, and only then
+    /// does the daemon lock.
+    fn escape(&mut self) {
+        if self.gesture.take().is_some() {
+            for out in self.outputs.values_mut() {
+                if let Some(selection) = out.overlay.selection.as_mut() {
+                    // The elements are the document's again, where the document still holds them.
+                    selection.transform = None;
+                }
+                out.overlay.marquee = None;
+                out.transient_dirty = true;
+            }
+            self.dirty = true;
+            return;
+        }
+        if self.focused_edit().is_some() {
+            self.end_text_edit();
+            return;
+        }
+        if self.drop_selection() {
+            return;
+        }
+        self.set_mode(Mode::Locked);
+    }
+
+    /// The frame handle under the pointer, which is what the pointer shape says a press would
+    /// grab. Only meaningful with the selection tool armed and no gesture running.
+    fn update_selection_grab(&mut self, key: u32, x: f32, y: f32) {
+        let grab = {
+            let Some(out) = self.outputs.get(&key) else {
+                return;
+            };
+            let bucket = out.bucket(key).into_owned();
+            let empty = OutputAnnotations::default();
+            let ann = self.doc.outputs.get(&bucket).unwrap_or(&empty);
+            out.overlay
+                .selection
+                .as_ref()
+                .and_then(|s| selection_frame(ann, &s.items, None))
+                .and_then(|frame| grab_at(frame, x, y))
+        };
+        if grab != self.selection_grab {
+            self.selection_grab = grab;
+            self.sync_cursor();
+        }
+    }
 }
 
 impl App {
@@ -478,6 +528,7 @@ impl App {
                 }
             }
             Tool::Text => self.begin_text_edit(key, x, y),
+            Tool::Selection => self.select_press(*key, x, y),
         }
         if let Some(out) = self.outputs.get_mut(key) {
             // A press starts or ends something: repaint that output whole.
@@ -493,16 +544,28 @@ impl App {
         // The toolbar is not drawing area: a drag passing over it neither draws under it nor
         // leaves the eraser marker on it, and the pointer takes the toolbar's own shape there.
         let over_toolbar = self.update_toolbar_hover(key, x, y);
-        let Some(out) = self.outputs.get_mut(key) else {
-            return;
-        };
         if over_toolbar {
-            if out.overlay.eraser.take().is_some() {
+            if let Some(out) = self.outputs.get_mut(key)
+                && out.overlay.eraser.take().is_some()
+            {
                 out.transient_dirty = true;
                 self.dirty = true;
             }
             return;
         }
+        // The selection tool draws nothing on hover: the pointer only says what a press would
+        // grab, until a press has started a gesture.
+        if self.tool == Tool::Selection {
+            if self.gesture.is_some() {
+                self.drag_selection(*key, x, y);
+            } else {
+                self.update_selection_grab(*key, x, y);
+            }
+            return;
+        }
+        let Some(out) = self.outputs.get_mut(key) else {
+            return;
+        };
         match self.tool {
             // Only a press starts a stroke: hovering with no button held must not draw.
             Tool::Pen => {
@@ -517,7 +580,7 @@ impl App {
                 stroke.points.push([x, y]);
             }
             Tool::Eraser => out.overlay.eraser = Some([x, y]),
-            Tool::Text => return,
+            Tool::Text | Tool::Selection => return,
         }
         // Only the transient overlay moved, so the next frame can damage just its box.
         out.transient_dirty = true;
@@ -661,5 +724,7 @@ impl App {
         if let Some(out) = self.outputs.get_mut(key) {
             out.transient_dirty = true;
         }
+        // A gesture the pointer was dragging ends here, and is written into the document.
+        self.release_selection(id);
     }
 }

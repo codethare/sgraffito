@@ -42,7 +42,9 @@ use wayland_client::{
 };
 
 use crate::canvas::{
-    Doc, OutputAnnotations, Overlay, Rect, TextBuffer, TextItem, TextOverlay, Toolbar,
+    Doc, Gesture, Grab, Handle, ItemId, OutputAnnotations, Overlay, Rect, Selection, TEXT_SIZE_MAX,
+    TEXT_SIZE_MIN, TextBuffer, TextItem, TextOverlay, Toolbar, Transform, grab_at, marquee_select,
+    selection_bounds, selection_frame,
 };
 pub use crate::canvas::{PALETTE, Tool, ToolbarAction};
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::{
@@ -66,8 +68,6 @@ pub const PEN_WIDTH_MAX: f32 = 16.0;
 pub const PEN_WIDTH_STEP: f32 = 1.0;
 /// Initial text size and the range `[`/`]` may adjust it within, in logical pixels.
 pub const TEXT_SIZE: f32 = 18.0;
-pub const TEXT_SIZE_MIN: f32 = 8.0;
-pub const TEXT_SIZE_MAX: f32 = 72.0;
 pub const TEXT_SIZE_STEP: f32 = 2.0;
 
 pub(crate) const BTN_LEFT: u32 = 0x110;
@@ -231,6 +231,13 @@ pub struct App {
     /// When that stretch started, while it is still opening. `None` when no block is under the
     /// pointer, which is also what makes the collapse immediate.
     pub(crate) toolbar_hover_since: Option<Instant>,
+
+    // selection (the selection tool)
+    /// The gesture the pointer is dragging, if any. Nothing about a gesture exists until it is
+    /// released, so none of it is in the document.
+    pub(crate) gesture: Option<Gesture>,
+    /// The frame handle under the pointer, which is what the pointer shape says it would grab.
+    pub(crate) selection_grab: Option<Grab>,
 }
 
 impl App {
@@ -296,6 +303,8 @@ impl App {
             pointer_over_toolbar: false,
             toolbar_hover: None,
             toolbar_hover_since: None,
+            gesture: None,
+            selection_grab: None,
         };
         app.bind_text_input_manager();
         app.bind_cursor_shape();
@@ -407,6 +416,7 @@ impl App {
             return;
         }
         self.end_text_edit();
+        self.commit_any_gesture();
         self.cancel_transients();
         self.keyboard_focus = None;
         self.pointer_over_toolbar = false;
@@ -450,11 +460,12 @@ impl App {
         }
     }
 
-    /// The size the active tool creates content with.
+    /// The size the active tool creates content with. The selection tool creates nothing, so it
+    /// shows the pen width, which is the size the next stroke will take.
     fn active_size(&self) -> f32 {
         match self.tool {
             Tool::Text => self.text_size,
-            Tool::Pen | Tool::Eraser => self.pen_width,
+            Tool::Pen | Tool::Eraser | Tool::Selection => self.pen_width,
         }
     }
 
@@ -471,7 +482,7 @@ impl App {
                     TEXT_SIZE_MAX,
                 )
             }
-            Tool::Pen | Tool::Eraser => {
+            Tool::Pen | Tool::Eraser | Tool::Selection => {
                 self.pen_width = stepped_size(
                     self.pen_width,
                     dir,
@@ -533,6 +544,16 @@ impl App {
         if self.mode == Mode::Locked || self.pointer_over_toolbar {
             return Shape::Default;
         }
+        if self.tool == Tool::Selection {
+            // With the selection tool armed the shape says what a press would grab, which is what
+            // the pointer is over rather than what the tool is.
+            return match (self.gesture.is_some(), self.selection_grab) {
+                (true, _) => Shape::Grabbing,
+                (false, Some(Grab::Handle(handle))) => handle_cursor(handle),
+                (false, Some(Grab::Rotate)) => Shape::Grab,
+                (false, None) => Shape::Default,
+            };
+        }
         tool_cursor(self.tool)
     }
 
@@ -567,6 +588,10 @@ impl App {
         if self.tool != tool {
             self.end_text_edit();
             self.commit_transient_strokes();
+            // A gesture in progress is written rather than dropped, and then the selection goes
+            // with the tool that could act on it.
+            self.commit_any_gesture();
+            self.drop_selection();
             self.tool = tool;
             log(&format!("tool switched to {tool:?}"));
             // The document is untouched: the frame repaints the rail and whatever the finished
@@ -659,11 +684,246 @@ impl App {
         let Some(out) = self.outputs.get_mut(&key) else {
             return;
         };
-        let changed = out.overlay.stroke.take().is_some() || out.overlay.eraser.take().is_some();
+        let changed = out.overlay.stroke.take().is_some()
+            || out.overlay.eraser.take().is_some()
+            || out.overlay.selection.take().is_some()
+            || out.overlay.marquee.take().is_some();
         if changed {
             out.transient_dirty = true;
             out.dirty = true;
             self.dirty = true;
+        }
+    }
+
+    /// With the selection tool armed, a press grabs a handle of the frame, takes the element under
+    /// the pointer, or starts a marquee. A handle wins over the element below it, so a resize that
+    /// starts on a corner never moves the selection instead.
+    pub(crate) fn select_press(&mut self, key: u32, x: f32, y: f32) {
+        let held: Vec<ItemId>;
+        let frame: Option<Rect>;
+        let under: Option<ItemId>;
+        {
+            let Some(out) = self.outputs.get(&key) else {
+                return;
+            };
+            let bucket = out.bucket(key).into_owned();
+            let empty = OutputAnnotations::default();
+            let ann = self.doc.outputs.get(&bucket).unwrap_or(&empty);
+            held = out
+                .overlay
+                .selection
+                .as_ref()
+                .map(|s| s.items.clone())
+                .unwrap_or_default();
+            frame = selection_frame(ann, &held, None);
+            under = ann.hit(x, y);
+        }
+        if let Some(frame) = frame
+            && let Some(grab) = grab_at(frame, x, y)
+        {
+            self.gesture = Some(Gesture::start(Some(grab), frame, x, y));
+            self.sync_cursor();
+            return;
+        }
+        let Some(under) = under else {
+            // Empty space: the marquee decides what is selected when it is released, so what is
+            // held now stays held, and visible, for the whole drag.
+            self.gesture = Some(Gesture::Marquee { origin: [x, y] });
+            return;
+        };
+        // An element the selection already holds keeps the whole selection, so a second press
+        // inside a cluster drags the cluster rather than dropping to one element.
+        let items = if held.contains(&under) {
+            held
+        } else {
+            vec![under]
+        };
+        self.set_selection(key, items, None);
+        self.gesture = Some(Gesture::start(None, Rect::default(), x, y));
+    }
+
+    /// Drag the live gesture to the pointer: a marquee sweeps its rectangle, the other three move
+    /// the held geometry. An identity transform is stored as no transform at all, so a press that
+    /// never moved leaves the document raster alone.
+    pub(crate) fn drag_selection(&mut self, key: u32, x: f32, y: f32) {
+        let Some(gesture) = self.gesture else {
+            return;
+        };
+        let Some(out) = self.outputs.get_mut(&key) else {
+            return;
+        };
+        if let Gesture::Marquee { origin } = gesture {
+            let marquee = Rect::from_corners(origin, [x, y]);
+            if out.overlay.marquee != Some(marquee) {
+                out.overlay.marquee = Some(marquee);
+                out.transient_dirty = true;
+                self.dirty = true;
+            }
+            return;
+        }
+        let Some(transform) = gesture.transform([x, y]) else {
+            return;
+        };
+        let next = (!transform.is_identity()).then_some(transform);
+        let Some(selection) = out.overlay.selection.as_mut() else {
+            return;
+        };
+        if selection.transform != next {
+            selection.transform = next;
+            out.transient_dirty = true;
+            self.dirty = true;
+        }
+    }
+
+    /// Let go of the pointer: a marquee becomes the selection, and a dragged gesture is written
+    /// into the document.
+    pub(crate) fn release_selection(&mut self, key: u32) {
+        let Some(gesture) = self.gesture.take() else {
+            return;
+        };
+        if matches!(gesture, Gesture::Marquee { .. }) {
+            self.finish_marquee(key);
+        } else {
+            self.write_gesture(key);
+        }
+        // The drag is over, so the pointer stops saying it is holding something. The next motion
+        // settles it on whatever is under it now.
+        self.selection_grab = None;
+        self.sync_cursor();
+    }
+
+    /// Drop the selection everywhere, and the marquee with it. Returns whether anything was held.
+    pub(crate) fn drop_selection(&mut self) -> bool {
+        let mut dropped = false;
+        for out in self.outputs.values_mut() {
+            let had = out.overlay.selection.take().is_some() | out.overlay.marquee.take().is_some();
+            if had {
+                out.transient_dirty = true;
+                dropped = true;
+            }
+        }
+        if dropped {
+            self.gesture = None;
+            self.dirty = true;
+        }
+        dropped
+    }
+
+    /// Write any live gesture into the document, wherever it is. Something other than the pointer
+    /// ends the gesture this way — a mode switch, a tool change, the output going away — and the
+    /// drag the user already made is kept rather than dropped.
+    pub(crate) fn commit_any_gesture(&mut self) {
+        let keys: Vec<u32> = self
+            .outputs
+            .iter()
+            .filter(|(_, out)| {
+                out.overlay
+                    .selection
+                    .as_ref()
+                    .is_some_and(|s| s.transform.is_some())
+            })
+            .map(|(key, _)| *key)
+            .collect();
+        for key in keys {
+            self.write_gesture(key);
+        }
+        self.gesture = None;
+    }
+
+    /// Hold `items` on one output and let go everywhere else: at most one selection exists at a
+    /// time, the way at most one text box is under edit.
+    fn set_selection(&mut self, key: u32, items: Vec<ItemId>, transform: Option<Transform>) {
+        let owned =
+            (!items.is_empty() || transform.is_some()).then_some(Selection { items, transform });
+        for (k, out) in self.outputs.iter_mut() {
+            let next = if *k == key { owned.clone() } else { None };
+            if out.overlay.selection != next {
+                out.overlay.selection = next;
+                out.transient_dirty = true;
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// Let the marquee's rectangle decide the selection: the elements it wholly contains.
+    fn finish_marquee(&mut self, key: u32) {
+        let marquee = {
+            let Some(out) = self.outputs.get_mut(&key) else {
+                return;
+            };
+            out.transient_dirty = true;
+            match out.overlay.marquee.take() {
+                Some(marquee) => marquee,
+                None => return,
+            }
+        };
+        let bucket = self
+            .outputs
+            .get(&key)
+            .map(|out| out.bucket(key).into_owned());
+        let items = match bucket {
+            Some(bucket) => {
+                let empty = OutputAnnotations::default();
+                let ann = self.doc.outputs.get(&bucket).unwrap_or(&empty);
+                marquee_select(ann, marquee)
+            }
+            None => Vec::new(),
+        };
+        self.set_selection(key, items, None);
+    }
+
+    /// Write a dragged transform into the document, so the geometry the frame has been drawing is
+    /// the geometry the file holds. An element that is no longer there is dropped instead of being
+    /// written over whatever took its place, which is what stops a `clear` arriving mid-drag from
+    /// resurrecting what it removed.
+    fn write_gesture(&mut self, key: u32) {
+        let Some(out) = self.outputs.get(&key) else {
+            return;
+        };
+        let Some(selection) = out.overlay.selection.as_ref() else {
+            return;
+        };
+        let Some(transform) = selection.transform else {
+            return;
+        };
+        let (items, bucket) = (selection.items.clone(), out.bucket(key).into_owned());
+        let mut box_: Option<Rect> = None;
+        if let Some(ann) = self.doc.outputs.get_mut(&bucket) {
+            for id in &items {
+                let changed = match *id {
+                    ItemId::Stroke(i) if i < ann.strokes.len() => {
+                        let turned = transform.stroke(&ann.strokes[i]);
+                        let changed = ann.strokes[i]
+                            .bounds()
+                            .into_iter()
+                            .chain(turned.bounds())
+                            .reduce(Rect::union);
+                        ann.strokes[i] = turned;
+                        changed
+                    }
+                    ItemId::Text(i) if i < ann.texts.len() => {
+                        let moved = transform.text(&ann.texts[i]);
+                        let changed = ann.texts[i].paint_bounds().union(moved.paint_bounds());
+                        ann.texts[i] = moved;
+                        Some(changed)
+                    }
+                    _ => None,
+                };
+                box_ = match (box_, changed) {
+                    (Some(a), Some(b)) => Some(a.union(b)),
+                    (a, b) => a.or(b),
+                };
+            }
+        }
+        // The held elements are the document's again, so the raster has to hold them where they
+        // now are: dropping the transform is what puts them back into it.
+        if let Some(out) = self.outputs.get_mut(&key)
+            && let Some(selection) = out.overlay.selection.as_mut()
+        {
+            selection.transform = None;
+        }
+        if let Some(box_) = box_ {
+            self.doc_changed_at(key, box_);
         }
     }
 
@@ -814,6 +1074,9 @@ impl App {
             }
             Command::Clear => {
                 self.end_text_edit();
+                // `clear` empties the document, so a gesture still holding elements of it is
+                // dropped: writing it would put back what this command just removed.
+                self.gesture = None;
                 self.cancel_transients();
                 self.doc.outputs.clear();
                 self.invalidate_text_caches();
@@ -992,6 +1255,17 @@ impl App {
         let bucket = out.bucket(id);
         let empty = OutputAnnotations::default();
         let ann = self.doc.outputs.get(bucket.as_ref()).unwrap_or(&empty);
+        // The frame and its handles are not document elements, so they are only ever drawn live;
+        // the box they occupy is what the frame that repaints them has to damage.
+        let selected = out
+            .overlay
+            .selection
+            .as_ref()
+            .and_then(|s| selection_frame(ann, &s.items, s.transform));
+        let transient = match (transient, selected) {
+            (Some(a), Some(b)) => Some(a.union(selection_bounds(b))),
+            (a, b) => a.or(b.map(selection_bounds)),
+        };
         let current_text_bounds = out.overlay.text.as_ref().and_then(|edit| {
             (edit.preedit.is_empty()).then(|| {
                 self.renderer
@@ -1019,11 +1293,18 @@ impl App {
                 .union(out.overlay.text.as_ref().unwrap().item.paint_bounds())
         });
         let text_needs_full = out.overlay.text.is_some() && out.text_dirty && !local_text;
-        // The raster never holds the box under edit: its live text is the overlay's, and a text
-        // that has become shorter would otherwise leave the committed glyphs behind.
-        let skip_text = edit_index_valid
-            .then(|| out.overlay.text.as_ref().and_then(|edit| edit.index))
-            .flatten();
+        // The raster never holds the box under edit, and it never holds the elements a live
+        // gesture is dragging: the overlay draws each of them, in its live position, so a text
+        // that has become shorter or an element that has moved cannot leave the old pixels behind.
+        let mut skip: Vec<ItemId> = Vec::new();
+        if edit_index_valid
+            && let Some(index) = out.overlay.text.as_ref().and_then(|edit| edit.index)
+        {
+            skip.push(ItemId::Text(index));
+        }
+        if let Some(selection) = &out.overlay.selection {
+            skip.extend_from_slice(selection.live());
+        }
         let damage = if out.dirty || out.last_buffer != Some(idx) || text_needs_full {
             None
         } else if let Some(pending) = out.pending {
@@ -1079,7 +1360,7 @@ impl App {
                 &out.overlay,
                 damage,
                 &mut out.cache,
-                skip_text,
+                &skip,
             );
             // Only the ARGB8888 fallback is B, G, R, A; Abgr8888 is already tiny-skia's order.
             if swap {
@@ -1180,6 +1461,20 @@ pub fn tool_cursor(tool: Tool) -> Shape {
         Tool::Pen => Shape::Crosshair,
         Tool::Eraser => Shape::Cell,
         Tool::Text => Shape::Text,
+        // The selection tool creates nothing of its own, so the pointer stays the plain arrow
+        // until it is over something it would act on.
+        Tool::Selection => Shape::Default,
+    }
+}
+
+/// The pointer shape a resize handle takes: the protocol's own diagonal or edge shape for the
+/// direction it drags in.
+pub fn handle_cursor(handle: Handle) -> Shape {
+    match handle {
+        Handle::Nw | Handle::Se => Shape::NwseResize,
+        Handle::Ne | Handle::Sw => Shape::NeswResize,
+        Handle::N | Handle::S => Shape::NsResize,
+        Handle::E | Handle::W => Shape::EwResize,
     }
 }
 

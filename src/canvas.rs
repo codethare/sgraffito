@@ -7,6 +7,24 @@ use serde::{Deserialize, Serialize};
 /// Eraser hit radius, in logical pixels.
 pub const ERASER_THRESHOLD: f32 = 8.0;
 
+/// Drawn diameter of a selection handle, in logical pixels.
+pub const SELECT_HANDLE: f32 = 9.0;
+
+/// Radius a selection handle is grabbed within. Larger than it is drawn, so a small dot stays an
+/// easy target on a dense drawing.
+pub const SELECT_HANDLE_HIT: f32 = 11.0;
+
+/// How far above the frame's top edge the rotation handle sits, in logical pixels.
+pub const SELECT_ROTATE_GAP: f32 = 18.0;
+
+/// Smallest factor a resize may apply. A frame cannot be collapsed into an extent no drag can
+/// restore, and a negative factor would mirror the selection, which the text renderer cannot draw.
+const MIN_SCALE: f32 = 0.05;
+
+/// Text size bounds, in logical pixels. They bound a new box and every resize of an existing one.
+pub const TEXT_SIZE_MIN: f32 = 8.0;
+pub const TEXT_SIZE_MAX: f32 = 72.0;
+
 /// Built-in palette (`#rrggbb`).
 pub const PALETTE: [&str; 5] = ["#e01b24", "#f6d32d", "#33d17a", "#3584e4", "#ffffff"];
 
@@ -16,6 +34,7 @@ pub enum Tool {
     Pen,
     Eraser,
     Text,
+    Selection,
 }
 
 /// What clicking one control of the edit-mode toolbar does. Each variant has exactly the
@@ -182,6 +201,271 @@ impl Rect {
             h: self.h + 2.0 * by,
         }
     }
+
+    /// The rectangle two opposite corners span. The corners may come in any order, and the
+    /// result never has a negative extent, so a marquee dragged up and to the left is the same
+    /// rectangle as the equivalent drag down and to the right.
+    pub fn from_corners(a: [f32; 2], b: [f32; 2]) -> Rect {
+        Rect {
+            x: a[0].min(b[0]),
+            y: a[1].min(b[1]),
+            w: (b[0] - a[0]).abs(),
+            h: (b[1] - a[1]).abs(),
+        }
+    }
+
+    pub fn centre(self) -> [f32; 2] {
+        [self.x + self.w / 2.0, self.y + self.h / 2.0]
+    }
+}
+
+/// A resize handle of the selection frame: the four corners and the four edge midpoints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Handle {
+    Nw,
+    N,
+    Ne,
+    E,
+    Se,
+    S,
+    Sw,
+    W,
+}
+
+impl Handle {
+    /// Every handle, in the order the frame draws them.
+    pub const ALL: [Handle; 8] = [
+        Handle::Nw,
+        Handle::N,
+        Handle::Ne,
+        Handle::E,
+        Handle::Se,
+        Handle::S,
+        Handle::Sw,
+        Handle::W,
+    ];
+
+    /// The point of `frame` this handle is centred on.
+    pub fn point(self, frame: Rect) -> [f32; 2] {
+        let (l, r, t, b) = (frame.x, frame.x + frame.w, frame.y, frame.y + frame.h);
+        let (cx, cy) = (l + frame.w / 2.0, t + frame.h / 2.0);
+        match self {
+            Handle::Nw => [l, t],
+            Handle::N => [cx, t],
+            Handle::Ne => [r, t],
+            Handle::E => [r, cy],
+            Handle::Se => [r, b],
+            Handle::S => [cx, b],
+            Handle::Sw => [l, b],
+            Handle::W => [l, cy],
+        }
+    }
+
+    /// The handle across the frame from this one. Its point is the anchor a resize keeps still.
+    fn opposite(self) -> Handle {
+        match self {
+            Handle::Nw => Handle::Se,
+            Handle::N => Handle::S,
+            Handle::Ne => Handle::Sw,
+            Handle::E => Handle::W,
+            Handle::Se => Handle::Nw,
+            Handle::S => Handle::N,
+            Handle::Sw => Handle::Ne,
+            Handle::W => Handle::E,
+        }
+    }
+
+    fn moves_x(self) -> bool {
+        matches!(
+            self,
+            Handle::Nw | Handle::Ne | Handle::E | Handle::Se | Handle::Sw | Handle::W
+        )
+    }
+
+    fn moves_y(self) -> bool {
+        matches!(
+            self,
+            Handle::Nw | Handle::N | Handle::Ne | Handle::Se | Handle::S | Handle::Sw
+        )
+    }
+}
+
+/// What a press on the selection frame grabs, if it grabs anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Grab {
+    Handle(Handle),
+    Rotate,
+}
+
+/// A selection gesture in progress: what it grabbed and where the pointer went down. Held by the
+/// daemon rather than the document, because nothing about a gesture exists until it is released.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Gesture {
+    /// A marquee is being swept: it decides the selection when it is released.
+    Marquee {
+        origin: [f32; 2],
+    },
+    Move {
+        origin: [f32; 2],
+    },
+    Resize {
+        handle: Handle,
+        frame: Rect,
+        origin: [f32; 2],
+    },
+    Rotate {
+        pivot: [f32; 2],
+        origin: [f32; 2],
+    },
+}
+
+impl Gesture {
+    /// The gesture a press at `(x, y)` starts: what it grabbed on the frame, or a move of the
+    /// elements already held when it grabbed nothing.
+    pub fn start(grab: Option<Grab>, frame: Rect, x: f32, y: f32) -> Gesture {
+        let origin = [x, y];
+        match grab {
+            Some(Grab::Handle(handle)) => Gesture::Resize {
+                handle,
+                frame,
+                origin,
+            },
+            Some(Grab::Rotate) => Gesture::Rotate {
+                pivot: frame.centre(),
+                origin,
+            },
+            None => Gesture::Move { origin },
+        }
+    }
+
+    /// The transform this gesture implies for a pointer now at `(x, y)`. A resize scales by the
+    /// pointer's own displacement from where it went down, so a press that landed beside a handle
+    /// does not make the frame jump. `None` for a marquee, which transforms nothing.
+    pub fn transform(self, at: [f32; 2]) -> Option<Transform> {
+        Some(match self {
+            Gesture::Marquee { .. } => return None,
+            Gesture::Move { origin } => Transform::Translate {
+                dx: at[0] - origin[0],
+                dy: at[1] - origin[1],
+            },
+            Gesture::Resize {
+                handle,
+                frame,
+                origin,
+            } => {
+                let anchor = handle.opposite().point(frame);
+                let moving = handle.point(frame);
+                let factor = |m: f32, a: f32, o: f32, now: f32| {
+                    let span = m - a;
+                    if span.abs() < f32::EPSILON || (o - a).abs() < f32::EPSILON {
+                        1.0
+                    } else {
+                        ((now - a) / (o - a)).max(MIN_SCALE)
+                    }
+                };
+                Transform::Scale {
+                    anchor,
+                    sx: if handle.moves_x() {
+                        factor(moving[0], anchor[0], origin[0], at[0])
+                    } else {
+                        1.0
+                    },
+                    sy: if handle.moves_y() {
+                        factor(moving[1], anchor[1], origin[1], at[1])
+                    } else {
+                        1.0
+                    },
+                }
+            }
+            Gesture::Rotate { pivot, origin } => Transform::Turn {
+                pivot,
+                radians: angle_of(at, pivot) - angle_of(origin, pivot),
+            },
+        })
+    }
+}
+
+/// What a gesture does to the geometry it holds. Applied live while the gesture runs and once more
+/// when it is written into the document, so the preview and the commit are the same arithmetic on
+/// the same data and cannot disagree.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Transform {
+    Translate { dx: f32, dy: f32 },
+    Scale { anchor: [f32; 2], sx: f32, sy: f32 },
+    Turn { pivot: [f32; 2], radians: f32 },
+}
+
+impl Transform {
+    /// Whether this leaves every point where it is, which is what makes a press that did not move
+    /// write nothing.
+    pub fn is_identity(self) -> bool {
+        match self {
+            Transform::Translate { dx, dy } => dx == 0.0 && dy == 0.0,
+            Transform::Scale { sx, sy, .. } => sx == 1.0 && sy == 1.0,
+            Transform::Turn { radians, .. } => radians == 0.0,
+        }
+    }
+
+    pub fn point(self, p: [f32; 2]) -> [f32; 2] {
+        match self {
+            Transform::Translate { dx, dy } => [p[0] + dx, p[1] + dy],
+            Transform::Scale { anchor, sx, sy } => [
+                anchor[0] + (p[0] - anchor[0]) * sx,
+                anchor[1] + (p[1] - anchor[1]) * sy,
+            ],
+            Transform::Turn { pivot, radians } => {
+                let (sin, cos) = radians.sin_cos();
+                let (dx, dy) = (p[0] - pivot[0], p[1] - pivot[1]);
+                [
+                    pivot[0] + dx * cos - dy * sin,
+                    pivot[1] + dx * sin + dy * cos,
+                ]
+            }
+        }
+    }
+
+    /// The stroke this makes of one the document holds. The live preview draws this copy and the
+    /// commit writes it, so a turned stroke is an ordinary stroke the moment it lands.
+    pub fn stroke(self, s: &Stroke) -> Stroke {
+        Stroke {
+            points: s.points.iter().map(|p| self.point(*p)).collect(),
+            ..s.clone()
+        }
+    }
+
+    /// The text box this makes of one the document holds. Only the origin moves and only the size
+    /// follows the vertical factor: a text box has no angle to turn, so a rotation carries its
+    /// glyphs upright around the pivot.
+    pub fn text(self, t: &TextItem) -> TextItem {
+        let mut out = t.clone();
+        let origin = self.point([t.x, t.y]);
+        out.x = origin[0];
+        out.y = origin[1];
+        if let Transform::Scale { sy, .. } = self {
+            out.size = (t.size * sy).clamp(TEXT_SIZE_MIN, TEXT_SIZE_MAX);
+        }
+        out
+    }
+}
+
+/// What the selection tool holds, and the live gesture acting on it. Transient: never part of the
+/// document, never persisted, and dropped when the tool changes or the surfaces are recreated.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Selection {
+    pub items: Vec<ItemId>,
+    /// The transform the pointer is dragging, if any. `Some` keeps the held elements out of the
+    /// document cache for the duration, so the frame draws them from here instead.
+    pub transform: Option<Transform>,
+}
+
+impl Selection {
+    /// The elements a frame has to draw live: the held ones, while a gesture is dragging them.
+    pub fn live(&self) -> &[ItemId] {
+        match self.transform {
+            Some(_) => &self.items,
+            None => &[],
+        }
+    }
 }
 
 impl TextItem {
@@ -226,6 +510,98 @@ impl TextItem {
     }
 }
 
+/// The box an element occupies, which is what the frame and the marquee measure. A text box
+/// contributes its conservative estimate rather than its ink, so a frame errs outside the drawn
+/// glyphs instead of cutting through them.
+pub fn item_bounds(ann: &OutputAnnotations, id: ItemId) -> Option<Rect> {
+    match id {
+        ItemId::Stroke(i) => ann.strokes.get(i)?.bounds(),
+        ItemId::Text(i) => ann.texts.get(i).map(TextItem::paint_bounds),
+    }
+}
+
+/// The box the frame is drawn on: the union of the held elements' boxes as the live transform
+/// would leave them, so the frame follows a drag. `None` when nothing held is still in the
+/// document.
+pub fn selection_frame(
+    ann: &OutputAnnotations,
+    items: &[ItemId],
+    transform: Option<Transform>,
+) -> Option<Rect> {
+    items
+        .iter()
+        .filter_map(|id| match transform {
+            Some(t) => match id {
+                ItemId::Stroke(i) => ann
+                    .strokes
+                    .get(*i)
+                    .map(|s| t.stroke(s).bounds())
+                    .unwrap_or(None),
+                ItemId::Text(i) => ann.texts.get(*i).map(|x| t.text(x).paint_bounds()),
+            },
+            None => item_bounds(ann, *id),
+        })
+        .reduce(Rect::union)
+}
+
+/// The centre of the rotation handle: out of the middle of the frame's top edge.
+pub fn rotate_handle(frame: Rect) -> [f32; 2] {
+    [frame.x + frame.w / 2.0, frame.y - SELECT_ROTATE_GAP]
+}
+
+/// What a press at `(x, y)` grabs on the frame. A handle wins over the element below it, so a
+/// gesture that starts on one never moves or re-selects anything.
+pub fn grab_at(frame: Rect, x: f32, y: f32) -> Option<Grab> {
+    let limit = SELECT_HANDLE_HIT * SELECT_HANDLE_HIT;
+    let p = [x, y];
+    if dist_squared(p, rotate_handle(frame)) <= limit {
+        return Some(Grab::Rotate);
+    }
+    Handle::ALL
+        .into_iter()
+        .find(|h| dist_squared(p, h.point(frame)) <= limit)
+        .map(Grab::Handle)
+}
+
+/// Everything a selection paints: the frame, its handles and the rotation handle, which is what
+/// the frame that repaints it has to damage.
+pub fn selection_bounds(frame: Rect) -> Rect {
+    let handle = rotate_handle(frame);
+    let dot = Rect {
+        x: handle[0] - SELECT_HANDLE_HIT,
+        y: handle[1] - SELECT_HANDLE_HIT,
+        w: 2.0 * SELECT_HANDLE_HIT,
+        h: 2.0 * SELECT_HANDLE_HIT,
+    };
+    frame.grown(SELECT_HANDLE_HIT).union(dot)
+}
+
+/// The elements a marquee catches: those whose whole box is inside it, so an element that only
+/// crosses the marquee is left alone. Text boxes first, then strokes, each in document order.
+pub fn marquee_select(ann: &OutputAnnotations, marquee: Rect) -> Vec<ItemId> {
+    let inside = |b: Rect| {
+        b.x >= marquee.x
+            && b.y >= marquee.y
+            && b.x + b.w <= marquee.x + marquee.w
+            && b.y + b.h <= marquee.y + marquee.h
+    };
+    let mut ids: Vec<ItemId> = (0..ann.texts.len())
+        .filter(|i| inside(ann.texts[*i].paint_bounds()))
+        .map(ItemId::Text)
+        .collect();
+    ids.extend(
+        (0..ann.strokes.len())
+            .filter(|i| ann.strokes[*i].bounds().is_some_and(inside))
+            .map(ItemId::Stroke),
+    );
+    ids
+}
+
+/// The direction from `pivot` to `p`, as an angle in radians.
+fn angle_of(p: [f32; 2], pivot: [f32; 2]) -> f32 {
+    (p[1] - pivot[1]).atan2(p[0] - pivot[0])
+}
+
 fn dist_squared(p: [f32; 2], q: [f32; 2]) -> f32 {
     let (dx, dy) = (p[0] - q[0], p[1] - q[1]);
     dx * dx + dy * dy
@@ -260,6 +636,10 @@ pub struct Overlay {
     /// Edit-mode toolbar: the active tool, colour and size. Never part of the document, so it
     /// cannot be persisted, erased or exported.
     pub toolbar: Option<Toolbar>,
+    /// What the selection tool holds, if anything.
+    pub selection: Option<Selection>,
+    /// The rectangle a selection drag is sweeping, before it becomes a selection.
+    pub marquee: Option<Rect>,
 }
 
 /// What the edit-mode toolbar shows: the active tool, the active colour, the active size in

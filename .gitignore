@@ -33,7 +33,7 @@ pkg/
 .pi/
 .pi-subagents/
 .codegraph/
-CLAUDE.md
+.codebase-index/
 
 # ── Editors / IDEs ───────────────────────────────────────────
 .vscode/
@@ -61,8 +61,6 @@ tmp/
 temp/
 
 # ── Project-local notes / planning ───────────────────────────
-openspec/
 plan/
 todo/
 tasks/
-HANDOFF.md

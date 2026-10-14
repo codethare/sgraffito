@@ -12,6 +12,8 @@ fn maps_letters_to_tools_both_cases() {
     assert_eq!(tool_for_keysym(Keysym::P), Some(Tool::Pen));
     assert_eq!(tool_for_keysym(Keysym::e), Some(Tool::Eraser));
     assert_eq!(tool_for_keysym(Keysym::t), Some(Tool::Text));
+    assert_eq!(tool_for_keysym(Keysym::s), Some(Tool::Selection));
+    assert_eq!(tool_for_keysym(Keysym::S), Some(Tool::Selection));
     assert_eq!(tool_for_keysym(Keysym::x), None);
 }
 
@@ -150,11 +152,23 @@ fn delete_length_excludes_the_preedit() {
 
 #[test]
 fn each_tool_has_its_own_pointer_shape() {
-    use sgraffito::app::tool_cursor;
+    use sgraffito::app::{handle_cursor, tool_cursor};
+    use sgraffito::canvas::Handle;
     use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape;
-    // The three shapes have to differ, or a tool change would not show on the pointer.
+    // The shapes have to differ, or a tool change would not show on the pointer.
     assert_eq!(tool_cursor(Tool::Pen), Shape::Crosshair);
     assert_eq!(tool_cursor(Tool::Text), Shape::Text);
     assert_ne!(tool_cursor(Tool::Eraser), tool_cursor(Tool::Pen));
     assert_ne!(tool_cursor(Tool::Eraser), tool_cursor(Tool::Text));
+    // The selection tool creates nothing, so it keeps the plain arrow until the pointer is over
+    // something a press would act on.
+    assert_eq!(tool_cursor(Tool::Selection), Shape::Default);
+    assert_eq!(handle_cursor(Handle::Se), Shape::NwseResize);
+    assert_eq!(handle_cursor(Handle::Nw), Shape::NwseResize);
+    assert_eq!(handle_cursor(Handle::Ne), Shape::NeswResize);
+    assert_eq!(handle_cursor(Handle::Sw), Shape::NeswResize);
+    assert_eq!(handle_cursor(Handle::E), Shape::EwResize);
+    assert_eq!(handle_cursor(Handle::W), Shape::EwResize);
+    assert_eq!(handle_cursor(Handle::N), Shape::NsResize);
+    assert_eq!(handle_cursor(Handle::S), Shape::NsResize);
 }
