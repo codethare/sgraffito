@@ -461,3 +461,33 @@ fn a_marquee_gesture_transforms_nothing() {
     let marquee = Gesture::Marquee { origin: [0.0, 0.0] };
     assert!(marquee.transform([50.0, 50.0]).is_none());
 }
+
+#[test]
+fn the_gap_between_the_elements_of_a_selection_is_inside_its_frame() {
+    // What makes a cluster grabbable by its box: a press between two held strokes has to land
+    // inside the frame, on empty space that belongs to neither of them.
+    let a = ann(vec![stroke_at(0.0, 0.0), stroke_at(160.0, 100.0)], vec![]);
+    let held = [ItemId::Stroke(0), ItemId::Stroke(1)];
+    let frame = selection_frame(&a, &held, None).unwrap();
+    let (gap, outside) = ([80.0, 50.0], [-20.0, 50.0]);
+    assert!(
+        !item_bounds(&a, ItemId::Stroke(0))
+            .unwrap()
+            .contains(gap[0], gap[1])
+    );
+    assert!(
+        !item_bounds(&a, ItemId::Stroke(1))
+            .unwrap()
+            .contains(gap[0], gap[1])
+    );
+    assert!(
+        frame.contains(gap[0], gap[1]),
+        "the gap is inside the frame"
+    );
+    assert!(
+        !frame.contains(outside[0], outside[1]),
+        "the frame has an edge"
+    );
+    // With nothing held there is no frame, so a press there can only start a marquee.
+    assert!(selection_frame(&a, &[], None).is_none());
+}

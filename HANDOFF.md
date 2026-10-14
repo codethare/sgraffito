@@ -7,9 +7,10 @@ Chinese in chat, English in the artifacts.
 
 ## State right now (2026-10-14)
 
-- `main` = `de5533af` — **pushed**; `main@origin` is the same commit, so the tree is clean and
-  nothing is in flight. `@` is an empty working-copy commit on top.
-- The revision that landed carries this session's selection work plus two edits that were already in
+- The tree is clean and nothing is in flight: `@` is an empty working-copy commit on top of the
+  selection work. `jj log -r 'main@origin..main'` is what says whether anything is left to push; the
+  human pushes, this file does not track that.
+- `de5533af` carries this session's selection work plus two edits that were already in
   flight when it started and belong to the previous session: `HANDOFF.md` (these notes) and a
   `.gitignore` tidy that drops `CLAUDE.md` and `openspec/` from the repository's list because
   `.git/info/exclude` already ignores both locally.
@@ -123,6 +124,10 @@ Chinese in chat, English in the artifacts.
      behind `FontSystem`) so the choice stays in the pure layer.
    - The marquee takes only what it **wholly** contains, so a connector that merely clips the box is
      left alone, and it does not drop what is already held until it is released.
+   - A press anywhere inside the frame drags the whole selection, the gaps between its strokes
+     included, so a cluster is grabbable by its box and not only by one of its elements; only a press
+     on empty space outside the frame starts a marquee. The user asked for this after using the first
+     version, where only the elements themselves were grabbable.
    - The rail gained the `S` block (`TOOLBAR_COLUMN` is a hand-written sum with a debug assertion:
      thirteen blocks, nine gaps, three group gaps) and its `Esc` label became `cancel, then lock`.
 

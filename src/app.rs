@@ -726,9 +726,15 @@ impl App {
             return;
         }
         let Some(under) = under else {
-            // Empty space: the marquee decides what is selected when it is released, so what is
-            // held now stays held, and visible, for the whole drag.
-            self.gesture = Some(Gesture::Marquee { origin: [x, y] });
+            // With nothing under the pointer inside the frame, the press drags the whole selection:
+            // that is what makes a cluster grabbable by its box, the gaps between its strokes
+            // included, instead of only by one of its elements. Outside the frame it sweeps a
+            // marquee, which decides the selection when it is released, so what is held now stays
+            // held and visible for the whole drag.
+            match frame.filter(|frame| frame.contains(x, y)) {
+                Some(frame) => self.gesture = Some(Gesture::start(None, frame, x, y)),
+                None => self.gesture = Some(Gesture::Marquee { origin: [x, y] }),
+            }
             return;
         };
         // An element the selection already holds keeps the whole selection, so a second press
