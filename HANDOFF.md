@@ -7,14 +7,12 @@ Chinese in chat, English in the artifacts.
 
 ## State right now (2026-10-14)
 
-- `main` = `@` — **unpushed**, two revisions ahead of `main@origin`. The lower one is the previous
-  session's `rkqxvxp`; the upper one is this session's selection work. Hand the user
-  `jj git push --bookmark main`.
-- The working copy also carries two edits that were in flight when this session started and belong
-  to the previous one: `HANDOFF.md` (these notes) and a `.gitignore` tidy that drops `CLAUDE.md` and
-  `openspec/` from the repository's list because `.git/info/exclude` already ignores both locally.
-  They are in the same revision as the selection work; `jj split .gitignore` if that matters before
-  the push.
+- `main` = `de5533af` — **pushed**; `main@origin` is the same commit, so the tree is clean and
+  nothing is in flight. `@` is an empty working-copy commit on top.
+- The revision that landed carries this session's selection work plus two edits that were already in
+  flight when it started and belong to the previous session: `HANDOFF.md` (these notes) and a
+  `.gitignore` tidy that drops `CLAUDE.md` and `openspec/` from the repository's list because
+  `.git/info/exclude` already ignores both locally.
 - What landed in this session, on top of the previous one:
   - the selection tool: a press picks an element or sweeps a marquee, dragging moves the set, the
     eight frame handles resize it and the handle above the top edge rotates it. A gesture is written
