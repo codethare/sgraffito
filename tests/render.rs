@@ -3,7 +3,8 @@ use sgraffito::canvas::{
     Tool, Toolbar, ToolbarAction,
 };
 use sgraffito::render::{
-    DamageRegion, Renderer, buffer_format, toolbar_bounds, transient_bounds, transient_damage,
+    DamageRegion, FrameCache, Renderer, buffer_format, toolbar_bounds, transient_bounds,
+    transient_damage,
 };
 use wayland_client::protocol::wl_shm::Format;
 
@@ -16,6 +17,17 @@ fn buffer(w: u32, h: u32) -> Vec<u8> {
 
 fn alpha(buf: &[u8], w: u32, x: u32, y: u32) -> u8 {
     buf[((y * w + x) * 4 + 3) as usize]
+}
+
+/// The alpha of the scrim an edit-mode frame is painted on: the surface dims what is behind it, so
+/// no pixel of a rail frame is transparent.
+const SCRIM: u8 = 0xe6;
+
+/// Whether a pixel carries content rather than only the scrim the whole frame sits on. Every
+/// assertion that used to ask "is anything painted here" has to ask this instead, or it would be
+/// satisfied by the scrim everywhere and would stop testing anything.
+fn content(buf: &[u8], w: u32, x: u32, y: u32) -> bool {
+    alpha(buf, w, x, y) > SCRIM
 }
 
 fn ink(buf: &[u8]) -> usize {
@@ -366,7 +378,7 @@ fn toolbar_is_a_left_edge_rail_at_the_optical_centre() {
     // The rail hangs on the left edge and fills its box top to bottom: column x 8..44 holds a
     // block on every row of it.
     let band = toolbar_bounds(w as f32, h as f32);
-    let column: Vec<u32> = (0..h).filter(|y| alpha(&buf, w, 20, *y) > 0).collect();
+    let column: Vec<u32> = (0..h).filter(|y| content(&buf, w, 20, *y)).collect();
     assert!(!column.is_empty());
     let (top, bottom) = (*column.first().unwrap(), *column.last().unwrap());
     assert!(
@@ -384,13 +396,21 @@ fn toolbar_is_a_left_edge_rail_at_the_optical_centre() {
         "the rail is centred on {centre}, not on the optical centre {optical}"
     );
     assert!(centre < h as f32 / 2.0, "not above the geometric centre");
-    // Only the rail is painted: the rest of its band, and the top strip, are empty.
-    assert_eq!(ink(&buf[..(w * 16 * 4) as usize]), 0);
-    assert_eq!(alpha(&buf, w, 200, (band.y + band.h / 2.0) as u32), 0);
-    // A block fill is translucent, so the wallpaper still reads through the rail. The top block
-    // is a colour chip, which is opaque; the bottom one is a key.
-    let fill = alpha(&buf, w, 20, (band.y + band.h - 21.0) as u32);
-    assert!(fill > 0 && fill < 255, "fill alpha {fill}");
+    // Only the rail carries content: the rest of its band, and the top strip, are the scrim.
+    let top_strip_ink = (0..16)
+        .flat_map(|y| (0..w).map(move |x| (x, y)))
+        .filter(|(x, y)| content(&buf, w, *x, *y))
+        .count();
+    assert_eq!(top_strip_ink, 0, "something is painted in the top strip");
+    assert!(!content(&buf, w, 200, (band.y + band.h / 2.0) as u32));
+    // The rail is essentially opaque in edit mode: the scrim is under everything and the plate is
+    // under the blocks, so the block fill's own translucency can no longer be read off a frame. What
+    // keeps a label readable over any wallpaper is
+    // `a_label_keeps_aa_contrast_over_any_wallpaper`, which composites the label over that fill.
+    assert!(
+        content(&buf, w, 20, (band.y + band.h - 21.0) as u32),
+        "the bottom block is not painted"
+    );
 }
 
 /// Whether a pixel carries text rather than a block fill: the label is much lighter than the
@@ -586,7 +606,7 @@ fn a_hovered_block_stretches_to_say_what_it_does() {
     let strip = |buf: &[u8]| {
         (0..h)
             .flat_map(|y| (50..200).map(move |x| (x, y)))
-            .filter(|(x, y)| alpha(buf, w, *x, *y) > 0)
+            .filter(|(x, y)| content(buf, w, *x, *y))
             .count()
     };
     assert!(
@@ -598,7 +618,7 @@ fn a_hovered_block_stretches_to_say_what_it_does() {
             .0
             .iter()
             .enumerate()
-            .filter(|(_, pixel)| pixel[3] != 0)
+            .filter(|(_, pixel)| pixel[3] > SCRIM)
             .filter(|(index, _)| {
                 let (x, y) = ((*index as u32) % w, (*index as u32) / w);
                 x as f32 > band.x + band.w || y as f32 > band.y + band.h
@@ -1009,7 +1029,7 @@ fn the_pop_out_edge_uncovers_the_label() {
     let wheel = rail();
     let text = ToolbarAction::Tool(Tool::Text);
     let row = (row_of(&mut renderer, &wheel, fw, fh, text) + 15.0) as u32;
-    let edge = |buf: &[u8]| (0..w).rfind(|x| alpha(buf, w, *x, row) > 0).unwrap_or(0);
+    let edge = |buf: &[u8]| (0..w).rfind(|x| content(buf, w, *x, row)).unwrap_or(0);
     let ox = toolbar_bounds(fw, fh).x + 1.0;
     let label_end = |buf: &[u8]| {
         (0..w)
@@ -1109,7 +1129,9 @@ fn a_label_keeps_aa_contrast_over_any_wallpaper() {
         let i = ((row * w + x) * 4) as usize;
         [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]
     };
-    let edge = (0..w).rfind(|x| alpha(&buf, w, *x, row) > 0).unwrap();
+    // The capsule's own edge, so the fill sampled below is the block the label sits on rather than
+    // the scrim the rest of the frame is painted on.
+    let edge = (0..w).rfind(|x| content(&buf, w, *x, row)).unwrap();
     let fill = pixel(edge - 4);
     let glyph = pixel(
         (0..w)
@@ -1292,7 +1314,7 @@ fn the_rail_is_pinned_to_the_top_margin_when_it_cannot_be_centred() {
         None,
     );
     let column: Vec<u32> = (0..short_h)
-        .filter(|y| alpha(&buf, short_w, 20, *y) > 0)
+        .filter(|y| content(&buf, short_w, 20, *y))
         .collect();
     let top = *column.first().expect("the rail is painted");
     assert!(
@@ -1342,11 +1364,11 @@ fn the_rail_sits_on_a_plate() {
     // Sampled in the middle of the top margin and of the left margin, because the plate's rounded
     // corners are cut away and a corner pixel would prove nothing.
     assert!(
-        alpha(&buf, w, (ox + BLOCK / 2.0) as u32, (top + 1.0) as u32) > 0,
+        content(&buf, w, (ox + BLOCK / 2.0) as u32, (top + 1.0) as u32),
         "no plate in its top margin"
     );
     assert!(
-        alpha(&buf, w, (left + 1.0) as u32, (oy + band.h / 2.0) as u32) > 0,
+        content(&buf, w, (left + 1.0) as u32, (oy + band.h / 2.0) as u32),
         "no plate in its left margin"
     );
 
@@ -1387,15 +1409,123 @@ fn the_rail_sits_on_a_plate() {
     let plate_right = ox + BLOCK + PAD;
     let beyond = (plate_right + 6.0) as u32;
     // In the plate's own margin, nothing is painted past the plate: it did not grow.
-    assert_eq!(
-        alpha(&wide, w, beyond, (top + 1.0) as u32),
-        0,
+    assert!(
+        !content(&wide, w, beyond, (top + 1.0) as u32),
         "the plate grew to the width of the capsule"
     );
     // In the capsule's own row the same column does carry ink, which is the capsule and not the plate.
     // `row_of` answers in absolute coordinates, like the box it sweeps.
     assert!(
-        alpha(&wide, w, beyond, (row + BLOCK / 2.0) as u32) > 0,
+        content(&wide, w, beyond, (row + BLOCK / 2.0) as u32),
         "the capsule did not reach past the plate"
+    );
+}
+
+#[test]
+fn an_edit_mode_frame_is_painted_on_a_scrim() {
+    // The scrim is what dims the windows behind the surface while editing: the whole output carries
+    // it, under the annotations and the rail. Locked mode paints none of it, because that surface
+    // sits under other windows and would dim only the wallpaper behind the annotations.
+    const LOCKED_MESSAGE: &str = "locked mode paints no scrim";
+    let (w, h) = (640u32, 900u32);
+    let mut editor = Renderer::new();
+    let rail = rail();
+    let edit = Overlay {
+        toolbar: Some(rail),
+        ..Default::default()
+    };
+    let locked = Overlay::default();
+    let mut editing = buffer(w, h);
+    editor.render(
+        &mut editing,
+        w,
+        h,
+        1.0,
+        &OutputAnnotations::default(),
+        &edit,
+        None,
+    );
+    let mut idle = buffer(w, h);
+    editor.render(
+        &mut idle,
+        w,
+        h,
+        1.0,
+        &OutputAnnotations::default(),
+        &locked,
+        None,
+    );
+
+    // Every corner of the output, and the far side of it, away from the rail: the scrim and nothing
+    // else.
+    for (x, y) in [
+        (1u32, 1u32),
+        (w - 2, 1),
+        (1, h - 2),
+        (w - 2, h - 2),
+        (w / 2, h / 2),
+        (w - 40, h / 3),
+    ] {
+        assert_eq!(alpha(&editing, w, x, y), SCRIM, "no scrim at {x},{y}");
+        assert_eq!(alpha(&idle, w, x, y), 0, "{LOCKED_MESSAGE} at {x},{y}");
+    }
+    let band = toolbar_bounds(w as f32, h as f32);
+    assert!(content(&editing, w, (band.x + 20.0) as u32, 200u32));
+}
+
+#[test]
+fn a_cached_frame_keeps_the_scrim_after_a_document_change() {
+    // The scrim is the raster's background, so the frame that rebuilds the raster after a document
+    // change has to paint it again: a frame left transparent where the document is empty would show
+    // the windows the scrim exists to dim.
+    let (w, h) = (400u32, 300u32);
+    let mut renderer = Renderer::new();
+    let mut cache = FrameCache::default();
+    let rail = rail();
+    let overlay = Overlay {
+        toolbar: Some(rail),
+        ..Default::default()
+    };
+    let before = OutputAnnotations::default();
+    let mut after = before.clone();
+    after.strokes = vec![Stroke {
+        color: "#e01b24".into(),
+        width: 4.0,
+        points: vec![[20.0, 20.0], [120.0, 60.0]],
+    }];
+    let mut first = buffer(w, h);
+    renderer.render_with_cache(
+        &mut first,
+        w,
+        h,
+        1.0,
+        &before,
+        &overlay,
+        None,
+        &mut cache,
+        &[],
+    );
+    cache.invalidate();
+    let mut second = buffer(w, h);
+    renderer.render_with_cache(
+        &mut second,
+        w,
+        h,
+        1.0,
+        &after,
+        &overlay,
+        None,
+        &mut cache,
+        &[],
+    );
+    // A fresh render of the new document, so the two paths are compared rather than assumed equal.
+    let mut fresh = buffer(w, h);
+    Renderer::new().render(&mut fresh, w, h, 1.0, &after, &overlay, None);
+    assert_eq!(second, fresh);
+    let (x, y) = (w - 20, h - 20);
+    assert_eq!(
+        alpha(&second, w, x, y),
+        SCRIM,
+        "the rebuilt raster lost the scrim"
     );
 }

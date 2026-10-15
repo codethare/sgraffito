@@ -27,17 +27,21 @@ the user writes in Chinese and expects Chinese in chat, English in the artifacts
     it (`circle (O)`, `colour 3 (3)`, `cancel, then lock (Esc)`).
   - `Delete` removes everything the selection holds as one change, and the rail sits on a black
     plate at 90% opacity.
+  - edit mode is painted on a **scrim**: black at 90% opacity over the whole output, under the
+    annotations and the rail, so the windows behind the surface are dimmed. It is the requirement
+    the plate's earlier change had read more narrowly.
   - the plans and the decisions are in `openspec/changes/selection-and-transform/`,
-    `openspec/changes/shape-tools/`, `openspec/changes/toolbar-icons/` and
-    `openspec/changes/delete-key-and-rail-plate/` (all four artifacts complete in each, 30/30, 28/28,
-    14/14 and 12/12 tasks ticked, all four `openspec validate <change> --strict` valid).
+    `openspec/changes/shape-tools/`, `openspec/changes/toolbar-icons/`,
+    `openspec/changes/delete-key-and-rail-plate/` and `openspec/changes/edit-mode-scrim/` (all four
+    artifacts complete in each, 30/30, 28/28, 14/14, 12/12 and 11/11 tasks ticked, all five
+    `openspec validate <change> --strict` valid).
 - `openspec/specs/` holds only `.gitkeep`, so every change dir under `openspec/changes/` stays
   unarchived and `openspec validate <change> --strict` always prints
   `INFO ... only ADDED requirements are allowed for new specs`. That is expected here, not a
   failure; only the `Change '<name>' is valid` line matters.
 - `openspec/` and `CLAUDE.md` are gitignored on purpose; the specs and the contract live
   outside the repository.
-- `cargo test` is 129 tests across the lib plus six files in `tests/`.
+- `cargo test` is 131 tests across the lib plus six files in `tests/`.
 
 ## What the last sessions changed and why, oldest first
 
@@ -236,9 +240,38 @@ the user writes in Chinese and expects Chinese in chat, English in the artifacts
       wallpaper by hand — a raw buffer holds the alpha and would show black otherwise), at rest, with
       a capsule open, and on a 400 px-tall output where the rail is pinned and clipped.
 
+11. **The edit-mode scrim** (`openspec/changes/edit-mode-scrim/`). The user's original wording —
+    "a black 90% transparent 底板" — had been read as a plate behind the rail; they clarified that what
+    they wanted was a whole-output black sheet *under* the content, so that with other windows open the
+    annotations are the thing to read. The plate stays (it still separates the rail from bright content
+    drawn under it), and this change adds the sheet.
+    - `SCRIM_FILL` (`#000000e6`) is painted as the **document raster's background**: `draw_document`
+      fills the whole pixmap before drawing the document into it, and `BaseLayer::rasterise` no longer
+      fills its own pixmap. One fill either way, from the one place that paints a background, and the
+      same pixels whether the frame came from the raster or drew the document straight into the buffer.
+    - That placement is what keeps the frame model intact: a damaged region filled from the raster
+      carries the scrim, a whole-surface frame stays one row-wise copy, and a bounding-box frame stays
+      pixel-identical to a whole-surface one. Painting the scrim per frame instead would have forced
+      every frame to damage the whole surface.
+    - `BaseKey` gained `scrim`, so a mode switch could not leave a stale raster even if surfaces were
+      not already recreated on every mode switch. `Overlay::toolbar` being `Some` exactly in edit mode
+      is the signal, written down where it is read.
+    - Edit mode only, deliberately: a locked surface is a `background` layer *below* ordinary windows,
+      so a scrim there would dim only the wallpaper the annotations are read against.
+    - **The test ripple was the work.** An edit-mode frame now paints every pixel, so five rail tests
+      that swept for "painted" or "empty" pixels broke. They were rewritten around a `content()` helper
+      (alpha greater than the scrim's) rather than loosened: "is anything painted here" would now be
+      satisfied by the scrim everywhere and would test nothing. One of them — the label contrast check —
+      had been sampling the frame *beyond* the capsule, which is the scrim now; it samples the capsule's
+      own fill again.
+    - Checked by eye: the frame composited over a bright checkered wallpaper, in edit mode (the
+      wallpaper is dimmed to near-black, the annotations and the rail read clearly) and in locked mode
+      (no scrim, the wallpaper at full strength).
+
 ## Where things live
 
-- `src/render.rs` — rail constants at the top (including `ICON_STROKE` and `ICON_INSET`),
+- `src/render.rs` — rail constants at the top (including `ICON_STROKE` and `ICON_INSET`), the scrim
+  (`SCRIM_FILL`, and the raster's background),
   `Icon`/`Mark`/`Block`/`key_of`/`labelled`, `toolbar_blocks`, `toolbar_pill`, `draw_toolbar`,
   `draw_icon`, `toolbar_hit`, `toolbar_bounds`, `caret_geometry`, `draw_text`, `text_edit_bounds`,
   `draw_selection`, `draw_marquee`, `draw_stroke`, `draw_shape`, `sk_rect`, `DamageRegion`. The
@@ -343,6 +376,9 @@ no capabilities until a device exists.
   would mirror the selection is clamped instead, because a mirrored text box cannot be drawn.
 - The frame and the marquee are drawn in `TOOLBAR_ACCENT` as hairlines and capsules, with no fill of
   their own, so the interface gained no third shape or colour.
+- While editing, the desktop is nearly hidden: the scrim is 90% opaque black, which is the point
+  (the annotations are what to read) and is one constant if it ever reads as too much. It is also why
+  the smoke test cannot see it — that run has no wallpaper client, so its backdrop is already black.
 - `Delete` removes a whole selection with no undo behind it, and the rail is essentially opaque now
   that it sits on a 90% black plate: the wallpaper no longer reads through the gaps. Both were asked
   for; reverting the plate is one constant and one call in `draw_toolbar`, plus `toolbar_bounds` back

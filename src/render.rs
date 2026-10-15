@@ -67,9 +67,18 @@ const TOOLBAR_BLOCK_FILL: &str = "#1c1c1ce6";
 const TOOLBAR_BLOCK_EDGE: &str = "#ffffff26";
 /// macOS system accent, used for the armed tool's block and the active colour's ring.
 const TOOLBAR_ACCENT: &str = "#0a84ffff";
-/// `#rrggbbaa`. The plate the rail sits on: black at 90% opacity, the same alpha a block fill uses,
-/// behind every block so the gaps between them do not show the wallpaper at full strength and the
-/// rail reads as one control. The rail is therefore essentially opaque, by design.
+/// `#rrggbbaa`. The scrim an edit-mode frame is painted on: black at 90% opacity over the whole
+/// output, under the annotations and the rail, so what is behind the surface — the wallpaper and the
+/// user's other windows — is dimmed and the content on the surface is what can be read. Locked mode
+/// paints none of it: that surface sits below ordinary windows, so a scrim there would dim the
+/// wallpaper the annotations are read against and hide nothing.
+const SCRIM_FILL: &str = "#000000e6";
+/// The scrim's alpha, for the tests that have to tell content from the scrim a frame is painted on.
+pub const SCRIM_ALPHA: u8 = 0xe6;
+/// `#rrggbbaa`. The plate the rail sits on: black at 90% opacity, behind every block so the gaps
+/// between them do not show the wallpaper at full strength and the rail reads as one control over
+/// bright content drawn under it. Over the edit-mode scrim it reads as 99% black against the
+/// scrim's 90%.
 const TOOLBAR_PLATE_FILL: &str = "#000000e6";
 /// The colour of whatever a block draws on itself: an icon, or the size readout's number.
 const TOOLBAR_FOREGROUND: &str = "#ffffffee";
@@ -261,6 +270,10 @@ struct BaseKey {
     /// selection gesture is dragging. The overlay draws each of them instead, so a frame paints an
     /// element exactly once, in the position it is live at.
     skip: Vec<ItemId>,
+    /// Whether the raster's background is the edit-mode scrim. A mode switch recreates every surface
+    /// and so every cache, but the key says it anyway: a raster that had to be trusted to be rebuilt
+    /// would be one change away from being stale.
+    scrim: bool,
 }
 
 struct TextCacheEntry {
@@ -366,7 +379,8 @@ impl BaseLayer {
         let Some(pixmap) = self.pixmap.as_mut() else {
             return false;
         };
-        pixmap.fill(SkColor::TRANSPARENT);
+        // The background is the drawing closure's business: the raster and the frame that draws the
+        // document straight into the buffer both have to paint the same one, scrim included.
         draw(&mut pixmap.as_mut());
         self.key = Some(key);
         true
@@ -458,6 +472,11 @@ impl Renderer {
             None => DamageRegion::All,
             Some(d) => DamageRegion::from_logical(d, scale, width, height),
         };
+        // The scrim an edit-mode frame is painted on, and nothing at all while locked. The overlay's
+        // rail is `Some` exactly in edit mode — `App::current_toolbar` is what decides that — so the
+        // rail's presence is the mode signal the frame already has, and this is the one place it is
+        // read for anything but the rail itself.
+        let scrim = overlay.toolbar.is_some().then(|| parse_hex(SCRIM_FILL));
         // The committed document comes from the raster. Only a frame whose raster cannot be
         // allocated draws it into the buffer itself.
         let key = BaseKey {
@@ -465,6 +484,7 @@ impl Renderer {
             height,
             scale,
             skip: skip.to_vec(),
+            scrim: scrim.is_some(),
         };
         let mut draw_document = false;
         if base.matches(&key) {
@@ -472,7 +492,7 @@ impl Renderer {
         } else {
             let renderer = &mut *self;
             let built = base.rasterise(key, |target| {
-                renderer.draw_document(target, ann, scale, text, skip)
+                renderer.draw_document(target, ann, scale, text, skip, scrim)
             });
             if built {
                 base.fill(buf, region, width, height);
@@ -485,7 +505,7 @@ impl Renderer {
             return;
         };
         if draw_document {
-            self.draw_document(&mut pixmap, ann, scale, text, skip);
+            self.draw_document(&mut pixmap, ann, scale, text, skip, scrim);
         }
         if let Some(s) = &overlay.stroke {
             draw_stroke(&mut pixmap, s, scale);
@@ -552,7 +572,9 @@ impl Renderer {
 
     /// Draw the committed document into `pixmap`: the raster build, and the fallback for a frame
     /// whose raster could not be allocated. The shaped-line cache is filled here, once per
-    /// document change, so a frame that reuses the raster shapes no text at all.
+    /// document change, so a frame that reuses the raster shapes no text at all. `scrim` is the
+    /// background the document is drawn on: the whole pixmap is filled with it first, so this is the
+    /// one place a frame's background comes from.
     fn draw_document(
         &mut self,
         pixmap: &mut PixmapMut,
@@ -560,7 +582,12 @@ impl Renderer {
         scale: f32,
         text: &mut TextLayoutCache,
         skip: &[ItemId],
+        scrim: Option<[u8; 4]>,
     ) {
+        pixmap.fill(match scrim {
+            Some(c) => SkColor::from_rgba8(c[0], c[1], c[2], c[3]),
+            None => SkColor::TRANSPARENT,
+        });
         for (index, s) in ann.strokes.iter().enumerate() {
             if skip.contains(&ItemId::Stroke(index)) {
                 continue;
@@ -1827,6 +1854,7 @@ mod tests {
             height: 100,
             scale: 1.0,
             skip: Vec::new(),
+            scrim: false,
         }));
 
         let mut second = vec![0; 200 * 100 * 4];
