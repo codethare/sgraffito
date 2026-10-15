@@ -524,6 +524,62 @@ pub enum Grab {
     Rotate,
 }
 
+/// What a press with the selection tool resolves to.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Press {
+    /// A handle of the frame: a resize or a rotation.
+    Handle(Grab),
+    /// Drag what is already held.
+    Move,
+    /// Take the element under the pointer, which replaces the selection.
+    Element(ItemId),
+    /// Sweep a marquee: the press is on empty space outside the frame.
+    Marquee { canvas: [f32; 2] },
+}
+
+/// Resolve a press with the selection tool, decided here so that a test can check it: `screen` is where
+/// the pointer is, and the frame is measured in canvas coordinates and mapped to screen **only** to find
+/// the handles, because that is where they are drawn.
+///
+/// The two coordinate spaces are the whole of this function. A gesture and a marquee move the document,
+/// so they are canvas; the handles are interface-sized, so they are screen. Confusing the two makes a
+/// marquee drift away from the pointer the moment the view is panned or zoomed, which is what this
+/// signature exists to prevent.
+pub fn selection_press(
+    ann: &OutputAnnotations,
+    held: &[ItemId],
+    view: View,
+    screen: [f32; 2],
+    tolerance: f32,
+) -> Press {
+    let canvas = view.to_canvas(screen);
+    let frame = selection_frame(ann, held, None);
+    if let Some(frame) = frame
+        && let Some(grab) = grab_at(
+            view.screen_rect(frame),
+            screen[0],
+            screen[1],
+            SELECT_HANDLE_HIT,
+        )
+    {
+        return Press::Handle(grab);
+    }
+    match ann.hit(canvas[0], canvas[1], tolerance) {
+        // An element the selection does not hold replaces it, wherever the press landed.
+        Some(id) if !held.contains(&id) => Press::Element(id),
+        // An element it does hold keeps the whole selection, so a second press inside a cluster drags
+        // the cluster rather than dropping to one element.
+        Some(_) => Press::Move,
+        // Nothing under the pointer: inside the frame that drags the whole selection, which is what
+        // makes a cluster grabbable by its box rather than only by one of its elements. Outside it,
+        // the marquee decides the selection on release.
+        None => match frame.filter(|f| view.screen_rect(*f).contains(screen[0], screen[1])) {
+            Some(_) => Press::Move,
+            None => Press::Marquee { canvas },
+        },
+    }
+}
+
 /// A selection gesture in progress: what it grabbed and where the pointer went down. Held by the
 /// daemon rather than the document, because nothing about a gesture exists until it is released.
 #[derive(Debug, Clone, Copy, PartialEq)]

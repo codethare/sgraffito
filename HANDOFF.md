@@ -45,7 +45,7 @@ the user writes in Chinese and expects Chinese in chat, English in the artifacts
   failure; only the `Change '<name>' is valid` line matters.
 - `openspec/` and `CLAUDE.md` are gitignored on purpose; the specs and the contract live
   outside the repository.
-- `cargo test` is 142 tests across the lib plus six files in `tests/`.
+- `cargo test` is 144 tests across the lib plus six files in `tests/`.
 
 ## What the last sessions changed and why, oldest first
 
@@ -305,8 +305,23 @@ the user writes in Chinese and expects Chinese in chat, English in the artifacts
       the button's release or on the pointer leaving the surface — the left-release case was a real
       bug caught while finishing (the hand tool would have gone on panning with no button down), which
       is the kind of thing the missing input test would have caught.
+    - **The first thing the user found after this landed was a coordinate-space bug**, and it is worth
+      reading as a warning about the missing input test: `select_press` passed the **screen** press point
+      and the **screen** frame into `Gesture::start`, and `drag_selection` built the marquee and the
+      transform from screen coordinates, while everything downstream — `marquee_select`, `Transform`
+      applied to element geometry, the damage boxes — reads canvas coordinates. The symptom was exactly
+      what a mixed space produces: after a pan the selection tool's marquee drifted away from the cursor
+      and only worked in the region where screen and canvas happen to coincide.
+      The fix is structural rather than local: `canvas::selection_press` is now a pure function holding
+      both spaces — the handle hit test in screen (that is where the handles are drawn), the element hit
+      test and every gesture and marquee point in canvas — and `App::select_press` only carries its
+      answer out. `tests/canvas_hit.rs` pins it: a handle is grabbed at its drawn position and *not* at
+      its canvas position, an element is found at its screen position, and a marquee is stored as a
+      canvas point. `drag_selection` converts the pointer once, for the same reason.
     - What is **not** verified: no touchpad or wheel exists in this environment, so none of these
-      gestures has been used for real. The pure parts are tested (the view's maths, the axis mapping,
+      gestures has been used for real, and the wiring above the pure functions — including the
+      coordinate conversions this bug lived in — is exactly what a session with a pointer has to
+      confirm. The pure parts are tested (the view's maths, the axis mapping,
       the notch arithmetic, a panned and zoomed frame landing where the transform says, the rail not
       moving with the view), and the wiring to the compositor is not.
 

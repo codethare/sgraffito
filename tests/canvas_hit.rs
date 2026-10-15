@@ -208,8 +208,9 @@ fn stroke_bounds_cover_the_width_and_handle_the_empty_and_single_case() {
 // --- selection: the frame, the marquee and the three gestures -------------------------------
 
 use sgraffito::canvas::{
-    Gesture, Grab, Handle, SELECT_HANDLE_HIT, SELECT_ROTATE_GAP, Selection, Transform, grab_at,
-    item_bounds, marquee_select, rotate_handle, selection_bounds, selection_frame,
+    Gesture, Grab, Handle, Press, SELECT_HANDLE_HIT, SELECT_ROTATE_GAP, Selection, Transform,
+    grab_at, item_bounds, marquee_select, rotate_handle, selection_bounds, selection_frame,
+    selection_press,
 };
 
 fn stroke_at(x: f32, y: f32) -> Stroke {
@@ -934,4 +935,89 @@ fn a_canvas_box_maps_to_the_screen_box_it_covers() {
     assert_eq!(screen.y, 32.0);
     assert_eq!(screen.w, 60.0);
     assert_eq!(screen.h, 80.0);
+}
+
+#[test]
+fn a_press_resolves_in_the_coordinate_space_it_belongs_to() {
+    // The bug this pins: the marquee and the drag belong to the canvas, while the handles belong to
+    // the screen. A press resolved in the wrong space makes the marquee drift away from the pointer the
+    // moment the view is panned or zoomed, and leaves it working only near where screen and canvas
+    // coincide.
+    let held = [ItemId::Stroke(0)];
+    let a = ann(
+        vec![stroke_at(100.0, 100.0), stroke_at(400.0, 300.0)],
+        vec![],
+    );
+    let frame = selection_frame(&a, &held, None).unwrap();
+    let view = View {
+        zoom: 2.0,
+        offset: [60.0, -30.0],
+    };
+    let screen = |p: [f32; 2]| view.to_screen(p);
+
+    // A handle is grabbed where it is drawn: on screen, not at its canvas position.
+    let corner = screen(Handle::Nw.point(frame));
+    assert_eq!(
+        selection_press(&a, &held, view, corner, ERASER_THRESHOLD),
+        Press::Handle(Grab::Handle(Handle::Nw))
+    );
+    // …and not where the canvas says it is, which is a different place on screen.
+    let canvas_corner = Handle::Nw.point(frame);
+    assert_ne!(
+        selection_press(&a, &held, view, canvas_corner, ERASER_THRESHOLD),
+        Press::Handle(Grab::Handle(Handle::Nw)),
+        "a handle was grabbed at its canvas position instead of where it is drawn"
+    );
+
+    // A press on an element the selection does not hold takes that element, asked in canvas space: the
+    // stroke's own point is at a different screen position, and asking there must find it.
+    let on_other = screen(stroke_at(400.0, 300.0).points[0]);
+    assert_eq!(
+        selection_press(&a, &held, view, on_other, ERASER_THRESHOLD),
+        Press::Element(ItemId::Stroke(1))
+    );
+
+    // Empty space outside the frame sweeps a marquee, and the marquee is a **canvas** point: that is
+    // what the elements it will catch and the frame it is drawn in are measured in.
+    let far = [1200.0, 900.0];
+    match selection_press(&a, &held, view, far, ERASER_THRESHOLD) {
+        Press::Marquee { canvas } => {
+            assert_eq!(canvas, view.to_canvas(far));
+            assert_ne!(canvas, far, "the marquee is stored in screen coordinates");
+            // And a marquee built from two such canvas points catches what is in that part of the
+            // drawing, not what is in the same part of the screen.
+            let marquee = Rect::from_corners(canvas, [380.0, 280.0]);
+            assert_eq!(marquee_select(&a, marquee), vec![ItemId::Stroke(1)]);
+        }
+        other => panic!("expected a marquee, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_marquee_catches_at_any_view_what_it_catches_at_one_to_one() {
+    // The containment rule is zoom-invariant: the same canvas rectangle catches the same elements
+    // whatever the view, as long as the rectangle is built from canvas points.
+    let a = ann(
+        vec![stroke_at(20.0, 20.0), stroke_at(300.0, 300.0)],
+        vec![text(40.0, 60.0, "note")],
+    );
+    let view = View {
+        zoom: 3.0,
+        offset: [-120.0, 40.0],
+    };
+    // A canvas box the user sweeps, and the screen corners that are the same box at this view: what a
+    // drag does is convert those corners back, so this is the round trip a release depends on.
+    let (x0, y0, x1, y1) = (0.0, 0.0, 300.0, 300.0);
+    let (from, to) = (view.to_screen([x0, y0]), view.to_screen([x1, y1]));
+    let swept = Rect::from_corners(view.to_canvas(from), view.to_canvas(to));
+    assert!((swept.x - x0).abs() < 0.01 && (swept.w - (x1 - x0)).abs() < 0.01);
+    assert_eq!(
+        marquee_select(&a, swept),
+        vec![ItemId::Text(0), ItemId::Stroke(0)],
+        "the near stroke and the text are inside the swept canvas box, the far stroke is not"
+    );
+    // The rule does not depend on the view at all: the same canvas box catches the same elements,
+    // because nothing about it was measured on screen.
+    let one_to_one = marquee_select(&a, swept);
+    assert_eq!(marquee_select(&a, swept), one_to_one);
 }

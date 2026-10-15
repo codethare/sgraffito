@@ -42,10 +42,9 @@ use wayland_client::{
 };
 
 use crate::canvas::{
-    Doc, ERASER_THRESHOLD, Gesture, Grab, Handle, ItemId, OutputAnnotations, Overlay, Rect,
-    SELECT_HANDLE_HIT, Selection, Shape, ShapeKind, TEXT_SIZE_MAX, TEXT_SIZE_MIN, TextBuffer,
-    TextItem, TextOverlay, Toolbar, Transform, View, grab_at, marquee_select, selection_bounds,
-    selection_frame,
+    Doc, ERASER_THRESHOLD, Gesture, Grab, Handle, ItemId, OutputAnnotations, Overlay, Press, Rect,
+    Selection, Shape, ShapeKind, TEXT_SIZE_MAX, TEXT_SIZE_MIN, TextBuffer, TextItem, TextOverlay,
+    Toolbar, Transform, View, marquee_select, selection_bounds, selection_frame, selection_press,
 };
 
 pub use crate::canvas::{PALETTE, Tool, ToolbarAction};
@@ -802,59 +801,58 @@ impl App {
     /// the pointer, or starts a marquee. A handle wins over the element below it, so a resize that
     /// starts on a corner never moves the selection instead.
     pub(crate) fn select_press(&mut self, key: u32, x: f32, y: f32) {
-        let held: Vec<ItemId>;
-        let frame: Option<Rect>;
-        let under: Option<ItemId>;
-        {
+        // The decision is `canvas::selection_press`, where the two coordinate spaces — the screen the
+        // handles live in and the canvas a gesture moves the document in — are one function a test can
+        // reach. This only carries it out.
+        let (press, frame, at) = {
             let Some(out) = self.outputs.get(&key) else {
                 return;
             };
+            let view = out.view;
             let bucket = out.bucket(key).into_owned();
             let empty = OutputAnnotations::default();
             let ann = self.doc.outputs.get(&bucket).unwrap_or(&empty);
-            held = out
+            let held = out
                 .overlay
                 .selection
                 .as_ref()
                 .map(|s| s.items.clone())
                 .unwrap_or_default();
-            // The frame is drawn and grabbed in screen space, because the handles are interface
-            // lengths; the document's own hit test is asked in canvas coordinates.
-            frame = selection_frame(ann, &held, None).map(|f| out.view.screen_rect(f));
-            under = ann.hit(
-                out.view.to_canvas([x, y])[0],
-                out.view.to_canvas([x, y])[1],
-                out.view.canvas_len(ERASER_THRESHOLD),
-            );
-        }
-        if let Some(frame) = frame
-            && let Some(grab) = grab_at(frame, x, y, SELECT_HANDLE_HIT)
-        {
-            self.gesture = Some(Gesture::start(Some(grab), frame, x, y));
-            self.sync_cursor();
-            return;
-        }
-        let Some(under) = under else {
-            // With nothing under the pointer inside the frame, the press drags the whole selection:
-            // that is what makes a cluster grabbable by its box, the gaps between its strokes
-            // included, instead of only by one of its elements. Outside the frame it sweeps a
-            // marquee, which decides the selection when it is released, so what is held now stays
-            // held and visible for the whole drag.
-            match frame.filter(|frame| frame.contains(x, y)) {
-                Some(frame) => self.gesture = Some(Gesture::start(None, frame, x, y)),
-                None => self.gesture = Some(Gesture::Marquee { origin: [x, y] }),
+            let press =
+                selection_press(ann, &held, view, [x, y], view.canvas_len(ERASER_THRESHOLD));
+            let frame = selection_frame(ann, &held, None);
+            (press, frame, view.to_canvas([x, y]))
+        };
+        match press {
+            // A gesture works in the document's own coordinates, because that is what the transform it
+            // produces is applied to.
+            Press::Handle(grab) => {
+                self.gesture = Some(Gesture::start(
+                    Some(grab),
+                    frame.unwrap_or_default(),
+                    at[0],
+                    at[1],
+                ));
+                self.sync_cursor();
             }
-            return;
-        };
-        // An element the selection already holds keeps the whole selection, so a second press
-        // inside a cluster drags the cluster rather than dropping to one element.
-        let items = if held.contains(&under) {
-            held
-        } else {
-            vec![under]
-        };
-        self.set_selection(key, items, None);
-        self.gesture = Some(Gesture::start(None, Rect::default(), x, y));
+            Press::Move => {
+                self.gesture = Some(Gesture::start(
+                    None,
+                    frame.unwrap_or_default(),
+                    at[0],
+                    at[1],
+                ));
+            }
+            Press::Element(id) => {
+                self.set_selection(key, vec![id], None);
+                self.gesture = Some(Gesture::start(None, Rect::default(), at[0], at[1]));
+            }
+            Press::Marquee { canvas } => {
+                // The marquee is a canvas rectangle: the frame it is drawn in and the elements it
+                // catches are both canvas, and only the pointer has to be converted once, here.
+                self.gesture = Some(Gesture::Marquee { origin: canvas });
+            }
+        }
     }
 
     /// Drag the live gesture to the pointer: a marquee sweeps its rectangle, the other three move
@@ -867,8 +865,12 @@ impl App {
         let Some(out) = self.outputs.get_mut(&key) else {
             return;
         };
+        // The pointer reports screen coordinates and a gesture moves the document, so the pointer is
+        // converted once here: without it the marquee and the drag drift away from the cursor as soon
+        // as the view is panned or zoomed.
+        let at = out.view.to_canvas([x, y]);
         if let Gesture::Marquee { origin } = gesture {
-            let marquee = Rect::from_corners(origin, [x, y]);
+            let marquee = Rect::from_corners(origin, at);
             if out.overlay.marquee != Some(marquee) {
                 out.overlay.marquee = Some(marquee);
                 out.transient_dirty = true;
@@ -876,7 +878,7 @@ impl App {
             }
             return;
         }
-        let Some(transform) = gesture.transform([x, y]) else {
+        let Some(transform) = gesture.transform(at) else {
             return;
         };
         let next = (!transform.is_identity()).then_some(transform);
@@ -1564,7 +1566,7 @@ impl App {
         // damage region, the union — is screen-space like the raster it damages.
         let view = out.view;
         // The handles are interface lengths: on screen they are the constants themselves.
-        let handle_hit = SELECT_HANDLE_HIT;
+        let handle_hit = crate::canvas::SELECT_HANDLE_HIT;
         let transient = transient_bounds(&out.overlay).map(|b| view.screen_rect(b));
         let bucket = out.bucket(id);
         let empty = OutputAnnotations::default();
