@@ -70,6 +70,22 @@ impl Tool {
     pub fn uses_pen_width(self) -> bool {
         !matches!(self, Tool::Text)
     }
+
+    /// The key that arms this tool, as the rail states it and as [`crate::input::tool_for_keysym`]
+    /// maps it. One letter per tool, so a block's text cannot name a key that does nothing.
+    pub fn key(self) -> &'static str {
+        match self {
+            Tool::Pen => "P",
+            Tool::Eraser => "E",
+            Tool::Text => "T",
+            Tool::Selection => "S",
+            Tool::Circle => "O",
+            Tool::Rect => "R",
+            Tool::Diamond => "D",
+            Tool::Line => "L",
+            Tool::Arrow => "A",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

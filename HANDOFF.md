@@ -8,25 +8,32 @@ Chinese in chat, English in the artifacts.
 ## State right now (2026-10-14)
 
 - The tree is clean and nothing is in flight: `@` is an empty working-copy commit on top of the
-  selection work. `jj log -r 'main@origin..main'` is what says whether anything is left to push; the
+  icons work. `jj log -r 'main@origin..main'` is what says whether anything is left to push; the
   human pushes, this file does not track that.
-- `de5533af` carries this session's selection work plus two edits that were already in
-  flight when it started and belong to the previous session: `HANDOFF.md` (these notes) and a
-  `.gitignore` tidy that drops `CLAUDE.md` and `openspec/` from the repository's list because
-  `.git/info/exclude` already ignores both locally.
+- `de5533af` carries the selection work plus two edits that were already in flight when that session
+  started and belong to the one before it: `HANDOFF.md` (these notes) and a `.gitignore` tidy that
+  drops `CLAUDE.md` and `openspec/` from the repository's list because `.git/info/exclude` already
+  ignores both locally.
 - What landed in this session, on top of the previous one:
   - the selection tool: a press picks an element or sweeps a marquee, dragging moves the set, the
     eight frame handles resize it and the handle above the top edge rotates it. A gesture is written
     into the geometry on release; the document is untouched while it is live.
-  - the plan and the decisions are in `openspec/changes/selection-and-transform/` (all four artifacts
-    complete, 30/30 tasks ticked, `openspec validate selection-and-transform --strict` valid).
+  - five shape tools: circle, rectangle, diamond, line and arrow, dragged out and stored as two
+    points and a kind. The annotation file is version 2 for them, and version 1 files still load.
+  - every rail block shows an icon of what it does, drawn as geometry by the same code the shapes are
+    drawn by, and the key of a block is stated at the end of the text it says when the pointer is on
+    it (`circle (O)`, `colour 3 (3)`, `cancel, then lock (Esc)`).
+  - the plans and the decisions are in `openspec/changes/selection-and-transform/`,
+    `openspec/changes/shape-tools/` and `openspec/changes/toolbar-icons/` (all four artifacts
+    complete in each, 30/30, 28/28 and 14/14 tasks ticked, all three
+    `openspec validate <change> --strict` valid).
 - `openspec/specs/` holds only `.gitkeep`, so every change dir under `openspec/changes/` stays
   unarchived and `openspec validate <change> --strict` always prints
   `INFO ... only ADDED requirements are allowed for new specs`. That is expected here, not a
   failure; only the `Change '<name>' is valid` line matters.
 - `openspec/` and `CLAUDE.md` are gitignored on purpose; the specs and the contract live
   outside the repository.
-- `cargo test` is 96 tests across the lib plus six files in `tests/`.
+- `cargo test` is 125 tests across the lib plus six files in `tests/`.
 
 ## What the last sessions changed and why, oldest first
 
@@ -160,10 +167,43 @@ Chinese in chat, English in the artifacts.
      800x600 output, which is now shorter than the rail, and its top-strip check was updated to say
      that the rail reaches the margin and that nothing to the right of it does.
 
+9. **Icons on the rail** (`openspec/changes/toolbar-icons/`). Eighteen blocks of key letters had become
+   an arbitrary letter per shape: `O`, `D`, `L`, `A` say nothing about what they draw, so a new user
+   had to learn five letters and a returning one had to hover to remember which was the diamond.
+   - Every block that is a function now shows an **icon**, drawn as geometry by tiny-skia and never as
+     a glyph: a symbol font is a coverage gamble that ends in a tofu box on a machine whose fonts
+     differ from this one, and this program already draws its own geometry. The pen's icon is a
+     stroke (drawn by `draw_stroke`), the eraser's a rounded square outline, the text tool's a `T`,
+     the selection tool's a marquee with its corner grips, the size keys a `−` and a `+`, `Esc` a
+     padlock.
+   - The five shape tools' icons **are the shapes they draw**: the same two points, the same
+     `draw_shape`, so an icon cannot drift from its tool.
+   - `Block::glyph` + `Block::swatch` became one `Mark` (an icon, a colour, or a value): a face is
+     exactly one of three things, and "what if both are set?" is no longer a question a caller has to
+     answer. `TOOLBAR_KEY_TEXT` became `TOOLBAR_FOREGROUND`, which is what it now holds.
+   - **The key moved into the stretched text.** `labelled(action, what)` builds every label, so a block
+     cannot acquire an action whose text does not name its key, and `Tool::key()` is the one place a
+     tool's letter lives. A test walks the rail asserting each label ends with its key *and* that the
+     key really applies that action, through `tool_for_keysym` / `color_for_keysym` /
+     `size_step_for_keysym` — the label cannot name a key the daemon does not handle.
+   - The trade, agreed before it was built: with no key letter on the block face, a block whose text
+     does not fit the reserve shows an icon and no key at all. Less bad than before, because the icon
+     *is* the meaning; it is in the README's known limitations.
+   - `ICON_STROKE` (1.5 pt, the preedit underline's weight) and `ICON_INSET` (7 pt) are named
+     constants, because a hairline icon does not read as a picture at scale 1. A test renders the
+     whole rail at scale 1 and at scale 2 and asserts every icon's square carries foreground ink.
+   - The icons were also checked by eye, not only by that ink test: a scratch render of the rail at
+     scale 2 — at rest, and with a tool, a colour and the lock block stretched in turn — confirmed the
+     shapes read as what they are, that a colour chip keeps its ring inside the capsule, and that the
+     longest label (`text: click to place (T)`, about 177 pt) fits the 224 pt reserve. The scratch
+     test was deleted; re-deriving it means building an `Overlay { toolbar: Some(Toolbar { .. }) }` and
+     writing a PPM, as the preview section below describes.
+
 ## Where things live
 
-- `src/render.rs` — rail constants at the top, `toolbar_blocks`, `toolbar_pill`, `draw_toolbar`,
-  `toolbar_hit`, `toolbar_bounds`, `caret_geometry`, `draw_text`, `text_edit_bounds`,
+- `src/render.rs` — rail constants at the top (including `ICON_STROKE` and `ICON_INSET`),
+  `Icon`/`Mark`/`Block`/`key_of`/`labelled`, `toolbar_blocks`, `toolbar_pill`, `draw_toolbar`,
+  `draw_icon`, `toolbar_hit`, `toolbar_bounds`, `caret_geometry`, `draw_text`, `text_edit_bounds`,
   `draw_selection`, `draw_marquee`, `draw_stroke`, `draw_shape`, `sk_rect`, `DamageRegion`. The
   frame path: `render_with_cache(buf, …, damage, &mut FrameCache, skip: &[ItemId])` fills the damaged
   region from `FrameCache::base` (a `Pixmap` holding the committed document), draws the elements
@@ -219,7 +259,9 @@ Chinese in chat, English in the artifacts.
   set/press/release` succeeds but nothing happens (verified). The pointer shape, the hover, the
   caret, click-to-re-edit, paste and every part of the selection tool — the press that picks an
   element, the marquee, dragging, the handles, the rotation handle — are therefore covered by unit
-  and geometry tests only, and the README's **Unverified** bullet says exactly that.
+  and geometry tests only, and the README's **Unverified** bullet says exactly that. The rail's
+  *shape* is covered by the smoke screenshot and its *icons* by an ink test at two scales plus a
+  by-eye render at scale 2, but which icon a block shows after a *click* on it is not covered.
 - Closing that gap is feasible: this sway advertises `zwlr_virtual_pointer_manager_v1` **and**
   `zwp_virtual_keyboard_manager_v1` (checked with
   `WAYLAND_DEBUG=1 target/debug/sgraffito daemon 2>&1 | grep global` against headless sway), so a
@@ -267,6 +309,11 @@ no capabilities until a device exists.
   is no way to change a shape's kind, drag one of its corners or fill it once it has landed: erasing
   it and drawing it again is the way. An arrow is one segment with one head, drawn at the end the
   pointer stopped on; no double head, no bend, no snapping to the element it points at.
+- A rail icon is 16 pt of drawing in a 30 pt block at `ICON_STROKE`. The eraser's rounded square and
+  the rectangle tool's icon are the closest pair in the set: the rectangle's corners are sharp and
+  the eraser's are round, and the hover text is what settles it. No block carries its key on its
+  face, so a block whose text does not fit the reserve teaches no key at all — the icon is the
+  meaning, and the README's key table is the fallback.
 - A shape's hit test measures a 96-gon for an ellipse while the frame draws the real curve (`push_oval`),
   because tiny-skia has no distance query. The flatness is under a pixel at 4K against the 8-pixel
   eraser tolerance; the `ponytail:` marker on `Shape::outline` is where that ceiling is written down.
@@ -328,5 +375,8 @@ no capabilities until a device exists.
    file and a decision about what a click inside a filled shape does, since the interior is
    deliberately not a hit today. Editing a shape after it lands (its kind, one corner) is the other
    half of that, and a `kind` field already in the file makes it additive.
-9. Archiving the delivered OpenSpec changes, which stays impossible until the capability specs
-   exist under `openspec/specs/`.
+9. Colour the icons? They are drawn in `TOOLBAR_FOREGROUND` and take the accent block's fill behind
+   them, which is what a macOS toolbar does; a per-tool tint would be a second meaning for colour in
+   an interface whose colour already means the active pen.
+10. Archiving the delivered OpenSpec changes, which stays impossible until the capability specs
+    exist under `openspec/specs/`.

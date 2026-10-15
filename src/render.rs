@@ -36,13 +36,19 @@ const TOOLBAR_GROUP_GAP: f32 = 10.0;
 const TOOLBAR_PAD: f32 = 6.0;
 const TOOLBAR_RADIUS: f32 = 8.0;
 const TOOLBAR_HAIRLINE: f32 = 1.0;
-/// One size for the glyph and for the label beside it: the HIG's 13 pt macOS control size, so
-/// the two share a size and a baseline instead of being matched by eye.
+/// One size for every piece of text a block carries — its label, and the size readout's number:
+/// the HIG's 13 pt macOS control size, so they share a size and a baseline instead of being matched
+/// by eye. An icon is geometry rather than text and is not sized by this.
 const TOOLBAR_TEXT_SIZE: f32 = 13.0;
 /// How far the block and the meaning of a stretched block are kept apart.
 const TOOLBAR_LABEL_GAP: f32 = 6.0;
 /// Padding after a label, so text never touches the capsule's edge.
 const TOOLBAR_LABEL_PAD: f32 = 12.0;
+/// Stroke width of an icon and the inset between it and the edge of its block, in logical pixels.
+/// An icon is a picture, so it is drawn heavier than the interface's hairline: one device pixel of
+/// a 30 pt square does not read as a picture at scale 1.
+const ICON_STROKE: f32 = 1.5;
+const ICON_INSET: f32 = 7.0;
 /// Widest stretched block the damage accounting reserves room for, and the ceiling a label has
 /// to fit: the width of a block depends on the font, so the damage reserves this strip instead
 /// of the drawn rail. The strip is damaged whenever the rail changes, and joins a transient
@@ -61,31 +67,79 @@ const TOOLBAR_BLOCK_FILL: &str = "#1c1c1ce6";
 const TOOLBAR_BLOCK_EDGE: &str = "#ffffff26";
 /// macOS system accent, used for the armed tool's block and the active colour's ring.
 const TOOLBAR_ACCENT: &str = "#0a84ffff";
-const TOOLBAR_KEY_TEXT: &str = "#ffffffee";
+/// The colour of whatever a block draws on itself: an icon, or the size readout's number.
+const TOOLBAR_FOREGROUND: &str = "#ffffffee";
 const TOOLBAR_LABEL_TEXT: &str = "#ebebf59e";
 const TOOLBAR_SWATCH_EDGE: &str = "#ffffff4d";
 const UNDERLINE_HEIGHT: f32 = 1.5;
 const CURSOR_WIDTH: f32 = 2.0;
 const LINE_HEIGHT_SCALE: f32 = 1.2;
 
+/// What a block shows on its face. Exactly one of these is set: an icon of what the control does, a
+/// colour, or a value. A colour chip and the size readout are not functions, so they carry no icon.
+#[derive(Clone)]
+enum Mark {
+    Icon(Icon),
+    /// Palette index of a colour chip.
+    Swatch(usize),
+    /// A value as a bare number.
+    Value(String),
+}
+
+/// The rail's icon set. Every one is drawn as geometry, never as a glyph: a symbol font is a
+/// coverage gamble that fails as a tofu box on a machine whose fonts differ from this one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Icon {
+    Pen,
+    Eraser,
+    Text,
+    Selection,
+    Circle,
+    Rect,
+    Diamond,
+    Line,
+    Arrow,
+    Smaller,
+    Larger,
+    Lock,
+}
+
 /// One block of the rail: what it shows when the pointer is elsewhere, what it says when the
 /// pointer is on it, and what clicking it does.
 #[derive(Clone)]
 struct Block {
-    /// What the square shows while it is not stretched: a key, or the size as a number. A colour
-    /// swatch has no glyph; its block is the colour.
-    glyph: String,
-    /// What the stretched block says: what the control does.
+    mark: Mark,
+    /// What the stretched block says: what the control does, and the key that does the same thing.
+    /// Built by [`labelled`], so an action cannot be added without its text naming its key.
     label: String,
     /// `None` for the size readout between `[` and `]`: drawn, but the neighbouring block owns
     /// the presses on its row.
     action: Option<ToolbarAction>,
     /// The armed tool's block, or the active colour's swatch: drawn with the accent.
     active: bool,
-    /// Palette index when the block is a colour swatch.
-    swatch: Option<usize>,
     /// Gap under the block, in column coordinates.
     gap: f32,
+}
+
+/// The key a control applies, as it is written in a stretched block's text.
+fn key_of(action: ToolbarAction) -> &'static str {
+    match action {
+        ToolbarAction::Tool(tool) => tool.key(),
+        ToolbarAction::Color(index) => ["1", "2", "3", "4", "5"].get(index).copied().unwrap_or("?"),
+        ToolbarAction::SizeStep(dir) => {
+            if dir < 0.0 {
+                "["
+            } else {
+                "]"
+            }
+        }
+        ToolbarAction::Lock => "Esc",
+    }
+}
+
+/// What a block says when the pointer is on it, ending with the key that applies the same thing.
+fn labelled(action: ToolbarAction, what: &str) -> String {
+    format!("{what} ({})", key_of(action))
 }
 
 /// The blocks of the rail, top to bottom: the palette, the tools, the size control and `Esc`.
@@ -99,68 +153,65 @@ fn toolbar_blocks(toolbar: &Toolbar) -> Vec<Block> {
         .iter()
         .enumerate()
         .map(|(index, color)| Block {
-            glyph: String::new(),
-            label: format!("colour {}", index + 1),
+            mark: Mark::Swatch(index),
+            label: labelled(
+                ToolbarAction::Color(index),
+                &format!("colour {}", index + 1),
+            ),
             action: Some(ToolbarAction::Color(index)),
             active: *color == toolbar.color,
-            swatch: Some(index),
             gap: TOOLBAR_GAP,
         })
         .collect();
     blocks[PALETTE.len() - 1].gap = TOOLBAR_GROUP_GAP;
-    for (tool, glyph, label) in [
-        (Tool::Pen, "P", "pen"),
-        (Tool::Eraser, "E", "eraser"),
-        (Tool::Text, "T", "text: click to place"),
-        (Tool::Selection, "S", "select: drag to move"),
-        (Tool::Circle, "O", "circle"),
-        (Tool::Rect, "R", "rectangle"),
-        (Tool::Diamond, "D", "diamond"),
-        (Tool::Line, "L", "line"),
-        (Tool::Arrow, "A", "arrow"),
+    for (tool, icon, label) in [
+        (Tool::Pen, Icon::Pen, "pen"),
+        (Tool::Eraser, Icon::Eraser, "eraser"),
+        (Tool::Text, Icon::Text, "text: click to place"),
+        (Tool::Selection, Icon::Selection, "select: drag to move"),
+        (Tool::Circle, Icon::Circle, "circle"),
+        (Tool::Rect, Icon::Rect, "rectangle"),
+        (Tool::Diamond, Icon::Diamond, "diamond"),
+        (Tool::Line, Icon::Line, "line"),
+        (Tool::Arrow, Icon::Arrow, "arrow"),
     ] {
         blocks.push(Block {
-            glyph: glyph.into(),
-            label: label.into(),
+            mark: Mark::Icon(icon),
+            label: labelled(ToolbarAction::Tool(tool), label),
             action: Some(ToolbarAction::Tool(tool)),
             active: toolbar.tool == tool,
-            swatch: None,
             gap: TOOLBAR_GAP,
         });
     }
     let last = blocks.len() - 1;
     blocks[last].gap = TOOLBAR_GROUP_GAP;
     blocks.push(Block {
-        glyph: "[".into(),
-        label: format!("smaller {axis}"),
+        mark: Mark::Icon(Icon::Smaller),
+        label: labelled(ToolbarAction::SizeStep(-1.0), &format!("smaller {axis}")),
         action: Some(ToolbarAction::SizeStep(-1.0)),
         active: false,
-        swatch: None,
         gap: TOOLBAR_GAP,
     });
     blocks.push(Block {
-        glyph: format!("{:.0}", toolbar.size),
+        mark: Mark::Value(format!("{:.0}", toolbar.size)),
         // Drawn, but no action owns it, so it never stretches to say anything.
         label: String::new(),
         action: None,
         active: false,
-        swatch: None,
         gap: TOOLBAR_GAP,
     });
     blocks.push(Block {
-        glyph: "]".into(),
-        label: format!("larger {axis}"),
+        mark: Mark::Icon(Icon::Larger),
+        label: labelled(ToolbarAction::SizeStep(1.0), &format!("larger {axis}")),
         action: Some(ToolbarAction::SizeStep(1.0)),
         active: false,
-        swatch: None,
         gap: TOOLBAR_GROUP_GAP,
     });
     blocks.push(Block {
-        glyph: "Esc".into(),
-        label: "cancel, then lock".into(),
+        mark: Mark::Icon(Icon::Lock),
+        label: labelled(ToolbarAction::Lock, "cancel, then lock"),
         action: Some(ToolbarAction::Lock),
         active: false,
-        swatch: None,
         gap: 0.0,
     });
     blocks
@@ -566,65 +617,78 @@ impl Renderer {
             } else {
                 TOOLBAR_RADIUS
             } * scale;
-            if let Some(index) = control.block.swatch {
-                // The colour chip keeps its place; the capsule unfurls around it.
-                if control.stretched {
+            let square = Rect {
+                y: block.y,
+                x: block.x,
+                w: TOOLBAR_BLOCK * scale,
+                h: TOOLBAR_BLOCK * scale,
+            };
+            match &control.block.mark {
+                Mark::Swatch(index) => {
+                    // The colour chip keeps its place; the capsule unfurls around it.
+                    if control.stretched {
+                        round_rect(
+                            pixmap,
+                            block,
+                            radius,
+                            parse_hex(TOOLBAR_BLOCK_FILL),
+                            Some((parse_hex(TOOLBAR_BLOCK_EDGE), TOOLBAR_HAIRLINE * scale)),
+                        );
+                    }
+                    round_rect(
+                        pixmap,
+                        square,
+                        TOOLBAR_RADIUS * scale,
+                        parse_hex(PALETTE[*index]),
+                        Some((
+                            parse_hex(if control.block.active {
+                                TOOLBAR_ACCENT
+                            } else {
+                                TOOLBAR_SWATCH_EDGE
+                            }),
+                            if control.block.active {
+                                2.0
+                            } else {
+                                TOOLBAR_HAIRLINE
+                            } * scale,
+                        )),
+                    );
+                }
+                mark => {
+                    let (fill, edge) = if control.block.active {
+                        (TOOLBAR_ACCENT, TOOLBAR_ACCENT)
+                    } else {
+                        (TOOLBAR_BLOCK_FILL, TOOLBAR_BLOCK_EDGE)
+                    };
                     round_rect(
                         pixmap,
                         block,
                         radius,
-                        parse_hex(TOOLBAR_BLOCK_FILL),
-                        Some((parse_hex(TOOLBAR_BLOCK_EDGE), TOOLBAR_HAIRLINE * scale)),
+                        parse_hex(fill),
+                        Some((parse_hex(edge), TOOLBAR_HAIRLINE * scale)),
                     );
+                    // What the block draws stays where it is and the capsule grows to its right,
+                    // so the block reads as the same square, stretched. An icon or the readout's
+                    // number is centred in the square, never in the stretched rectangle.
+                    match mark {
+                        Mark::Icon(icon) => {
+                            draw_icon(pixmap, *icon, square, scale, TOOLBAR_FOREGROUND)
+                        }
+                        Mark::Value(value) => {
+                            let width = self.text_width(value, TOOLBAR_TEXT_SIZE);
+                            let item = toolbar_text(
+                                ox + (TOOLBAR_BLOCK - width) / 2.0,
+                                oy + control.y,
+                                TOOLBAR_BLOCK,
+                                TOOLBAR_TEXT_SIZE,
+                                TOOLBAR_FOREGROUND,
+                                value,
+                            );
+                            self.draw_text(pixmap, &item, scale, None, None);
+                        }
+                        Mark::Swatch(_) => {}
+                    }
                 }
-                round_rect(
-                    pixmap,
-                    Rect {
-                        y: block.y,
-                        x: block.x,
-                        w: TOOLBAR_BLOCK * scale,
-                        h: TOOLBAR_BLOCK * scale,
-                    },
-                    TOOLBAR_RADIUS * scale,
-                    parse_hex(PALETTE[index]),
-                    Some((
-                        parse_hex(if control.block.active {
-                            TOOLBAR_ACCENT
-                        } else {
-                            TOOLBAR_SWATCH_EDGE
-                        }),
-                        if control.block.active {
-                            2.0
-                        } else {
-                            TOOLBAR_HAIRLINE
-                        } * scale,
-                    )),
-                );
-            } else {
-                let (fill, edge) = if control.block.active {
-                    (TOOLBAR_ACCENT, TOOLBAR_ACCENT)
-                } else {
-                    (TOOLBAR_BLOCK_FILL, TOOLBAR_BLOCK_EDGE)
-                };
-                round_rect(
-                    pixmap,
-                    block,
-                    radius,
-                    parse_hex(fill),
-                    Some((parse_hex(edge), TOOLBAR_HAIRLINE * scale)),
-                );
-                // The glyph stays where it is and the capsule grows to its right, so the block
-                // reads as the same square, stretched.
-                let glyph = self.text_width(&control.block.glyph, TOOLBAR_TEXT_SIZE);
-                let item = toolbar_text(
-                    ox + (TOOLBAR_BLOCK - glyph) / 2.0,
-                    oy + control.y,
-                    TOOLBAR_BLOCK,
-                    TOOLBAR_TEXT_SIZE,
-                    TOOLBAR_KEY_TEXT,
-                    &control.block.glyph,
-                );
-                self.draw_text(pixmap, &item, scale, None, None);
             }
             if control.stretched && width > TOOLBAR_BLOCK + TOOLBAR_LABEL_GAP {
                 let item = toolbar_text(
@@ -1283,6 +1347,153 @@ fn rounded_rect_path(box_: Rect, radius: f32) -> Option<tiny_skia::Path> {
     pb.finish()
 }
 
+/// An icon, drawn inside the square of its block: geometry, in the block's foreground colour, in the
+/// interface's own stroke language. The shape tools' icons call the code their shapes are drawn by,
+/// from the same two points, so an icon cannot drift from what its tool draws.
+fn draw_icon(pixmap: &mut PixmapMut, icon: Icon, square: Rect, scale: f32, color: &str) {
+    let c = parse_hex(color);
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(c[0], c[1], c[2], c[3]);
+    paint.anti_alias = true;
+    let box_ = square.grown(-ICON_INSET * scale);
+    if box_.w <= 0.0 || box_.h <= 0.0 {
+        return;
+    }
+    let (x, y, w, h) = (box_.x, box_.y, box_.w, box_.h);
+    let stroke = SkStroke {
+        width: ICON_STROKE * scale,
+        line_cap: LineCap::Round,
+        line_join: LineJoin::Round,
+        ..Default::default()
+    };
+    // A stroke or a shape is drawn in logical pixels by the code that draws the real one, so the
+    // icon is the same drawing, only smaller.
+    let l = Rect {
+        x: x / scale,
+        y: y / scale,
+        w: w / scale,
+        h: h / scale,
+    };
+    if let Some(kind) = match icon {
+        Icon::Circle => Some(ShapeKind::Circle),
+        Icon::Rect => Some(ShapeKind::Rect),
+        Icon::Diamond => Some(ShapeKind::Diamond),
+        Icon::Line => Some(ShapeKind::Line),
+        Icon::Arrow => Some(ShapeKind::Arrow),
+        _ => None,
+    } {
+        // A line runs corner to corner; a closed shape fills the box it is given.
+        let (from, to) = match kind {
+            ShapeKind::Line | ShapeKind::Arrow => ([l.x, l.y + l.h], [l.x + l.w, l.y]),
+            _ => ([l.x, l.y], [l.x + l.w, l.y + l.h]),
+        };
+        draw_shape(
+            pixmap,
+            &Shape {
+                kind,
+                color: color.into(),
+                width: ICON_STROKE,
+                from,
+                to,
+            },
+            scale,
+        );
+        return;
+    }
+    if icon == Icon::Pen {
+        draw_stroke(
+            pixmap,
+            &Stroke {
+                color: color.into(),
+                width: ICON_STROKE,
+                points: vec![
+                    [l.x + l.w * 0.05, l.y + l.h * 0.8],
+                    [l.x + l.w * 0.35, l.y + l.h * 0.25],
+                    [l.x + l.w * 0.65, l.y + l.h * 0.75],
+                    [l.x + l.w * 0.95, l.y + l.h * 0.2],
+                ],
+            },
+            scale,
+        );
+        return;
+    }
+    let mut path = PathBuilder::new();
+    let mut filled: Vec<tiny_skia::Path> = Vec::new();
+    match icon {
+        Icon::Eraser => {
+            if let Some(rounded) = rounded_rect_path(box_, 4.0 * scale) {
+                path.push_path(&rounded);
+            }
+        }
+        Icon::Text => {
+            path.move_to(x, y + h * 0.15);
+            path.line_to(x + w, y + h * 0.15);
+            path.move_to(x + w / 2.0, y + h * 0.15);
+            path.line_to(x + w / 2.0, y + h);
+        }
+        Icon::Selection => {
+            // The marquee's own look: a hairline frame with a grip at each corner.
+            if let Some(frame) = rounded_rect_path(box_, 0.0) {
+                let thin = SkStroke {
+                    width: TOOLBAR_HAIRLINE * scale,
+                    ..Default::default()
+                };
+                pixmap.stroke_path(&frame, &paint, &thin, Transform::identity(), None);
+            }
+            for corner in [[x, y], [x + w, y], [x + w, y + h], [x, y + h]] {
+                let mut dot = PathBuilder::new();
+                dot.push_circle(corner[0], corner[1], ICON_STROKE * scale);
+                if let Some(dot) = dot.finish() {
+                    filled.push(dot);
+                }
+            }
+        }
+        Icon::Smaller => {
+            path.move_to(x + w * 0.2, y + h / 2.0);
+            path.line_to(x + w * 0.8, y + h / 2.0);
+        }
+        Icon::Larger => {
+            path.move_to(x + w * 0.2, y + h / 2.0);
+            path.line_to(x + w * 0.8, y + h / 2.0);
+            path.move_to(x + w / 2.0, y + h * 0.2);
+            path.line_to(x + w / 2.0, y + h * 0.8);
+        }
+        Icon::Lock => {
+            // The body, and the shackle over it: the block's end state, not its first act.
+            if let Some(body) = rounded_rect_path(
+                Rect {
+                    x: x + w * 0.12,
+                    y: y + h * 0.45,
+                    w: w * 0.76,
+                    h: h * 0.55,
+                },
+                2.0 * scale,
+            ) {
+                path.push_path(&body);
+            }
+            let (arm, top, arc) = (w * 0.3, h * 0.3, h * 0.1);
+            path.move_to(x + arm, y + h * 0.45);
+            path.line_to(x + arm, y + top);
+            path.cubic_to(x + arm, y + arc, x + w - arm, y + arc, x + w - arm, y + top);
+            path.line_to(x + w - arm, y + h * 0.45);
+        }
+        // Drawn by the two branches above.
+        Icon::Pen | Icon::Circle | Icon::Rect | Icon::Diamond | Icon::Line | Icon::Arrow => return,
+    }
+    if let Some(path) = path.finish() {
+        pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+    }
+    for path in filled {
+        pixmap.fill_path(
+            &path,
+            &paint,
+            tiny_skia::FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+    }
+}
+
 /// This crate's rectangle as the one tiny-skia takes, which rejects a negative or non-finite one.
 fn sk_rect(r: Rect) -> Option<tiny_skia::Rect> {
     tiny_skia::Rect::from_xywh(r.x, r.y, r.w, r.h)
@@ -1933,5 +2144,134 @@ mod tests {
         // And the live shape is what the damage box covers, head and all.
         let box_ = transient_bounds(&live).expect("a live shape has a box");
         assert!(box_.contains(40.0, 50.0) && box_.contains(160.0, 50.0));
+    }
+
+    /// Brightness of one pixel: an icon is drawn in the block's foreground colour, which is near
+    /// white, while a block's own fill and its hairline edge are dark or blue.
+    fn near_white(buf: &[u8], w: u32, x: u32, y: u32) -> bool {
+        let i = ((y * w + x) * 4) as usize;
+        buf[i] > 150 && buf[i + 1] > 150 && buf[i + 2] > 150
+    }
+
+    fn rail_state() -> Toolbar {
+        Toolbar {
+            tool: Tool::Pen,
+            color: PALETTE[0],
+            size: 3.0,
+            hover: None,
+            grow: 1.0,
+        }
+    }
+
+    #[test]
+    fn every_block_draws_an_icon_in_its_square() {
+        // Every function's block shows a picture of what it does, at scale 1 and at scale 2: a
+        // 30 pt block with a 1.5 pt stroke has to carry ink at both.
+        let rail = rail_state();
+        for scale in [1.0, 2.0] {
+            // Logical size, and the device buffer the renderer is given for it.
+            let (w, h) = (640.0, 1600.0);
+            let (wd, hd) = ((w * scale) as u32, (h * scale) as u32);
+            let mut renderer = Renderer::new();
+            let pill = renderer.cached_toolbar_pill(&rail, w).unwrap();
+            let mut buf = vec![0; (wd * hd * 4) as usize];
+            renderer.render(
+                &mut buf,
+                wd,
+                hd,
+                scale,
+                &OutputAnnotations::default(),
+                &Overlay {
+                    toolbar: Some(rail),
+                    ..Default::default()
+                },
+                None,
+            );
+            let (ox, oy) = toolbar_origin(h);
+            let mut icons = 0;
+            for control in &pill.controls {
+                let Mark::Icon(icon) = control.block.mark else {
+                    continue;
+                };
+                icons += 1;
+                // The inside of the square, so neither the block's edge nor the cap of its
+                // rounded corner can be mistaken for the icon.
+                let (x0, y0) = (
+                    ((ox + 3.0) * scale) as u32,
+                    ((oy + control.y + 3.0) * scale) as u32,
+                );
+                let (x1, y1) = (
+                    ((ox + TOOLBAR_BLOCK - 3.0) * scale) as u32,
+                    ((oy + control.y + TOOLBAR_BLOCK - 3.0) * scale) as u32,
+                );
+                let ink = (y0..y1)
+                    .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+                    .filter(|(x, y)| near_white(&buf, wd, *x, *y))
+                    .count();
+                assert!(ink > 0, "{icon:?} drew nothing at scale {scale}");
+            }
+            assert_eq!(
+                icons, 12,
+                "every function has an icon, and only functions do"
+            );
+        }
+    }
+
+    #[test]
+    fn every_block_states_the_key_that_applies_it() {
+        // A block's face carries no key letter any more, so the key is what its stretched text
+        // ends with — and that key has to be one this daemon actually handles.
+        use crate::input::{color_for_keysym, size_step_for_keysym, tool_for_keysym};
+        use smithay_client_toolkit::seat::keyboard::Keysym;
+        let keysym_of = |key: &str| match key {
+            "[" => Some(Keysym::bracketleft),
+            "]" => Some(Keysym::bracketright),
+            "1" => Some(Keysym::_1),
+            "2" => Some(Keysym::_2),
+            "3" => Some(Keysym::_3),
+            "4" => Some(Keysym::_4),
+            "5" => Some(Keysym::_5),
+            "Esc" => Some(Keysym::Escape),
+            "P" => Some(Keysym::P),
+            "E" => Some(Keysym::E),
+            "T" => Some(Keysym::T),
+            "S" => Some(Keysym::S),
+            "O" => Some(Keysym::O),
+            "R" => Some(Keysym::R),
+            "D" => Some(Keysym::D),
+            "L" => Some(Keysym::L),
+            "A" => Some(Keysym::A),
+            _ => None,
+        };
+        let blocks = toolbar_blocks(&rail_state());
+        assert_eq!(blocks.len(), 18);
+        let mut stated = 0;
+        for block in &blocks {
+            let Some(action) = block.action else {
+                // The size readout: it applies nothing, so it says nothing and shows a value.
+                assert!(block.label.is_empty());
+                assert!(matches!(block.mark, Mark::Value(_)));
+                continue;
+            };
+            let key = key_of(action);
+            assert!(
+                block.label.ends_with(&format!("({key})")),
+                "'{}' does not end with its key ({key})",
+                block.label
+            );
+            stated += 1;
+            let keysym = keysym_of(key).unwrap_or_else(|| panic!("'{key}' is not a key we draw"));
+            let applies = match action {
+                ToolbarAction::Tool(tool) => tool_for_keysym(keysym) == Some(tool),
+                ToolbarAction::Color(index) => color_for_keysym(keysym) == Some(index),
+                ToolbarAction::SizeStep(dir) => {
+                    size_step_for_keysym(keysym).is_some_and(|step| step == dir)
+                }
+                ToolbarAction::Lock => keysym == Keysym::Escape,
+            };
+            assert!(applies, "'{}' names a key that does not do it", block.label);
+        }
+        // Seventeen blocks apply something: five colours, nine tools, two size steps and lock.
+        assert_eq!(stated, 17);
     }
 }
