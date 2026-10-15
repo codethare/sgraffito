@@ -714,3 +714,50 @@ fn a_transform_moves_both_points_of_a_shape_and_keeps_its_kind() {
     assert_eq!((scaled.from, scaled.to), ([0.0, 0.0], [200.0, 200.0]));
     assert_eq!(scaled.kind, ShapeKind::Circle);
 }
+
+#[test]
+fn deleting_a_selection_removes_exactly_it() {
+    // The bug this guards against: removing an earlier element shifts every later one, so a
+    // selection holding two adjacent strokes would remove the wrong pair and leave one of them drawn.
+    let mut a = OutputAnnotations {
+        strokes: vec![
+            stroke_at(0.0, 0.0),
+            stroke_at(100.0, 0.0),
+            stroke_at(200.0, 0.0),
+        ],
+        texts: vec![text(10.0, 10.0, "keep"), text(300.0, 10.0, "keep too")],
+        shapes: vec![shape(ShapeKind::Rect, [0.0, 0.0], [50.0, 50.0])],
+    };
+    let held = [ItemId::Stroke(0), ItemId::Stroke(1), ItemId::Shape(0)];
+    let removed = a
+        .remove(&held)
+        .expect("the removed elements occupied a box");
+    assert_eq!(a.strokes.len(), 1, "the third stroke survives");
+    assert_eq!(
+        a.strokes[0].points[0],
+        [200.0, 0.0],
+        "and it is the one that was there"
+    );
+    assert!(a.shapes.is_empty());
+    assert_eq!(a.texts.len(), 2, "no text was selected");
+    // The box is the union of what went, so the frame that follows knows what to damage.
+    assert!(
+        removed.contains(0.0, 0.0) && removed.contains(105.0, 0.0) && removed.contains(25.0, 25.0),
+        "{removed:?}"
+    );
+}
+
+#[test]
+fn removing_nothing_removes_nothing() {
+    let mut a = ann(vec![stroke_at(0.0, 0.0), stroke_at(100.0, 0.0)], vec![]);
+    assert_eq!(a.remove(&[]), None);
+    assert_eq!(a.strokes.len(), 2);
+    // An index that is no longer there is skipped rather than panicking: a `clear` can arrive while
+    // a gesture still holds ids from the document it just emptied.
+    assert_eq!(a.remove(&[ItemId::Stroke(7), ItemId::Text(3)]), None);
+    assert_eq!(a.strokes.len(), 2);
+    // The same element named twice is removed once.
+    assert!(a.remove(&[ItemId::Stroke(0), ItemId::Stroke(0)]).is_some());
+    assert_eq!(a.strokes.len(), 1);
+    assert_eq!(a.strokes[0].points[0], [100.0, 0.0]);
+}

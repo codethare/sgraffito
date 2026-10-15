@@ -840,6 +840,43 @@ impl App {
         dropped
     }
 
+    /// Remove every element the selection holds, as one document change: the box the removed ones
+    /// occupied is what the next frame damages. A gesture still in flight is abandoned rather than
+    /// written — it would put a transform into the file for elements that are about to be gone — and
+    /// the selection is cleared last, by the same helper the other paths use. Returns whether
+    /// anything was removed.
+    pub(crate) fn delete_selection(&mut self) -> bool {
+        let held: Vec<(u32, String, Vec<ItemId>)> = self
+            .outputs
+            .iter()
+            .filter_map(|(key, out)| {
+                out.overlay
+                    .selection
+                    .as_ref()
+                    .map(|s| (*key, out.bucket(*key).into_owned(), s.items.clone()))
+            })
+            .collect();
+        let mut removed = Vec::new();
+        for (key, bucket, items) in held {
+            if let Some(box_) = self
+                .doc
+                .outputs
+                .get_mut(&bucket)
+                .and_then(|ann| ann.remove(&items))
+            {
+                removed.push((key, box_));
+            }
+        }
+        let deleted = !removed.is_empty();
+        // The gesture goes with the selection, whether or not anything was removed: its elements are
+        // gone, and a drag nothing showed must not reach the file.
+        self.drop_selection();
+        for (key, box_) in removed {
+            self.doc_changed_at(key, box_);
+        }
+        deleted
+    }
+
     /// Write any live gesture into the document, wherever it is. Something other than the pointer
     /// ends the gesture this way — a mode switch, a tool change, the output going away — and the
     /// drag the user already made is kept rather than dropped.

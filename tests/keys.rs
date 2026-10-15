@@ -188,3 +188,14 @@ fn each_tool_has_its_own_pointer_shape() {
     assert_eq!(handle_cursor(Handle::N), Shape::NsResize);
     assert_eq!(handle_cursor(Handle::S), Shape::NsResize);
 }
+
+#[test]
+fn only_delete_removes_a_selection() {
+    use sgraffito::input::deletes_selection;
+    assert!(deletes_selection(Keysym::Delete));
+    assert!(deletes_selection(Keysym::KP_Delete));
+    // `Backspace` deletes a character inside a text box: it must not delete a cluster outside one.
+    assert!(!deletes_selection(Keysym::BackSpace));
+    assert!(!deletes_selection(Keysym::d));
+    assert!(!deletes_selection(Keysym::Escape));
+}

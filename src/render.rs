@@ -67,6 +67,10 @@ const TOOLBAR_BLOCK_FILL: &str = "#1c1c1ce6";
 const TOOLBAR_BLOCK_EDGE: &str = "#ffffff26";
 /// macOS system accent, used for the armed tool's block and the active colour's ring.
 const TOOLBAR_ACCENT: &str = "#0a84ffff";
+/// `#rrggbbaa`. The plate the rail sits on: black at 90% opacity, the same alpha a block fill uses,
+/// behind every block so the gaps between them do not show the wallpaper at full strength and the
+/// rail reads as one control. The rail is therefore essentially opaque, by design.
+const TOOLBAR_PLATE_FILL: &str = "#000000e6";
 /// The colour of whatever a block draws on itself: an icon, or the size readout's number.
 const TOOLBAR_FOREGROUND: &str = "#ffffffee";
 const TOOLBAR_LABEL_TEXT: &str = "#ebebf59e";
@@ -596,6 +600,23 @@ impl Renderer {
             return;
         };
         let (ox, oy) = toolbar_origin(pixmap.height() as f32 / scale);
+        // The plate the whole rail sits on: the block column, inset `TOOLBAR_PAD` from the blocks on
+        // all four sides — which is exactly the column's own extent, since the column already carries
+        // that padding at each end. Its width is the block column and not the room a stretched capsule
+        // may take, so a capsule reaching past it is drawn over the wallpaper as its own block, rather
+        // than the plate appearing to grow.
+        round_rect(
+            pixmap,
+            Rect {
+                x: (ox - TOOLBAR_PAD) * scale,
+                y: oy * scale,
+                w: (TOOLBAR_BLOCK + 2.0 * TOOLBAR_PAD) * scale,
+                h: TOOLBAR_COLUMN * scale,
+            },
+            TOOLBAR_RADIUS * scale,
+            parse_hex(TOOLBAR_PLATE_FILL),
+            None,
+        );
         // How far the block under the pointer has opened. The layout is settled, so a frame of the
         // transition only moves the capsule's trailing edge and the text that edge uncovers.
         let grow = toolbar.grow.clamp(0.0, 1.0);
@@ -1208,11 +1229,15 @@ fn toolbar_origin(height: f32) -> (f32, f32) {
 pub fn toolbar_bounds(width: f32, height: f32) -> Rect {
     let (x, y) = toolbar_origin(height);
     Rect {
-        // The hairline edge is stroked around the path, so it reaches one logical pixel past
-        // the block itself.
-        x: x - TOOLBAR_HAIRLINE,
+        // The plate reaches a pad outside the blocks horizontally and starts at the column's own top,
+        // which already carries that padding — and the hairline edge is stroked around a path, so it
+        // reaches one logical pixel past. The box therefore holds every pixel the rail paints: any less
+        // and part of the plate would fall outside a frame that repaints only the rail, keeping stale
+        // pixels behind.
+        x: x - TOOLBAR_PAD - TOOLBAR_HAIRLINE,
         y: y - TOOLBAR_HAIRLINE,
-        w: (width - 2.0 * TOOLBAR_MARGIN).clamp(0.0, TOOLBAR_RESERVE) + 2.0 * TOOLBAR_HAIRLINE,
+        w: (width - 2.0 * TOOLBAR_MARGIN).clamp(0.0, TOOLBAR_RESERVE)
+            + 2.0 * (TOOLBAR_PAD + TOOLBAR_HAIRLINE),
         h: TOOLBAR_COLUMN + 2.0 * TOOLBAR_HAIRLINE,
     }
 }

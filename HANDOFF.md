@@ -1,15 +1,17 @@
 # sgraffito — session handoff
 
-Working notes from the session that built the selection tool. `CLAUDE.md` is the behaviour contract
-and the source of truth; this file is the state left behind, so a new session can start without
-re-deriving it. English, like the rest of the repository; the user writes in Chinese and expects
-Chinese in chat, English in the artifacts.
+Working notes from the sessions that built the selection tool, the shape tools and the rail's icons
+and plate. `CLAUDE.md` is the behaviour contract and the source of truth; this file is the state left
+behind, so a new session can start without re-deriving it. English, like the rest of the repository;
+the user writes in Chinese and expects Chinese in chat, English in the artifacts.
 
 ## State right now (2026-10-14)
 
 - The tree is clean and nothing is in flight: `@` is an empty working-copy commit on top of the
-  icons work. `jj log -r 'main@origin..main'` is what says whether anything is left to push; the
-  human pushes, this file does not track that.
+  delete-and-plate work. `jj log -r 'main@origin..main'` is what says whether anything is left to
+  push; the human pushes, this file does not track that. The human also committed their own work
+  mid-session (`853567b4 Add crates.io package metadata`), so `main@origin` may be ahead of what the
+  session notes describe — read the log, not this file, for that.
 - `de5533af` carries the selection work plus two edits that were already in flight when that session
   started and belong to the one before it: `HANDOFF.md` (these notes) and a `.gitignore` tidy that
   drops `CLAUDE.md` and `openspec/` from the repository's list because `.git/info/exclude` already
@@ -23,17 +25,19 @@ Chinese in chat, English in the artifacts.
   - every rail block shows an icon of what it does, drawn as geometry by the same code the shapes are
     drawn by, and the key of a block is stated at the end of the text it says when the pointer is on
     it (`circle (O)`, `colour 3 (3)`, `cancel, then lock (Esc)`).
+  - `Delete` removes everything the selection holds as one change, and the rail sits on a black
+    plate at 90% opacity.
   - the plans and the decisions are in `openspec/changes/selection-and-transform/`,
-    `openspec/changes/shape-tools/` and `openspec/changes/toolbar-icons/` (all four artifacts
-    complete in each, 30/30, 28/28 and 14/14 tasks ticked, all three
-    `openspec validate <change> --strict` valid).
+    `openspec/changes/shape-tools/`, `openspec/changes/toolbar-icons/` and
+    `openspec/changes/delete-key-and-rail-plate/` (all four artifacts complete in each, 30/30, 28/28,
+    14/14 and 12/12 tasks ticked, all four `openspec validate <change> --strict` valid).
 - `openspec/specs/` holds only `.gitkeep`, so every change dir under `openspec/changes/` stays
   unarchived and `openspec validate <change> --strict` always prints
   `INFO ... only ADDED requirements are allowed for new specs`. That is expected here, not a
   failure; only the `Change '<name>' is valid` line matters.
 - `openspec/` and `CLAUDE.md` are gitignored on purpose; the specs and the contract live
   outside the repository.
-- `cargo test` is 125 tests across the lib plus six files in `tests/`.
+- `cargo test` is 129 tests across the lib plus six files in `tests/`.
 
 ## What the last sessions changed and why, oldest first
 
@@ -199,6 +203,39 @@ Chinese in chat, English in the artifacts.
      test was deleted; re-deriving it means building an `Overlay { toolbar: Some(Toolbar { .. }) }` and
      writing a PPM, as the preview section below describes.
 
+10. **Delete, and the rail's plate** (`openspec/changes/delete-key-and-rail-plate/`). Two small gaps:
+    the selection could be moved but not thrown away, and the rail was eighteen translucent chips
+    with the wallpaper showing through the gaps between them.
+    - `Delete` removes every element the selection holds — strokes, text boxes and shapes alike — as
+      **one** document change whose damage box is the union of what went, then clears the selection.
+      The removal is `OutputAnnotations::remove`, which groups the ids by kind and removes from the
+      **highest index down**: removing an earlier element shifts every later one, so ascending order
+      would remove the wrong pair from a selection of two adjacent strokes. An index that is no
+      longer there is skipped, which is what stops a `clear` arriving mid-gesture from resurrecting
+      anything.
+    - `Delete` and the keypad's `KP_Delete` only, via a pure `deletes_selection(keysym)` that
+      `tests/keys.rs` pins. `Backspace` is deliberately not a second way in: inside a text box it
+      deletes a character, and one key should not mean both. `Delete` is inert while a text box is
+      focused (there is no forward-delete there, and that is recorded, not implemented).
+    - A gesture still in flight is abandoned rather than written before its elements go: writing it
+      would put a transform into the file that no frame ever showed, for elements that are leaving.
+      `drop_selection` already clears the gesture, so this falls out of the order of the calls.
+    - The plate is `TOOLBAR_PLATE_FILL` (`#000000e6`, the block fill's own 90%) painted as one rounded
+      rectangle behind every block and before them. It is **the column's own extent**, which is
+      already inset `TOOLBAR_PAD` from the blocks at both ends, plus `TOOLBAR_PAD` either side — so the
+      plate is inset a pad from the blocks on all four sides, and it *is* the rectangle the hit test
+      covers. Its width is the block column, never the reserve, so a capsule still reaches out over
+      the wallpaper as its own block.
+    - `toolbar_bounds` was the trap: the plate paints outside the old box, so the box had to grow or
+      the plate's margin would be outside every rail-only frame's damage region and keep stale
+      pixels. It is now the plate plus one hairline, and its height is `TOOLBAR_COLUMN + 2 *
+      TOOLBAR_HAIRLINE` — **not** plus the pads, which the column already carries. Getting that wrong
+      made the box 13 pt taller than anything painted, and four existing tests caught it.
+    - Checked by eye as well as by test: the rail composited over a bright checkered wallpaper (a
+      layer surface is transparent where nothing is drawn, so the preview blends the frame over the
+      wallpaper by hand — a raw buffer holds the alpha and would show black otherwise), at rest, with
+      a capsule open, and on a 400 px-tall output where the rail is pinned and clipped.
+
 ## Where things live
 
 - `src/render.rs` — rail constants at the top (including `ICON_STROKE` and `ICON_INSET`),
@@ -223,7 +260,8 @@ Chinese in chat, English in the artifacts.
   shortcuts and the local text-key path (`edit_action`), `Esc`'s stages (`escape`), the handle
   under the pointer (`update_selection_grab`), `zwp_text_input_v3` handling, `paste`/`take_pasted`.
 - `src/canvas.rs` — the document model (strokes, text boxes, shapes), `TextBuffer` and `Caret`,
-  `Toolbar`/`ToolbarAction`, `PALETTE`, `Tool`, `erase` (returns the box it removed), `Rect`. The
+  `Toolbar`/`ToolbarAction`, `PALETTE`, `Tool`, `erase` and `remove` (both return the box they freed),
+  `Rect`. The
   shape model and its geometry, pure and tested: `Shape`/`ShapeKind`, `head_len`/`head_half`,
   `is_empty`, `bounds`, `outline` (the flattened polyline a hit test measures), `distance_squared`,
   `rect_of`, `item_bounds`. And all of the selection geometry: `Handle`, `Grab`, `Gesture`,
@@ -305,6 +343,10 @@ no capabilities until a device exists.
   would mirror the selection is clamped instead, because a mirrored text box cannot be drawn.
 - The frame and the marquee are drawn in `TOOLBAR_ACCENT` as hairlines and capsules, with no fill of
   their own, so the interface gained no third shape or colour.
+- `Delete` removes a whole selection with no undo behind it, and the rail is essentially opaque now
+  that it sits on a 90% black plate: the wallpaper no longer reads through the gaps. Both were asked
+  for; reverting the plate is one constant and one call in `draw_toolbar`, plus `toolbar_bounds` back
+  to the hairline-only box.
 - A shape is stroked and never filled, and it is hit by its outline and never by its interior. There
   is no way to change a shape's kind, drag one of its corners or fill it once it has landed: erasing
   it and drawing it again is the way. An arrow is one segment with one head, drawn at the end the
@@ -368,15 +410,17 @@ no capabilities until a device exists.
    on `TextItem`, the shaped box rasterised and used as a `Pattern` shader for a turned rectangle,
    an inverse transform in front of the measured-region hit test, and a version 2 file. Everything
    else about the rotation is already in place.
-7. Shift-click to add one element to a selection, and a delete key for a selection (today the eraser
-   removes one element per click). Both are additions to the press rules in `select_press`, not to
-   the gesture arithmetic.
+7. Shift-click to add one element to a selection. It is an addition to the press rules in
+   `select_press`, not to the gesture arithmetic, and `Delete` already removes a whole selection.
 8. Filling a shape, and a second arrowhead style: a fill would need a fill colour per shape in the
    file and a decision about what a click inside a filled shape does, since the interior is
    deliberately not a hit today. Editing a shape after it lands (its kind, one corner) is the other
    half of that, and a `kind` field already in the file makes it additive.
-9. Colour the icons? They are drawn in `TOOLBAR_FOREGROUND` and take the accent block's fill behind
+9. Forward-delete inside a text box: `Delete` is inert there today, which is recorded rather than
+   implemented. It would be a `Caret::Right`-shaped deletion in `TextBuffer`, and it is a text
+   feature, not a selection one.
+10. Colour the icons? They are drawn in `TOOLBAR_FOREGROUND` and take the accent block's fill behind
    them, which is what a macOS toolbar does; a per-tool tint would be a second meaning for colour in
    an interface whose colour already means the active pen.
-10. Archiving the delivered OpenSpec changes, which stays impossible until the capability specs
+11. Archiving the delivered OpenSpec changes, which stays impossible until the capability specs
     exist under `openspec/specs/`.

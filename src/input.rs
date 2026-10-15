@@ -91,6 +91,13 @@ pub fn bytes_to_delete(before_length: u32, preedit_bytes: usize) -> usize {
 }
 
 /// Key mapping while no text box is edited: `P`/`E`/`T` switch tools.
+/// Whether this key removes the selection. `Delete` and the keypad's — as `Return` and `KP_Enter`
+/// both end a line — and deliberately not `Backspace`, which deletes a character while a text box is
+/// focused: one key should not mean "one character" and "everything selected" depending on the tool.
+pub fn deletes_selection(keysym: Keysym) -> bool {
+    matches!(keysym, Keysym::Delete | Keysym::KP_Delete)
+}
+
 /// Key mapping while no text box is edited: `P`/`E`/`T`/`S` switch tools, and the five shape tools
 /// take the initials of what they draw.
 pub fn tool_for_keysym(keysym: Keysym) -> Option<Tool> {
@@ -224,6 +231,10 @@ impl KeyboardHandler for App {
         }
         if event.keysym == Keysym::Escape {
             self.escape();
+        } else if deletes_selection(event.keysym) {
+            // The only key that removes content. It acts on the selection, so with nothing selected
+            // it does nothing.
+            self.delete_selection();
         } else if let Some(tool) = tool_for_keysym(event.keysym) {
             self.set_tool(tool);
         } else if let Some(idx) = color_for_keysym(event.keysym) {

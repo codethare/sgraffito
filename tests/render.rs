@@ -433,14 +433,16 @@ fn sweep_rail(
 
 #[test]
 fn every_block_of_the_rail_is_reachable_and_no_row_is_a_gap() {
+    const HAIRLINE: f32 = 1.0;
     let (w, h) = (1920.0f32, 1080.0f32);
     let rail = rail();
     let mut renderer = Renderer::new();
     let sweep = sweep_rail(&mut renderer, &rail, w, h, 20.0);
-    // Only the hairline rows at either end of the box reach no block; nothing between them does,
-    // or a press on a gap would start a stroke under the rail.
+    // Only the hairline rows at either end of the box reach no block: the box is the plate, which is
+    // the column the hit test covers, plus that hairline. Nothing between them is a gap, or a press on
+    // a gap between two blocks would start a stroke under the rail.
     let first = sweep.iter().position(Option::is_some).expect("no rail");
-    assert!(first <= 2, "the rail starts {first} rows in");
+    assert_eq!(first, HAIRLINE as usize, "the rail starts {first} rows in");
     let end = sweep[first..]
         .iter()
         .position(Option::is_none)
@@ -1296,5 +1298,104 @@ fn the_rail_is_pinned_to_the_top_margin_when_it_cannot_be_centred() {
     assert!(
         top as f32 >= pinned.y && top as f32 <= pinned.y + 8.0,
         "the rail starts at the margin, not off the top: {top}"
+    );
+}
+
+#[test]
+fn the_rail_sits_on_a_plate() {
+    // The plate is what makes the rail read as one control over any wallpaper: black at 90%
+    // opacity, behind every block, inset by TOOLBAR_PAD, and inside the box the rail declares as
+    // its own — a plate's margin outside that box would be left unrepainted by a rail-only frame.
+    const PAD: f32 = 6.0;
+    const BLOCK: f32 = 30.0;
+    const HAIRLINE: f32 = 1.0;
+    let (w, h) = (640u32, 900u32);
+    let mut buf = buffer(w, h);
+    let mut renderer = Renderer::new();
+    let rail = rail();
+    let overlay = Overlay {
+        toolbar: Some(rail),
+        ..Default::default()
+    };
+    renderer.render(
+        &mut buf,
+        w,
+        h,
+        1.0,
+        &OutputAnnotations::default(),
+        &overlay,
+        None,
+    );
+    let band = toolbar_bounds(w as f32, h as f32);
+    // The plate reaches a pad left of the blocks and starts at their column's top; the declared box
+    // is that plus the hairline.
+    let (ox, oy) = (band.x + PAD + HAIRLINE, band.y + HAIRLINE);
+    let (left, top) = (ox - PAD, oy);
+    assert_eq!(
+        (band.x, band.y),
+        (left - HAIRLINE, top - HAIRLINE),
+        "the declared box does not hold the plate"
+    );
+
+    // The plate's own margin is painted: this is the strip that has to be inside the damage box,
+    // because a frame that repaints only the rail is what draws it.
+    // Sampled in the middle of the top margin and of the left margin, because the plate's rounded
+    // corners are cut away and a corner pixel would prove nothing.
+    assert!(
+        alpha(&buf, w, (ox + BLOCK / 2.0) as u32, (top + 1.0) as u32) > 0,
+        "no plate in its top margin"
+    );
+    assert!(
+        alpha(&buf, w, (left + 1.0) as u32, (oy + band.h / 2.0) as u32) > 0,
+        "no plate in its left margin"
+    );
+
+    // A gap between two blocks is the plate rather than the wallpaper: painted, and black.
+    let gap_y = (oy + 5.0 * BLOCK + 4.0 * 4.0 + 10.0 + 2.0) as u32;
+    let (x0, x1) = ((ox + 2.0) as u32, (ox + BLOCK - 2.0) as u32);
+    let mut brightest = 0;
+    for x in x0..x1 {
+        assert!(
+            alpha(&buf, w, x, gap_y) > 0,
+            "the gap shows the wallpaper at {x}"
+        );
+        let i = ((gap_y * w + x) * 4) as usize;
+        brightest = brightest.max(buf[i] as u32 + buf[i + 1] as u32 + buf[i + 2] as u32);
+    }
+    assert!(brightest <= 40, "the plate is not black: {brightest}");
+
+    // The plate is no wider than the block column while a capsule reached past it: the widest
+    // block the rail can open is the text tool's, and it is drawn over the wallpaper beyond the
+    // plate rather than the plate appearing to grow with it.
+    let hole = ToolbarAction::Tool(Tool::Text);
+    let stretched = toolbar(Tool::Pen, PALETTE[0], 3.0, Some(hole));
+    let mut renderer = Renderer::new();
+    let row = row_of(&mut renderer, &stretched, w as f32, h as f32, hole);
+    let mut wide = buffer(w, h);
+    renderer.render(
+        &mut wide,
+        w,
+        h,
+        1.0,
+        &OutputAnnotations::default(),
+        &Overlay {
+            toolbar: Some(stretched),
+            ..Default::default()
+        },
+        None,
+    );
+    let plate_right = ox + BLOCK + PAD;
+    let beyond = (plate_right + 6.0) as u32;
+    // In the plate's own margin, nothing is painted past the plate: it did not grow.
+    assert_eq!(
+        alpha(&wide, w, beyond, (top + 1.0) as u32),
+        0,
+        "the plate grew to the width of the capsule"
+    );
+    // In the capsule's own row the same column does carry ink, which is the capsule and not the plate.
+    // `row_of` answers in absolute coordinates, like the box it sweeps.
+    assert!(
+        alpha(&wide, w, beyond, (row + BLOCK / 2.0) as u32) > 0,
+        "the capsule did not reach past the plate"
     );
 }

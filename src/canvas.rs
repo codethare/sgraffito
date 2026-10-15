@@ -195,6 +195,55 @@ impl OutputAnnotations {
             None => None,
         }
     }
+
+    /// Remove the elements `items` names, returning the box they occupied so the frame that follows
+    /// knows what to damage. Each kind's indices are removed from the highest down, because removing
+    /// an earlier element shifts every later one: without that, a selection holding two strokes would
+    /// remove the second twice and leave the first drawn. An index that is no longer there is skipped,
+    /// which is what lets a `clear` arriving mid-gesture leave nothing to resurrect.
+    pub fn remove(&mut self, items: &[ItemId]) -> Option<Rect> {
+        let (mut strokes, mut texts, mut shapes) = (Vec::new(), Vec::new(), Vec::new());
+        for id in items {
+            match *id {
+                ItemId::Stroke(i) => strokes.push(i),
+                ItemId::Text(i) => texts.push(i),
+                ItemId::Shape(i) => shapes.push(i),
+            }
+        }
+        let mut removed: Option<Rect> = None;
+        for i in &strokes {
+            union_into(&mut removed, self.strokes.get(*i).and_then(Stroke::bounds));
+        }
+        for i in &texts {
+            union_into(&mut removed, self.texts.get(*i).map(TextItem::paint_bounds));
+        }
+        for i in &shapes {
+            union_into(&mut removed, self.shapes.get(*i).map(Shape::bounds));
+        }
+        remove_indices(&mut self.strokes, strokes);
+        remove_indices(&mut self.texts, texts);
+        remove_indices(&mut self.shapes, shapes);
+        removed
+    }
+}
+
+/// Fold `box_` into an accumulator rectangle.
+fn union_into(acc: &mut Option<Rect>, box_: Option<Rect>) {
+    *acc = match (*acc, box_) {
+        (Some(a), Some(b)) => Some(a.union(b)),
+        (a, b) => a.or(b),
+    };
+}
+
+/// Remove `indices` from `list`, highest first, skipping any that are past its end.
+fn remove_indices<T>(list: &mut Vec<T>, mut indices: Vec<usize>) {
+    indices.sort_unstable();
+    indices.dedup();
+    for index in indices.into_iter().rev() {
+        if index < list.len() {
+            list.remove(index);
+        }
+    }
 }
 
 impl Shape {
