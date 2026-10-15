@@ -2,6 +2,9 @@
 name = "sgraffito"
 version = "0.1.0"
 edition = "2024"
+description = "Doodle and sticky notes on the Wayland wallpaper layer (wlr-layer-shell)"
+license = "MIT"
+repository = "https://github.com/codethare/sgraffito"
 
 [dependencies]
 anyhow = "1.0.104"
