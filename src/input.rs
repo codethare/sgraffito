@@ -162,6 +162,7 @@ pub fn tool_for_keysym(keysym: Keysym) -> Option<Tool> {
         Keysym::l | Keysym::L => Some(Tool::Line),
         Keysym::a | Keysym::A => Some(Tool::Arrow),
         Keysym::h | Keysym::H => Some(Tool::Hand),
+        Keysym::n | Keysym::N => Some(Tool::Note),
         _ => None,
     }
 }
@@ -509,6 +510,7 @@ impl App {
     /// Mark the output that owns the focused text edit for a whole-surface redraw: typed
     /// content and the caret are not localisable to a transient box.
     fn mark_edit_dirty(&mut self) {
+        self.grow_note();
         self.dirty = true;
         for out in self.outputs.values_mut() {
             if let Some(edit) = &out.overlay.text {
@@ -673,6 +675,7 @@ impl App {
             Tool::Diamond => self.begin_shape(key, canvas[0], canvas[1], ShapeKind::Diamond),
             Tool::Line => self.begin_shape(key, canvas[0], canvas[1], ShapeKind::Line),
             Tool::Arrow => self.begin_shape(key, canvas[0], canvas[1], ShapeKind::Arrow),
+            Tool::Note => self.begin_note(key, canvas[0], canvas[1]),
             Tool::Hand => {}
         }
         if let Some(out) = self.outputs.get_mut(key) {
@@ -738,7 +741,7 @@ impl App {
                     None => return,
                 }
             }
-            Tool::Text | Tool::Selection | Tool::Hand => return,
+            Tool::Text | Tool::Selection | Tool::Hand | Tool::Note => return,
         }
         // Only the transient overlay moved, so the next frame can damage just its box.
         out.transient_dirty = true;

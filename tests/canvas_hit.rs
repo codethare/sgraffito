@@ -1,4 +1,6 @@
-use sgraffito::canvas::{ERASER_THRESHOLD, ItemId, OutputAnnotations, Rect, Stroke, TextItem};
+use sgraffito::canvas::{
+    ERASER_THRESHOLD, ItemId, OutputAnnotations, PALETTE, Rect, Stroke, TextItem,
+};
 
 fn line(y: f32, x0: f32, x1: f32) -> Stroke {
     Stroke {
@@ -13,6 +15,7 @@ fn ann(strokes: Vec<Stroke>, texts: Vec<TextItem>) -> OutputAnnotations {
         strokes,
         texts,
         shapes: vec![],
+        notes: vec![],
     }
 }
 
@@ -731,6 +734,7 @@ fn a_marquee_takes_a_wholly_contained_shape_and_not_a_clipped_one() {
         strokes: vec![],
         texts: vec![],
         shapes: vec![inside, clipped],
+        notes: vec![],
     };
     let marquee = Rect {
         x: 0.0,
@@ -776,6 +780,7 @@ fn deleting_a_selection_removes_exactly_it() {
         ],
         texts: vec![text(10.0, 10.0, "keep"), text(300.0, 10.0, "keep too")],
         shapes: vec![shape(ShapeKind::Rect, [0.0, 0.0], [50.0, 50.0])],
+        notes: vec![],
     };
     let held = [ItemId::Stroke(0), ItemId::Stroke(1), ItemId::Shape(0)];
     let removed = a
@@ -1020,4 +1025,148 @@ fn a_marquee_catches_at_any_view_what_it_catches_at_one_to_one() {
     // because nothing about it was measured on screen.
     let one_to_one = marquee_select(&a, swept);
     assert_eq!(marquee_select(&a, swept), one_to_one);
+}
+
+// --- sticky notes: the date, the ink and the element --------------------------------------
+
+use sgraffito::canvas::{NOTE_PADDING, Note, date_stamp, note_ink};
+
+#[test]
+fn the_date_is_the_day_the_note_was_made() {
+    use std::time::{Duration, UNIX_EPOCH};
+    let at = |days: u64| UNIX_EPOCH + Duration::from_secs(days * 86_400);
+    assert_eq!(date_stamp(at(0)), "1970/01/01");
+    // A leap day, and the day after it.
+    assert_eq!(date_stamp(at(19_782)), "2024/02/29");
+    assert_eq!(date_stamp(at(19_783)), "2024/03/01");
+    // A century that is a leap year, and the last day of a year.
+    assert_eq!(date_stamp(at(11_016)), "2000/02/29");
+    assert_eq!(date_stamp(at(19_722)), "2023/12/31");
+}
+
+/// The contrast ratio the accessibility floor is written in, as the render tests do it.
+fn contrast(a: &str, b: &str) -> f32 {
+    let l = |c: &str| {
+        let c = sgraffito::canvas::parse_hex(c);
+        let channel = |v: u8| {
+            let v = v as f32 / 255.0;
+            if v <= 0.03928 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(c[0]) + 0.7152 * channel(c[1]) + 0.0722 * channel(c[2])
+    };
+    let (a, b) = (l(a), l(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+#[test]
+fn every_palette_colour_can_be_read_on_a_note() {
+    // No single ink works on all five — light on the yellow is 1.4:1 and dark on the red is 3.5:1 —
+    // so the pair is chosen by the background, and every pair has to clear the floor.
+    for background in PALETTE {
+        let ink = note_ink(background);
+        let ratio = contrast(ink, background);
+        assert!(ratio >= 4.5, "{background} with {ink} is only {ratio:.2}:1");
+    }
+}
+
+#[test]
+fn a_note_is_hit_by_its_body_but_ink_on_it_wins() {
+    let mut a = OutputAnnotations {
+        strokes: vec![],
+        texts: vec![],
+        shapes: vec![],
+        notes: vec![Note::new(100.0, 100.0, "#f6d32d", "2026/10/14".into())],
+    };
+    // Anywhere in the square is a press on the note.
+    assert_eq!(a.hit(150.0, 150.0, ERASER_THRESHOLD), Some(ItemId::Note(0)));
+    assert_eq!(
+        a.hit(101.0, 101.0, ERASER_THRESHOLD),
+        Some(ItemId::Note(0)),
+        "the note has no outline to aim at, unlike a shape"
+    );
+    // A stroke drawn across it wins the press, so a line stuck to a note can be erased on its own.
+    a.strokes.push(stroke_at(150.0, 150.0));
+    assert_eq!(
+        a.hit(150.0, 150.0, ERASER_THRESHOLD),
+        Some(ItemId::Stroke(0))
+    );
+    // And erasing the note takes it whole.
+    assert!(a.erase(250.0, 150.0, ERASER_THRESHOLD).is_some());
+    assert!(a.notes.is_empty() && a.strokes.len() == 1);
+}
+
+#[test]
+fn a_note_grows_to_hold_its_text_and_keeps_its_padding() {
+    let mut note = Note::new(40.0, 60.0, "#f6d32d", "2026/10/14".into());
+    let box_ = note.text_box();
+    assert_eq!(box_.x, 40.0 + NOTE_PADDING);
+    assert_eq!(box_.y, 60.0 + NOTE_PADDING);
+    assert_eq!(box_.w, note.w - 2.0 * NOTE_PADDING);
+    // The text box leaves the date's line at the bottom, so the date never sits on the text.
+    assert!(
+        box_.y + box_.h <= note.date_box().y,
+        "the text's box never runs into the date's line"
+    );
+    // A note never shrinks below its minimum, however little text it holds.
+    assert_eq!(note.height_for(0.0), sgraffito::canvas::NOTE_MIN_SIZE);
+    // And it grows by the text it has to hold.
+    let grown = note.height_for(300.0);
+    assert!(grown > note.h);
+    note.h = grown;
+    assert!(note.text_box().h >= 300.0);
+    // The date sits inside the note, in the bottom-right corner.
+    let date = note.date_box();
+    assert!(date.x >= note.x + NOTE_PADDING && date.y + date.h <= note.y + note.h);
+}
+
+#[test]
+fn a_note_moves_and_resizes_as_one_thing() {
+    let note = Note::new(100.0, 200.0, "#3584e4", "2026/10/14".into());
+    let moved = Transform::Translate {
+        dx: 30.0,
+        dy: -50.0,
+    }
+    .note(&note);
+    assert_eq!((moved.x, moved.y), (130.0, 150.0));
+    assert_eq!(
+        (moved.w, moved.h),
+        (note.w, note.h),
+        "a move keeps its size"
+    );
+    assert_eq!(moved.color, note.color);
+    assert_eq!(moved.created, note.created);
+    let scaled = Transform::Scale {
+        anchor: [100.0, 200.0],
+        sx: 0.25,
+        sy: 3.0,
+    }
+    .note(&note);
+    // It shrinks to its minimum rather than to nothing, so a resize cannot make it unusable.
+    assert_eq!(scaled.w, sgraffito::canvas::NOTE_MIN_SIZE);
+    assert_eq!(scaled.h, note.h * 3.0);
+    // A marquee takes a note when it wholly contains it.
+    let a = OutputAnnotations {
+        strokes: vec![],
+        texts: vec![],
+        shapes: vec![],
+        notes: vec![note.clone()],
+    };
+    let marquee = note.bounds().grown(1.0);
+    assert_eq!(marquee_select(&a, marquee), vec![ItemId::Note(0)]);
+    assert!(
+        marquee_select(
+            &a,
+            Rect {
+                x: 150.0,
+                y: 200.0,
+                w: 20.0,
+                h: 20.0
+            }
+        )
+        .is_empty()
+    );
 }

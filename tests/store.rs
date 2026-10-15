@@ -35,6 +35,7 @@ fn sample() -> Doc {
                 from: [30.0, 400.0],
                 to: [180.0, 260.0],
             }],
+            notes: vec![],
         },
     );
     doc
@@ -71,7 +72,7 @@ fn saved_file_has_version_and_output_buckets() {
     let p = dir.join("annotations.json");
     store::save(&p, &sample()).unwrap();
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-    assert_eq!(v["version"], 2);
+    assert_eq!(v["version"], 3);
     assert_eq!(v["outputs"]["eDP-1"]["strokes"][0]["points"][0][0], 12.0);
     assert_eq!(v["outputs"]["eDP-1"]["texts"][0]["text"], "买牛奶"); // CJK survives the round trip
     // A shape is two points and a kind, however large it would be drawn: no samples, no box.

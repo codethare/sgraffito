@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use calloop::ping::Ping;
 use smithay_client_toolkit::{
@@ -42,9 +42,10 @@ use wayland_client::{
 };
 
 use crate::canvas::{
-    Doc, ERASER_THRESHOLD, Gesture, Grab, Handle, ItemId, OutputAnnotations, Overlay, Press, Rect,
-    Selection, Shape, ShapeKind, TEXT_SIZE_MAX, TEXT_SIZE_MIN, TextBuffer, TextItem, TextOverlay,
-    Toolbar, Transform, View, marquee_select, selection_bounds, selection_frame, selection_press,
+    Doc, ERASER_THRESHOLD, Gesture, Grab, Handle, ItemId, Note, OutputAnnotations, Overlay, Press,
+    Rect, Selection, Shape, ShapeKind, TEXT_SIZE_MAX, TEXT_SIZE_MIN, TextBuffer, TextItem,
+    TextOverlay, Toolbar, Transform, View, date_stamp, marquee_select, selection_bounds,
+    selection_frame, selection_press,
 };
 
 pub use crate::canvas::{PALETTE, Tool, ToolbarAction};
@@ -1245,7 +1246,47 @@ impl App {
             // reports the commit damages it and fills the rest from the raster.
             let previous = out.last_text_bounds;
             out.last_text_bounds = None;
-            let box_ = previous.unwrap_or_default();
+            // The cached box is screen-space and the item's own is canvas, so the union is taken on
+            // screen: mixing them would damage the wrong region at any zoom but 1:1.
+            let view = out.view;
+            let (scale, bucket) = (out.scale, out.bucket(id).into_owned());
+            let mut box_ = previous.unwrap_or_default();
+            // A note being edited is content: its text goes back into the note, with the height the
+            // wrapped text needs, and a note left empty is dropped as an empty text box is.
+            if let Some(index) = edit.note {
+                let note = self
+                    .doc
+                    .outputs
+                    .get(&bucket)
+                    .and_then(|ann| ann.notes.get(index))
+                    .cloned();
+                let Some(mut note) = note else { continue };
+                box_ = box_.union(view.screen_rect(note.bounds()));
+                let text = edit.buffer.text.clone();
+                if let Some(ann) = self.doc.outputs.get_mut(&bucket) {
+                    if text.trim().is_empty() {
+                        if index < ann.notes.len() {
+                            ann.notes.remove(index);
+                        }
+                    } else {
+                        let needed =
+                            self.renderer
+                                .wrapped_text_height(&text, &note, Screen { scale, view });
+                        note.text = text;
+                        note.h = note.height_for(needed);
+                        box_ = box_.union(view.screen_rect(note.bounds()));
+                        if index < ann.notes.len() {
+                            ann.notes[index] = note;
+                        }
+                    }
+                }
+                out.pending = Some(match out.pending {
+                    Some(pending) => pending.union(box_),
+                    None => box_,
+                });
+                changed = true;
+                continue;
+            }
             if edit.buffer.text.is_empty() {
                 out.pending = Some(match out.pending {
                     Some(pending) => pending.union(box_),
@@ -1253,10 +1294,9 @@ impl App {
                 });
                 continue;
             }
-            let bucket = out.bucket(id).into_owned();
             let mut item = edit.item.clone();
             item.text = edit.buffer.text.clone();
-            let box_ = box_.union(item.paint_bounds());
+            box_ = box_.union(view.screen_rect(item.paint_bounds()));
             out.pending = Some(match out.pending {
                 Some(pending) => pending.union(box_),
                 None => box_,
@@ -1302,6 +1342,17 @@ impl App {
                     .contains(x, y)
             })
         });
+        // A note is a thing you write in, so the text tool enters it rather than dropping a text box on
+        // top of it.
+        let on_note = self
+            .doc
+            .outputs
+            .get(bucket.as_ref())
+            .and_then(|ann| ann.notes.iter().position(|n| n.bounds().contains(x, y)));
+        if let Some(index) = on_note {
+            self.enter_note(key, index);
+            return;
+        }
         let (item, index) = match existing {
             Some(idx) => (
                 self.doc.outputs[bucket.as_ref()].texts[idx].clone(),
@@ -1331,6 +1382,7 @@ impl App {
                 buffer: TextBuffer::new(item.text.clone()),
                 item,
                 index,
+                note: None,
                 preedit: String::new(),
             });
             out.text_dirty = false;
@@ -1357,6 +1409,122 @@ impl App {
             from: [x, y],
             to: [x, y],
         });
+    }
+
+    /// Grow the note being typed in to hold its text. Measured through the renderer, because the height
+    /// a wrapped text needs is a font question; the pure layer only stores the height it is given. The
+    /// overlay's item follows the note's box, so the caret and the measured bounds move with it.
+    pub(crate) fn grow_note(&mut self) {
+        let job = self.outputs.iter().find_map(|(key, out)| {
+            let edit = out.overlay.text.as_ref()?;
+            Some((
+                *key,
+                edit.note?,
+                out.scale,
+                out.view,
+                edit.buffer.text.clone(),
+            ))
+        });
+        let Some((key, index, scale, view, text)) = job else {
+            return;
+        };
+        let Some(bucket) = self
+            .outputs
+            .get(&key)
+            .map(|out| out.bucket(key).into_owned())
+        else {
+            return;
+        };
+        let Some(note) = self
+            .doc
+            .outputs
+            .get(&bucket)
+            .and_then(|ann| ann.notes.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        let needed = self
+            .renderer
+            .wrapped_text_height(&text, &note, Screen { scale, view });
+        let mut updated = note;
+        updated.h = updated.height_for(needed);
+        if let Some(ann) = self.doc.outputs.get_mut(&bucket)
+            && let Some(slot) = ann.notes.get_mut(index)
+        {
+            *slot = updated.clone();
+        }
+        if let Some(out) = self.outputs.get_mut(&key)
+            && let Some(edit) = out.overlay.text.as_mut()
+        {
+            edit.item = updated.text_item();
+        }
+    }
+
+    /// Create a note at a point and put the caret in it, or enter the note that is already there: a
+    /// press on an existing note must not stack another one on top of it.
+    pub(crate) fn begin_note(&mut self, key: &u32, x: f32, y: f32) {
+        let id = *key;
+        let Some(out) = self.outputs.get(key) else {
+            return;
+        };
+        let bucket = out.bucket(id).into_owned();
+        let existing = self
+            .doc
+            .outputs
+            .get(&bucket)
+            .and_then(|ann| ann.notes.iter().position(|n| n.bounds().contains(x, y)));
+        let index = match existing {
+            Some(index) => index,
+            None => {
+                let note = Note::new(x, y, PALETTE[self.color_idx], date_stamp(SystemTime::now()));
+                let ann = self.doc.outputs.entry(bucket).or_default();
+                ann.notes.push(note);
+                ann.notes.len() - 1
+            }
+        };
+        log(&format!(
+            "note edit on {}",
+            if existing.is_some() {
+                "an existing note"
+            } else {
+                "a new note"
+            }
+        ));
+        self.enter_note(key, index);
+    }
+
+    /// Edit a note's text through the same overlay a text box uses, with the overlay naming the note so
+    /// that the caret, the preedit, the input method and the commit all know where the text belongs.
+    fn enter_note(&mut self, key: &u32, index: usize) {
+        let id = *key;
+        let Some(out) = self.outputs.get(key) else {
+            return;
+        };
+        let bucket = out.bucket(id).into_owned();
+        let Some(note) = self
+            .doc
+            .outputs
+            .get(&bucket)
+            .and_then(|ann| ann.notes.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        if let Some(out) = self.outputs.get_mut(key) {
+            out.overlay.text = Some(TextOverlay {
+                buffer: TextBuffer::new(note.text.clone()),
+                item: note.text_item(),
+                index: None,
+                note: Some(index),
+                preedit: String::new(),
+            });
+            out.text_dirty = false;
+            out.last_text_bounds = None;
+            out.dirty = true;
+        }
+        self.dirty = true;
+        self.sync_text_input();
     }
 
     /// Handle one command from the socket and return the response line.
@@ -1788,6 +1956,8 @@ pub fn tool_cursor(tool: Tool) -> CursorShape {
         Tool::Text => CursorShape::Text,
         // The hand tool's gesture is a pan, and the grab shapes say exactly that.
         Tool::Hand => CursorShape::Grab,
+        // The note tool reads as text, because the next thing that happens is typing.
+        Tool::Note => CursorShape::Text,
         // The selection tool creates nothing of its own, so the pointer stays the plain arrow
         // until it is over something it would act on.
         Tool::Selection => CursorShape::Default,

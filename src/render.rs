@@ -4,7 +4,7 @@
 
 use std::borrow::Cow;
 
-use cosmic_text::{Attrs, Buffer, Color, FontSystem, Metrics, Shaping, SwashCache};
+use cosmic_text::{Attrs, Buffer, Color, FontSystem, Metrics, Shaping, SwashCache, Wrap};
 use tiny_skia::{
     Color as SkColor, LineCap, LineJoin, Paint, PathBuilder, Pixmap, PixmapMut,
     PremultipliedColorU8, Stroke as SkStroke, Transform,
@@ -12,9 +12,9 @@ use tiny_skia::{
 use wayland_client::protocol::wl_shm::Format;
 
 use crate::canvas::{
-    Handle, ItemId, OutputAnnotations, Overlay, PALETTE, Rect, SELECT_HANDLE, SELECT_ROTATE_GAP,
-    Shape, ShapeKind, Stroke, TextItem, TextOverlay, Tool, Toolbar, ToolbarAction, View, rect_of,
-    rotate_handle, selection_frame,
+    Handle, ItemId, NOTE_DATE_SIZE, NOTE_RADIUS, Note, OutputAnnotations, Overlay, PALETTE, Rect,
+    SELECT_HANDLE, SELECT_ROTATE_GAP, Shape, ShapeKind, Stroke, TextItem, TextOverlay, Tool,
+    Toolbar, ToolbarAction, View, parse_hex, rect_of, rotate_handle, selection_frame,
 };
 /// Radius of the eraser marker circle, in logical pixels.
 const ERASER_MARKER_RADIUS: f32 = 8.0;
@@ -54,11 +54,11 @@ const ICON_INSET: f32 = 7.0;
 /// of the drawn rail. The strip is damaged whenever the rail changes, and joins a transient
 /// damage box that reaches it.
 const TOOLBAR_RESERVE: f32 = 224.0;
-/// Height of the whole column: nineteen blocks, fifteen gaps inside the groups and three between
-/// them, all fixed, so the column's height never depends on the font, unlike the width a
-/// stretched block takes.
+/// Height of the whole column: twenty blocks, sixteen gaps inside the groups and three between them,
+/// all fixed, so the column's height never depends on the font, unlike the width a stretched block
+/// takes.
 const TOOLBAR_COLUMN: f32 =
-    2.0 * TOOLBAR_PAD + 19.0 * TOOLBAR_BLOCK + 15.0 * TOOLBAR_GAP + 3.0 * TOOLBAR_GROUP_GAP;
+    2.0 * TOOLBAR_PAD + 20.0 * TOOLBAR_BLOCK + 16.0 * TOOLBAR_GAP + 3.0 * TOOLBAR_GROUP_GAP;
 const TOOLBAR_CACHE_CAP: usize = 16;
 /// `#rrggbbaa`. The block fill stands in for a HUD material: a `wl_shm` layer surface cannot be
 /// blurred, so there is translucency but no real vibrancy. The alpha is the opacity that keeps
@@ -116,6 +116,7 @@ enum Icon {
     Larger,
     Lock,
     Hand,
+    Note,
 }
 
 /// What a canvas coordinate has to be multiplied by to become a device pixel: the output's scale, and
@@ -239,6 +240,7 @@ fn toolbar_blocks(toolbar: &Toolbar) -> Vec<Block> {
         (Tool::Line, Icon::Line, "line"),
         (Tool::Arrow, Icon::Arrow, "arrow"),
         (Tool::Hand, Icon::Hand, "hand: drag to pan"),
+        (Tool::Note, Icon::Note, "note"),
     ] {
         blocks.push(Block {
             mark: Mark::Icon(icon),
@@ -576,7 +578,12 @@ impl Renderer {
             draw_shape(&mut pixmap, s, screen);
         }
         if let Some(t) = &overlay.text {
-            self.draw_text(&mut pixmap, &t.item, screen, Some(t), None);
+            match t.note.and_then(|i| ann.notes.get(i)) {
+                // A note being typed in: its square and its date are content, so the whole note is
+                // drawn with the live text on it rather than the text alone.
+                Some(note) => self.draw_note(&mut pixmap, note, screen, Some(t)),
+                None => self.draw_text(&mut pixmap, &t.item, screen, Some(t), None, None),
+            }
         }
         // The elements a live gesture is dragging, at the position the gesture puts them. They are
         // the same copies the release writes into the document, so the preview cannot lie.
@@ -592,12 +599,24 @@ impl Renderer {
                     }
                     ItemId::Text(i) => {
                         if let Some(item) = ann.texts.get(*i) {
-                            self.draw_text(&mut pixmap, &transform.text(item), screen, None, None);
+                            self.draw_text(
+                                &mut pixmap,
+                                &transform.text(item),
+                                screen,
+                                None,
+                                None,
+                                None,
+                            );
                         }
                     }
                     ItemId::Shape(i) => {
                         if let Some(s) = ann.shapes.get(*i) {
                             draw_shape(&mut pixmap, &transform.shape(s), screen);
+                        }
+                    }
+                    ItemId::Note(i) => {
+                        if let Some(n) = ann.notes.get(*i) {
+                            self.draw_note(&mut pixmap, &transform.note(n), screen, None);
                         }
                     }
                 }
@@ -653,6 +672,14 @@ impl Renderer {
             Some(c) => SkColor::from_rgba8(c[0], c[1], c[2], c[3]),
             None => SkColor::TRANSPARENT,
         });
+        // Notes first: they are backgrounds, so the strokes, shapes and text drawn over them are
+        // visible on top and are what the pointer hits.
+        for (index, note) in ann.notes.iter().enumerate() {
+            if skip.contains(&ItemId::Note(index)) {
+                continue;
+            }
+            self.draw_note(pixmap, note, screen, None);
+        }
         for (index, s) in ann.strokes.iter().enumerate() {
             if skip.contains(&ItemId::Stroke(index)) {
                 continue;
@@ -675,7 +702,7 @@ impl Renderer {
             }
             let size = screen.len(item.size);
             if !text.matches(index, &item.text, size) {
-                let layout = self.prepare_text(&item.text, item, screen);
+                let layout = self.prepare_text(&item.text, item, screen, None);
                 text.insert(index, &item.text, size, layout);
             }
             if let Some(layout) = text.get_mut(index) {
@@ -807,6 +834,7 @@ impl Renderer {
                                 },
                                 None,
                                 None,
+                                None,
                             );
                         }
                         Mark::Swatch(_) => {}
@@ -833,6 +861,7 @@ impl Renderer {
                     },
                     None,
                     Some(ox + width),
+                    None,
                 );
             }
         }
@@ -955,10 +984,27 @@ impl Renderer {
     /// Shapes `text` at the size the view puts on screen. The prepared box comes back in **canvas**
     /// coordinates, because that is what a click and the selection frame measure; a caller that needs
     /// it on screen maps it through the view.
-    fn prepare_text(&mut self, text: &str, item: &TextItem, screen: Screen) -> PreparedText {
+    /// `wrap` is the width the text may occupy, in canvas units, or `None` for text that is clipped
+    /// rather than wrapped. A note passes its inner width; a text box passes nothing, so its long lines
+    /// run to the output's edge as they always have.
+    fn prepare_text(
+        &mut self,
+        text: &str,
+        item: &TextItem,
+        screen: Screen,
+        wrap: Option<f32>,
+    ) -> PreparedText {
         let size = screen.len(item.size);
         let mut buffer = Buffer::new_empty(Metrics::new(size, size * LINE_HEIGHT_SCALE));
-        buffer.set_size(None, None);
+        match wrap {
+            Some(width) => {
+                buffer.set_size(Some(screen.len(width)), None);
+                // Word wrapping, with the glyph as the fallback for a token wider than the box: a URL
+                // must not be drawn out of a note's side.
+                buffer.set_wrap(Wrap::WordOrGlyph);
+            }
+            None => buffer.set_size(None, None),
+        }
         buffer.set_text(text, &Attrs::new(), Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut self.font_system, false);
 
@@ -998,9 +1044,70 @@ impl Renderer {
     /// The region a text box's content occupies, which is what a click that re-enters it is
     /// tested against.
     pub fn text_edit_bounds(&mut self, text: &str, item: &TextItem, screen: Screen) -> Rect {
-        self.prepare_text(text, item, screen)
+        self.prepare_text(text, item, screen, None)
             .paint_bounds
             .grown(CURSOR_WIDTH)
+    }
+
+    /// Draw a note: its square, the text on it, and the day it was made. `edit` is the note being
+    /// typed in, whose live text and caret stand in for the committed text.
+    fn draw_note(
+        &mut self,
+        pixmap: &mut PixmapMut,
+        note: &Note,
+        screen: Screen,
+        edit: Option<&TextOverlay>,
+    ) {
+        let square = screen.rect(note.bounds());
+        round_rect(
+            pixmap,
+            square,
+            screen.len(NOTE_RADIUS),
+            parse_hex(&note.color),
+            Some((parse_hex(note.ink()), screen.ui(TOOLBAR_HAIRLINE))),
+        );
+        // The live text is the overlay's: a note that has become shorter must not leave the committed
+        // glyphs behind, so the caller leaves the note out of the raster while it is being edited.
+        let item = note.text_item();
+        self.draw_text(pixmap, &item, screen, edit, None, Some(note.text_box().w));
+        let date = toolbar_text(
+            0.0,
+            0.0,
+            NOTE_DATE_SIZE * LINE_HEIGHT_SCALE,
+            NOTE_DATE_SIZE,
+            note.ink(),
+            &note.created,
+        );
+        // Bottom-right, measured rather than estimated.
+        let width = self.text_width(&note.created, NOTE_DATE_SIZE);
+        let box_ = note.date_box();
+        let origin = screen.point([box_.x + box_.w - width, box_.y]);
+        let item = TextItem {
+            x: origin[0] / screen.scale,
+            y: origin[1] / screen.scale,
+            ..date
+        };
+        self.draw_text(
+            pixmap,
+            &item,
+            Screen {
+                scale: screen.scale,
+                view: View::default(),
+            },
+            None,
+            None,
+            None,
+        );
+    }
+
+    /// The height `text` needs when it wraps at `note`'s inner width, in canvas units. The daemon grows
+    /// the square by this as the text is typed, which is what keeps the text inside the note without the
+    /// pure layer having to lay text out.
+    pub fn wrapped_text_height(&mut self, text: &str, note: &Note, screen: Screen) -> f32 {
+        let item = note.text_item();
+        self.prepare_text(text, &item, screen, Some(note.text_box().w))
+            .paint_bounds
+            .h
     }
 
     /// `reveal` is the logical x a progress animation has uncovered: glyphs to its right are
@@ -1041,6 +1148,7 @@ impl Renderer {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_text(
         &mut self,
         pixmap: &mut PixmapMut,
@@ -1048,6 +1156,7 @@ impl Renderer {
         screen: Screen,
         edit: Option<&TextOverlay>,
         reveal: Option<f32>,
+        wrap: Option<f32>,
     ) {
         let (committed, preedit, caret) = match edit {
             Some(e) => (
@@ -1072,7 +1181,7 @@ impl Renderer {
         if display.is_empty() && edit.is_none() {
             return;
         }
-        let mut prepared = self.prepare_text(display.as_ref(), item, screen);
+        let mut prepared = self.prepare_text(display.as_ref(), item, screen, wrap);
         let geometry = caret_geometry(&prepared, caret.unwrap_or(committed.len()), preedit.len());
         self.draw_prepared_text(pixmap, item, screen, &mut prepared, reveal);
 
@@ -1548,6 +1657,22 @@ fn draw_icon(pixmap: &mut PixmapMut, icon: Icon, square: Rect, scale: f32, color
         );
         return;
     }
+    if icon == Icon::Note {
+        // A note: a rounded square with two lines of text on it. `fraction` is where the line sits
+        // down the icon: naming it `y` would shadow the box's own top and draw at the pixmap's corner.
+        for (fraction, width) in [(0.32, 0.64), (0.5, 0.48)] {
+            let mut line = PathBuilder::new();
+            line.move_to(x + w * 0.18, y + h * fraction);
+            line.line_to(x + w * (0.18 + width), y + h * fraction);
+            if let Some(path) = line.finish() {
+                pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+            }
+        }
+        if let Some(square) = rounded_rect_path(box_, 3.0 * scale) {
+            pixmap.stroke_path(&square, &paint, &stroke, Transform::identity(), None);
+        }
+        return;
+    }
     if icon == Icon::Hand {
         // A palm with three fingers and a thumb: a hand, drawn in the same stroke language as the
         // rest of the set.
@@ -1650,6 +1775,7 @@ fn draw_icon(pixmap: &mut PixmapMut, icon: Icon, square: Rect, scale: f32, color
         }
         // Drawn by the branches above.
         Icon::Pen
+        | Icon::Note
         | Icon::Hand
         | Icon::Circle
         | Icon::Rect
@@ -1894,17 +2020,6 @@ fn fill(pixmap: &mut PixmapMut, x: f32, y: f32, w: f32, h: f32, color: Color) {
     );
 }
 
-/// `#rrggbb` or `#rrggbbaa` to RGBA bytes.
-fn parse_hex(s: &str) -> [u8; 4] {
-    let hex = s.trim_start_matches('#');
-    let v = u32::from_str_radix(hex, 16).unwrap_or(0xff_ffff);
-    match hex.len() {
-        8 => [(v >> 24) as u8, (v >> 16) as u8, (v >> 8) as u8, v as u8],
-        6 => [(v >> 16) as u8, (v >> 8) as u8, v as u8, 255],
-        _ => [255, 255, 255, 255],
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1959,6 +2074,7 @@ mod tests {
             }],
             texts: vec![text_item("cached text")],
             shapes: vec![],
+            notes: vec![],
         }
     }
 
@@ -1970,6 +2086,7 @@ mod tests {
             strokes: vec![],
             texts: vec![text_item("cached text")],
             shapes: vec![],
+            notes: vec![],
         };
         let mut cold = vec![0; 200 * 100 * 4];
         let mut warm = vec![0; 200 * 100 * 4];
@@ -2069,6 +2186,7 @@ mod tests {
             strokes: vec![],
             texts: vec![text_item("before")],
             shapes: vec![],
+            notes: vec![],
         };
         let mut first = vec![0; 200 * 100 * 4];
         render_cached(&mut renderer, &mut cache, &annotations, &mut first);
@@ -2131,6 +2249,7 @@ mod tests {
                 item: item.clone(),
                 buffer: TextBuffer::new("new text"),
                 index: None,
+                note: None,
                 preedit: String::new(),
             }),
             ..Default::default()
@@ -2171,6 +2290,7 @@ mod tests {
             strokes: vec![],
             texts: vec![text_item("before")],
             shapes: vec![],
+            notes: vec![],
         };
         let mut new_document = old_document.clone();
         new_document.texts[0].text = "after".into();
@@ -2178,6 +2298,7 @@ mod tests {
             item: old_document.texts[0].clone(),
             buffer: TextBuffer::new("after"),
             index: Some(0),
+            note: None,
             preedit: String::new(),
         };
         let overlay = Overlay {
@@ -2204,6 +2325,7 @@ mod tests {
                 item: new_document.texts[0].clone(),
                 buffer: TextBuffer::new("after"),
                 index: None,
+                note: None,
                 preedit: String::new(),
             }),
             ..Default::default()
@@ -2314,6 +2436,7 @@ mod tests {
             strokes: vec![],
             texts: vec![],
             shapes: vec![shape.clone()],
+            notes: vec![],
         };
         let live = Overlay {
             shape: Some(shape.clone()),
@@ -2441,7 +2564,7 @@ mod tests {
                 assert!(ink > 0, "{icon:?} drew nothing at scale {scale}");
             }
             assert_eq!(
-                icons, 13,
+                icons, 14,
                 "every function has an icon, and only functions do"
             );
         }
@@ -2472,10 +2595,11 @@ mod tests {
             "L" => Some(Keysym::L),
             "A" => Some(Keysym::A),
             "H" => Some(Keysym::H),
+            "N" => Some(Keysym::N),
             _ => None,
         };
         let blocks = toolbar_blocks(&rail_state());
-        assert_eq!(blocks.len(), 19);
+        assert_eq!(blocks.len(), 20);
         let mut stated = 0;
         for block in &blocks {
             let Some(action) = block.action else {
@@ -2502,7 +2626,7 @@ mod tests {
             };
             assert!(applies, "'{}' names a key that does not do it", block.label);
         }
-        // Eighteen blocks apply something: five colours, ten tools, two size steps and lock.
-        assert_eq!(stated, 18);
+        // Nineteen blocks apply something: five colours, eleven tools, two size steps and lock.
+        assert_eq!(stated, 19);
     }
 }

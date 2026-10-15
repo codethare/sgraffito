@@ -10,11 +10,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::canvas::{Doc, OutputAnnotations};
 
-/// The version this daemon writes. Version 1 had no `shapes` list; version 2 adds one. Both are
+/// The version this daemon writes. Version 1 had no `shapes` list, version 2 adds that, and version 3
+/// adds the `notes` list. All of them are
 /// read, because a version 1 file is a version 2 file with no shapes in it, and an older build
 /// reading a version 2 file would silently drop every shape on its next save — which is what the
 /// number is for.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 /// The oldest version whose files still load.
 pub const MIN_VERSION: u32 = 1;
 pub const DEBOUNCE: Duration = Duration::from_secs(1);

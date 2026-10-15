@@ -45,7 +45,7 @@ done
 export WAYLAND_DISPLAY="$sock"
 
 cat > "$XDG_DATA_HOME/sgraffito/annotations.json" <<'JSON'
-{"version":2,"outputs":{"HEADLESS-1":{"strokes":[{"color":"#e01b24","width":8,"points":[[100,300],[700,300]]}],"texts":[{"x":100,"y":100,"color":"#ffffff","size":40,"text":"hi 你好"}],"shapes":[{"kind":"circle","color":"#33d17a","width":6,"from":[500,430],"to":[700,560]}]},"HEADLESS-2":{"strokes":[{"color":"#e01b24","width":8,"points":[[50,75],[150,75]]}],"texts":[]}}}
+{"version":3,"outputs":{"HEADLESS-1":{"strokes":[{"color":"#e01b24","width":8,"points":[[100,300],[700,300]]}],"texts":[{"x":100,"y":100,"color":"#ffffff","size":40,"text":"hi 你好"}],"shapes":[{"kind":"circle","color":"#33d17a","width":6,"from":[500,430],"to":[700,560]}],"notes":[{"x":300,"y":180,"w":220,"h":120,"color":"#f6d32d","text":"a sticky note that wraps its text inside the square","created":"2026/10/14"}]},"HEADLESS-2":{"strokes":[{"color":"#e01b24","width":8,"points":[[50,75],[150,75]]}],"texts":[]}}}
 JSON
 
 "$bin" daemon > "$work/daemon.log" 2>&1 &
@@ -75,7 +75,11 @@ green = sum(1 for j in range(0, len(px), 3) if px[j+1] > 120 and px[j] < 100 and
 assert red > 1000, f"no red line drawn while locked (red={red})"
 assert ink > red, f"text was not rendered (ink={ink}, red={red})"
 assert green > 200, f"the shape was not rendered (green={green})"
-print(f"  rendering ok: red={red} green={green} ink={ink}")
+# The note's own colour, so a note that did not render cannot hide behind the wallpaper.
+note = sum(1 for j in range(0, len(px), 3)
+           if px[j] > 200 and px[j + 1] > 170 and px[j + 2] < 120)
+assert note > 2000, f"the sticky note was not rendered (note={note})"
+print(f"  rendering ok: red={red} green={green} note={note} ink={ink}")
 PY
 
 # 1b. the output scale reaches the compositor: on the scale-2 output a stroke between logical
@@ -199,7 +203,7 @@ python3 -c "
 import json,os
 p=os.environ['XDG_DATA_HOME']+'/sgraffito/annotations.json'
 d=json.load(open(p))
-assert d['version']==2, d['version']
+assert d['version']==3, d['version']
 assert d['outputs']=={}, d
 print('  file empty after clear ok')
 "

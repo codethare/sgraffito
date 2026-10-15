@@ -1,6 +1,6 @@
 use sgraffito::canvas::{
-    Doc, ERASER_THRESHOLD, OutputAnnotations, Overlay, PALETTE, Rect, Shape, ShapeKind, Stroke,
-    TextBuffer, TextItem, TextOverlay, Tool, Toolbar, ToolbarAction, View,
+    Doc, ERASER_THRESHOLD, Note, OutputAnnotations, Overlay, PALETTE, Rect, Shape, ShapeKind,
+    Stroke, TextBuffer, TextItem, TextOverlay, Tool, Toolbar, ToolbarAction, View,
 };
 use sgraffito::render::{
     DamageRegion, FrameCache, Renderer, Screen, buffer_format, toolbar_bounds, transient_bounds,
@@ -39,6 +39,7 @@ fn ann(strokes: Vec<Stroke>, texts: Vec<TextItem>) -> OutputAnnotations {
         strokes,
         texts,
         shapes: vec![],
+        notes: vec![],
     }
 }
 
@@ -186,6 +187,7 @@ fn overlay_text_box_draws_text_and_cursor() {
             },
             buffer: TextBuffer::new("ab"),
             index: None,
+            note: None,
             preedit: String::new(),
         }),
         ..Default::default()
@@ -220,6 +222,7 @@ fn the_caret_spans_the_whole_line_box() {
             },
             buffer: TextBuffer::new(""),
             index: None,
+            note: None,
             preedit: String::new(),
         }),
         ..Default::default()
@@ -261,6 +264,7 @@ fn preedit_renders_more_ink_than_committed_text_alone() {
             item: item.clone(),
             buffer: TextBuffer::new("ab"),
             index: None,
+            note: None,
             preedit: preedit.into(),
         }),
         ..Default::default()
@@ -550,6 +554,7 @@ fn every_block_of_the_rail_is_reachable_and_no_row_is_a_gap() {
         Tool::Line,
         Tool::Arrow,
         Tool::Hand,
+        Tool::Note,
     ] {
         assert!(actions.contains(&ToolbarAction::Tool(tool)), "{tool:?}");
     }
@@ -571,9 +576,9 @@ fn every_block_of_the_rail_is_reachable_and_no_row_is_a_gap() {
         ToolbarAction::Lock,
         "Esc is not last"
     );
-    // Eighteen clickable blocks: five colours, ten tools, `[`, `]` and `Esc`. The size readout is
+    // Nineteen clickable blocks: five colours, eleven tools, `[`, `]` and `Esc`. The size readout is
     // drawn between the two size keys but owned by `[`, so it is not one of them.
-    assert_eq!(actions.len(), 18, "a drawn block cannot be hit");
+    assert_eq!(actions.len(), 19, "a drawn block cannot be hit");
     // Outside the rail the toolbar takes nothing: those presses are drawing gestures.
     let band = toolbar_bounds(w, h);
     assert_eq!(
@@ -1232,6 +1237,7 @@ fn edit_frame(w: u32, h: u32, text: &str, cursor: usize, preedit: &str) -> Vec<u
                 cursor,
             },
             index: None,
+            note: None,
             preedit: preedit.into(),
         }),
         ..Default::default()
@@ -1635,6 +1641,7 @@ fn a_panned_and_zoomed_frame_puts_the_drawing_where_the_view_says() {
         }],
         texts: vec![],
         shapes: vec![],
+        notes: vec![],
     };
     let view = View {
         zoom: 2.0,
@@ -1693,6 +1700,7 @@ fn the_default_view_draws_what_no_view_drew() {
             from: [200.0, 150.0],
             to: [300.0, 250.0],
         }],
+        notes: vec![],
     };
     let overlay = Overlay {
         toolbar: Some(rail()),
@@ -1714,4 +1722,72 @@ fn the_default_view_draws_what_no_view_drew() {
         &[],
     );
     assert_eq!(plain, cached);
+}
+
+#[test]
+fn a_note_draws_its_text_inside_its_square_and_nowhere_else() {
+    // The user's rule for a sticky note: the text never leaves the square, it wraps instead. Comparing
+    // the same note with and without text shows exactly where the text went, whatever colours it uses.
+    let (w, h) = (600u32, 400u32);
+    let view = View::default();
+    let text = "buy milk and bread and eggs and coffee and tea and rice and beans and more";
+    let mut note = Note::new(60.0, 40.0, PALETTE[1], "2026/10/14".into());
+    note.w = 200.0;
+    let mut renderer = Renderer::new();
+    // Grow the square the way the daemon does, then render it.
+    let needed = renderer.wrapped_text_height(text, &note, Screen { scale: 1.0, view });
+    note.h = note.height_for(needed);
+    note.text = text.into();
+    let mut empty = note.clone();
+    empty.text = String::new();
+    empty.h = note.h;
+    let draw = |note: &Note| {
+        let ann = OutputAnnotations {
+            strokes: vec![],
+            texts: vec![],
+            shapes: vec![],
+            notes: vec![note.clone()],
+        };
+        let mut buf = buffer(w, h);
+        Renderer::new().render(&mut buf, w, h, 1.0, view, &ann, &Overlay::default(), None);
+        buf
+    };
+    let (with, without) = (draw(&note), draw(&empty));
+    let square = note.bounds().grown(1.5);
+    let mut outside = 0;
+    for (i, (a, b)) in with.chunks(4).zip(without.chunks(4)).enumerate() {
+        if a == b {
+            continue;
+        }
+        let (x, y) = ((i as u32 % w) as f32, (i as u32 / w) as f32);
+        if !square.contains(x, y) {
+            outside += 1;
+        }
+    }
+    assert_eq!(outside, 0, "the note's text was drawn outside its square");
+
+    // Wrapping means the text needs more than one line: a wide note is shorter than a narrow one with
+    // the same words, and both are taller than a single line.
+    let mut narrow = note.clone();
+    narrow.w = 90.0;
+    let mut wide = note.clone();
+    wide.w = 400.0;
+    let mut renderer = Renderer::new();
+    let line = renderer.wrapped_text_height("one line", &note, Screen { scale: 1.0, view });
+    let tall = renderer.wrapped_text_height(text, &narrow, Screen { scale: 1.0, view });
+    let flat = renderer.wrapped_text_height(text, &wide, Screen { scale: 1.0, view });
+    assert!(
+        tall > flat,
+        "a narrow note wraps into more lines: {tall} vs {flat}"
+    );
+    assert!(flat > line, "the same words need more than one line");
+
+    // The square is really painted: its middle is the note's colour and not the scrim behind it.
+    let i = (((note.y + note.h / 2.0) as u32 * w) + (note.x + note.w - 4.0) as u32) as usize * 4;
+    let note_colour = sgraffito::canvas::parse_hex(&note.color);
+    assert!(
+        with[i] > note_colour[0].saturating_sub(40),
+        "the note's fill is missing: {:?}",
+        &with[i..i + 4]
+    );
 }

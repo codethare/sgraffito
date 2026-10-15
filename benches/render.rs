@@ -35,6 +35,7 @@ fn document(stroke_count: usize, width: f32, height: f32) -> OutputAnnotations {
             text: "benchmark note".into(),
         }],
         shapes: vec![],
+        notes: vec![],
     }
 }
 
@@ -58,6 +59,7 @@ fn text_overlay(width: f32, height: f32, preedit: &str) -> Overlay {
             },
             buffer: TextBuffer::new("benchmark"),
             index: None,
+            note: None,
             preedit: preedit.into(),
         }),
         ..Default::default()

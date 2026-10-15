@@ -44,6 +44,79 @@ const ELLIPSE_SEGMENTS: usize = 96;
 /// Built-in palette (`#rrggbb`).
 pub const PALETTE: [&str; 5] = ["#e01b24", "#f6d32d", "#33d17a", "#3584e4", "#ffffff"];
 
+/// A `#rrggbb` or `#rrggbbaa` colour as its four channels. Anything else is white, which is what the
+/// palette's last entry is: a colour that cannot be parsed is not worth a panic in a drawing program.
+pub fn parse_hex(s: &str) -> [u8; 4] {
+    let hex = s.trim_start_matches('#');
+    let v = u32::from_str_radix(hex, 16).unwrap_or(0xff_ffff);
+    match hex.len() {
+        8 => [(v >> 24) as u8, (v >> 16) as u8, (v >> 8) as u8, v as u8],
+        6 => [(v >> 16) as u8, (v >> 8) as u8, v as u8, 255],
+        _ => [255, 255, 255, 255],
+    }
+}
+
+/// How bright a colour is, on the sRGB scale the contrast ratio is defined on.
+fn luminance(color: &str) -> f32 {
+    let c = parse_hex(color);
+    let channel = |v: u8| {
+        let v = v as f32 / 255.0;
+        if v <= 0.03928 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * channel(c[0]) + 0.7152 * channel(c[1]) + 0.0722 * channel(c[2])
+}
+
+/// The ink a note's text and date are drawn in: the dark ink on a light background, the light ink on a
+/// dark one. No single colour can be read on all five palette entries — light ink on the yellow is
+/// 1.4:1 and dark ink on the red is 3.5:1 — so the pair is chosen rather than fixed, and the threshold
+/// sits between the red's brightness and the blue's. `tests/canvas_hit.rs` holds every pair above
+/// 4.5:1.
+const NOTE_INK_DARK: &str = "#1c1c1c";
+const NOTE_INK_LIGHT: &str = "#ffffff";
+const NOTE_INK_THRESHOLD: f32 = 0.2;
+
+pub fn note_ink(background: &str) -> &'static str {
+    if luminance(background) > NOTE_INK_THRESHOLD {
+        NOTE_INK_DARK
+    } else {
+        NOTE_INK_LIGHT
+    }
+}
+
+// --- the creation date ----------------------------------------------------------------
+
+/// A moment as the civil date `yyyy/mm/dd`. **UTC**: this crate has no timezone database and the
+/// project's rule is that a few lines beat a dependency, so a note made late in the evening east of
+/// Greenwich carries tomorrow's date. That is in the README's limitations.
+pub fn date_stamp(at: std::time::SystemTime) -> String {
+    let days = at
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64 / 86_400)
+        .unwrap_or(0);
+    let (year, month, day) = civil_from_days(days);
+    format!("{year:04}/{month:02}/{day:02}")
+}
+
+/// Days since 1970-01-01 to a civil date, by Howard Hinnant's algorithm: shift the epoch to March so
+/// the leap day is at the end of the year, then count eras of 400 years, years within the era, and days
+/// within the year.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if month <= 2 { y + 1 } else { y }, month, day)
+}
+
 /// The tool the next gesture uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
@@ -58,6 +131,8 @@ pub enum Tool {
     Arrow,
     /// Pans the canvas and nothing else: it is the one tool whose gesture cannot touch the document.
     Hand,
+    /// Creates a sticky note and puts the caret in it.
+    Note,
 }
 
 /// What clicking one control of the edit-mode toolbar does. Each variant has exactly the
@@ -93,6 +168,7 @@ impl Tool {
             Tool::Line => "L",
             Tool::Arrow => "A",
             Tool::Hand => "H",
+            Tool::Note => "N",
         }
     }
 }
@@ -113,6 +189,104 @@ pub struct TextItem {
     pub color: String,
     pub size: f32,
     pub text: String,
+}
+
+/// Padding between a note's text and its edges, its smallest side, the size a click creates, and the
+/// corner radius a note is drawn with. A note's typography is its own: it is a fixed object rather than
+/// a text box that happens to be square.
+pub const NOTE_PADDING: f32 = 12.0;
+pub const NOTE_MIN_SIZE: f32 = 96.0;
+pub const NOTE_SIZE: f32 = 180.0;
+pub const NOTE_RADIUS: f32 = 8.0;
+pub const NOTE_TEXT_SIZE: f32 = 18.0;
+pub const NOTE_DATE_SIZE: f32 = 11.0;
+/// The line the date sits on, which the text box leaves room for at the bottom.
+pub const NOTE_DATE_LINE: f32 = NOTE_DATE_SIZE * 1.4;
+
+/// A sticky note: a rounded square filled with a colour, the text written on it, and the day it was
+/// made. One element rather than a shape plus a text box, because a shape has no fill, a text box has no
+/// width to wrap at and no background to sit on, and because a note in three pieces would have to be
+/// moved, erased and kept in step three times.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Note {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    /// The background, which is the palette colour that was in hand when it was made.
+    pub color: String,
+    pub text: String,
+    /// `yyyy/mm/dd`, written once when the note was created. UTC; see [`date_stamp`].
+    pub created: String,
+}
+
+impl Note {
+    /// A new note at a point, with no text yet.
+    pub fn new(x: f32, y: f32, color: &str, created: String) -> Self {
+        Self {
+            x,
+            y,
+            w: NOTE_SIZE,
+            h: NOTE_MIN_SIZE,
+            color: color.to_string(),
+            text: String::new(),
+            created,
+        }
+    }
+
+    /// The square it is drawn as, which is what the eraser, the marquee and the frame use.
+    pub fn bounds(&self) -> Rect {
+        Rect {
+            x: self.x,
+            y: self.y,
+            w: self.w,
+            h: self.h,
+        }
+    }
+
+    /// Where the text may be drawn: inside the padding, with the date's line left at the bottom.
+    pub fn text_box(&self) -> Rect {
+        Rect {
+            x: self.x + NOTE_PADDING,
+            y: self.y + NOTE_PADDING,
+            w: (self.w - 2.0 * NOTE_PADDING).max(1.0),
+            h: (self.h - 2.0 * NOTE_PADDING - NOTE_DATE_LINE).max(1.0),
+        }
+    }
+
+    /// The line the date sits on, in the bottom-right corner.
+    pub fn date_box(&self) -> Rect {
+        Rect {
+            x: self.x + NOTE_PADDING,
+            y: self.y + self.h - NOTE_PADDING - NOTE_DATE_LINE,
+            w: (self.w - 2.0 * NOTE_PADDING).max(1.0),
+            h: NOTE_DATE_LINE,
+        }
+    }
+
+    /// The note's text as the text path sees it: at its text box, its own size, in the ink that can be
+    /// read on its background. The editing machinery takes one of these, which is why a note can be
+    /// typed in without a second implementation.
+    pub fn text_item(&self) -> TextItem {
+        let box_ = self.text_box();
+        TextItem {
+            x: box_.x,
+            y: box_.y,
+            color: self.ink().to_string(),
+            size: NOTE_TEXT_SIZE,
+            text: self.text.clone(),
+        }
+    }
+
+    /// The ink its text and date are drawn in.
+    pub fn ink(&self) -> &'static str {
+        note_ink(&self.color)
+    }
+
+    /// The height a note needs to hold `text_height` of text, never less than its minimum.
+    pub fn height_for(&self, text_height: f32) -> f32 {
+        (2.0 * NOTE_PADDING + text_height + NOTE_DATE_LINE).max(NOTE_MIN_SIZE)
+    }
 }
 
 /// The five kinds a shape tool draws.
@@ -145,6 +319,7 @@ pub enum ItemId {
     Stroke(usize),
     Text(usize),
     Shape(usize),
+    Note(usize),
 }
 
 /// Annotations belonging to a single output.
@@ -156,6 +331,8 @@ pub struct OutputAnnotations {
     pub texts: Vec<TextItem>,
     #[serde(default)]
     pub shapes: Vec<Shape>,
+    #[serde(default)]
+    pub notes: Vec<Note>,
 }
 
 impl OutputAnnotations {
@@ -181,7 +358,15 @@ impl OutputAnnotations {
         for (i, s) in self.shapes.iter().enumerate() {
             consider(ItemId::Shape(i), s.distance_squared(x, y));
         }
-        best.map(|(id, _)| id)
+        if let Some((id, _)) = best {
+            return Some(id);
+        }
+        // A note is opaque and has no outline to aim at, so its body is the target — but only after
+        // the ink above it has had its turn, so a line stuck across a note can be erased on its own.
+        self.notes
+            .iter()
+            .position(|n| n.bounds().contains(x, y))
+            .map(ItemId::Note)
     }
 
     /// Remove the element under `(x, y)`, returning the box it occupied, so the frame that
@@ -203,6 +388,11 @@ impl OutputAnnotations {
                 self.shapes.remove(i);
                 Some(box_)
             }
+            Some(ItemId::Note(i)) => {
+                let box_ = self.notes[i].bounds();
+                self.notes.remove(i);
+                Some(box_)
+            }
             None => None,
         }
     }
@@ -213,12 +403,14 @@ impl OutputAnnotations {
     /// remove the second twice and leave the first drawn. An index that is no longer there is skipped,
     /// which is what lets a `clear` arriving mid-gesture leave nothing to resurrect.
     pub fn remove(&mut self, items: &[ItemId]) -> Option<Rect> {
-        let (mut strokes, mut texts, mut shapes) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut strokes, mut texts, mut shapes, mut notes) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for id in items {
             match *id {
                 ItemId::Stroke(i) => strokes.push(i),
                 ItemId::Text(i) => texts.push(i),
                 ItemId::Shape(i) => shapes.push(i),
+                ItemId::Note(i) => notes.push(i),
             }
         }
         let mut removed: Option<Rect> = None;
@@ -231,9 +423,13 @@ impl OutputAnnotations {
         for i in &shapes {
             union_into(&mut removed, self.shapes.get(*i).map(Shape::bounds));
         }
+        for i in &notes {
+            union_into(&mut removed, self.notes.get(*i).map(Note::bounds));
+        }
         remove_indices(&mut self.strokes, strokes);
         remove_indices(&mut self.texts, texts);
         remove_indices(&mut self.shapes, shapes);
+        remove_indices(&mut self.notes, notes);
         removed
     }
 }
@@ -730,6 +926,21 @@ impl Transform {
         out
     }
 
+    /// The note this makes of one the document holds: its origin moved, and its square scaled. Its text
+    /// re-wraps at the new width, so a resize sets how narrow the note may be rather than how small its
+    /// text is, and its glyphs stay upright as a text box's do.
+    pub fn note(self, n: &Note) -> Note {
+        let origin = self.point([n.x, n.y]);
+        let mut out = n.clone();
+        out.x = origin[0];
+        out.y = origin[1];
+        if let Transform::Scale { sx, sy, .. } = self {
+            out.w = (out.w * sx).max(NOTE_MIN_SIZE);
+            out.h = (out.h * sy).max(NOTE_MIN_SIZE);
+        }
+        out
+    }
+
     /// The shape this makes of one the document holds: its two points moved, with its kind and its
     /// pen width untouched, so a scaled circle stays a circle and a turned arrow keeps its head.
     pub fn shape(self, s: &Shape) -> Shape {
@@ -900,6 +1111,7 @@ pub fn item_bounds(ann: &OutputAnnotations, id: ItemId) -> Option<Rect> {
         ItemId::Stroke(i) => ann.strokes.get(i)?.bounds(),
         ItemId::Text(i) => ann.texts.get(i).map(TextItem::paint_bounds),
         ItemId::Shape(i) => ann.shapes.get(i).map(Shape::bounds),
+        ItemId::Note(i) => ann.notes.get(i).map(Note::bounds),
     }
 }
 
@@ -922,6 +1134,7 @@ pub fn selection_frame(
                     .unwrap_or(None),
                 ItemId::Text(i) => ann.texts.get(*i).map(|x| t.text(x).paint_bounds()),
                 ItemId::Shape(i) => ann.shapes.get(*i).map(|s| t.shape(s).bounds()),
+                ItemId::Note(i) => ann.notes.get(*i).map(|n| t.note(n).bounds()),
             },
             None => item_bounds(ann, *id),
         })
@@ -984,6 +1197,11 @@ pub fn marquee_select(ann: &OutputAnnotations, marquee: Rect) -> Vec<ItemId> {
         (0..ann.shapes.len())
             .filter(|i| inside(ann.shapes[*i].bounds()))
             .map(ItemId::Shape),
+    );
+    ids.extend(
+        (0..ann.notes.len())
+            .filter(|i| inside(ann.notes[*i].bounds()))
+            .map(ItemId::Note),
     );
     ids
 }
@@ -1057,6 +1275,10 @@ pub struct TextOverlay {
     pub buffer: TextBuffer,
     /// Index into the document when an existing box is edited; None for a new one.
     pub index: Option<usize>,
+    /// Index into the notes when a note is edited, which is the one editing target that is not a text
+    /// box: the caret, the preedit, the input method and paste are the same machinery either way, and
+    /// only the commit needs to know which list the text belongs to.
+    pub note: Option<usize>,
     /// Input method preedit string; never persisted.
     pub preedit: String,
 }
