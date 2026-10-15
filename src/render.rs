@@ -12,9 +12,9 @@ use tiny_skia::{
 use wayland_client::protocol::wl_shm::Format;
 
 use crate::canvas::{
-    Handle, ItemId, OutputAnnotations, Overlay, PALETTE, Rect, SELECT_HANDLE, Shape, ShapeKind,
-    Stroke, TextItem, TextOverlay, Tool, Toolbar, ToolbarAction, rect_of, rotate_handle,
-    selection_frame,
+    Handle, ItemId, OutputAnnotations, Overlay, PALETTE, Rect, SELECT_HANDLE, SELECT_ROTATE_GAP,
+    Shape, ShapeKind, Stroke, TextItem, TextOverlay, Tool, Toolbar, ToolbarAction, View, rect_of,
+    rotate_handle, selection_frame,
 };
 /// Radius of the eraser marker circle, in logical pixels.
 const ERASER_MARKER_RADIUS: f32 = 8.0;
@@ -54,11 +54,11 @@ const ICON_INSET: f32 = 7.0;
 /// of the drawn rail. The strip is damaged whenever the rail changes, and joins a transient
 /// damage box that reaches it.
 const TOOLBAR_RESERVE: f32 = 224.0;
-/// Height of the whole column: eighteen blocks, fourteen gaps inside the groups and three between
+/// Height of the whole column: nineteen blocks, fifteen gaps inside the groups and three between
 /// them, all fixed, so the column's height never depends on the font, unlike the width a
 /// stretched block takes.
 const TOOLBAR_COLUMN: f32 =
-    2.0 * TOOLBAR_PAD + 18.0 * TOOLBAR_BLOCK + 14.0 * TOOLBAR_GAP + 3.0 * TOOLBAR_GROUP_GAP;
+    2.0 * TOOLBAR_PAD + 19.0 * TOOLBAR_BLOCK + 15.0 * TOOLBAR_GAP + 3.0 * TOOLBAR_GROUP_GAP;
 const TOOLBAR_CACHE_CAP: usize = 16;
 /// `#rrggbbaa`. The block fill stands in for a HUD material: a `wl_shm` layer surface cannot be
 /// blurred, so there is translucency but no real vibrancy. The alpha is the opacity that keeps
@@ -74,7 +74,7 @@ const TOOLBAR_ACCENT: &str = "#0a84ffff";
 /// wallpaper the annotations are read against and hide nothing.
 const SCRIM_FILL: &str = "#000000e6";
 /// The scrim's alpha, for the tests that have to tell content from the scrim a frame is painted on.
-pub const SCRIM_ALPHA: u8 = 0xe6;
+pub const SCRIM_ALPHA: u8 = 0xCC;
 /// `#rrggbbaa`. The plate the rail sits on: black at 90% opacity, behind every block so the gaps
 /// between them do not show the wallpaper at full strength and the rail reads as one control over
 /// bright content drawn under it. Over the edit-mode scrim it reads as 99% black against the
@@ -115,6 +115,57 @@ enum Icon {
     Smaller,
     Larger,
     Lock,
+    Hand,
+}
+
+/// What a canvas coordinate has to be multiplied by to become a device pixel: the output's scale, and
+/// the view. One value for both, because every draw site needs both and passing them separately is how
+/// they drift apart.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Screen {
+    pub scale: f32,
+    pub view: View,
+}
+
+impl Screen {
+    /// A canvas point in device pixels.
+    fn point(self, p: [f32; 2]) -> [f32; 2] {
+        let s = self.view.to_screen(p);
+        [s[0] * self.scale, s[1] * self.scale]
+    }
+
+    /// A canvas length in device pixels: a pen width, a text size, an element's box.
+    fn len(self, l: f32) -> f32 {
+        l * self.view.zoom * self.scale
+    }
+
+    /// A **screen** rectangle in device pixels: the zoom is already in it, which is what the
+    /// selection frame carries because its handles are interface-sized.
+    fn ui_rect(self, r: Rect) -> Rect {
+        Rect {
+            x: r.x * self.scale,
+            y: r.y * self.scale,
+            w: r.w * self.scale,
+            h: r.h * self.scale,
+        }
+    }
+
+    /// A canvas rectangle in device pixels.
+    fn rect(self, r: Rect) -> Rect {
+        let origin = self.point([r.x, r.y]);
+        Rect {
+            x: origin[0],
+            y: origin[1],
+            w: self.len(r.w),
+            h: self.len(r.h),
+        }
+    }
+
+    /// A length that belongs to the interface rather than to the canvas — a handle, a hairline — in
+    /// device pixels. It ignores the zoom, so a control is the same size at every zoom.
+    fn ui(self, l: f32) -> f32 {
+        l * self.scale
+    }
 }
 
 /// One block of the rail: what it shows when the pointer is elsewhere, what it says when the
@@ -187,6 +238,7 @@ fn toolbar_blocks(toolbar: &Toolbar) -> Vec<Block> {
         (Tool::Diamond, Icon::Diamond, "diamond"),
         (Tool::Line, Icon::Line, "line"),
         (Tool::Arrow, Icon::Arrow, "arrow"),
+        (Tool::Hand, Icon::Hand, "hand: drag to pan"),
     ] {
         blocks.push(Block {
             mark: Mark::Icon(icon),
@@ -270,6 +322,9 @@ struct BaseKey {
     /// selection gesture is dragging. The overlay draws each of them instead, so a frame paints an
     /// element exactly once, in the position it is live at.
     skip: Vec<ItemId>,
+    /// The view is part of the key because the raster is screen-space: a pan or a zoom moves every
+    /// pixel of it, so the frame that follows has to rebuild it.
+    view: View,
     /// Whether the raster's background is the edit-mode scrim. A mode switch recreates every surface
     /// and so every cache, but the key says it anyway: a raster that had to be trusted to be rebuilt
     /// would be one change away from being stale.
@@ -314,20 +369,22 @@ impl TextLayoutCache {
         }
     }
 
-    fn matches(&self, index: usize, item: &TextItem) -> bool {
+    fn matches(&self, index: usize, text: &str, size: f32) -> bool {
         self.entries
             .get(index)
             .and_then(Option::as_ref)
-            .is_some_and(|entry| entry.text == item.text && entry.size == item.size)
+            .is_some_and(|entry| entry.text == text && entry.size == size)
     }
 
-    fn insert(&mut self, index: usize, item: &TextItem, layout: PreparedText) {
+    /// `size` is the size the view puts on screen, not the item's own: a shaped line is only reusable
+    /// at the same zoom as well as the same text.
+    fn insert(&mut self, index: usize, text: &str, size: f32, layout: PreparedText) {
         if index >= self.entries.len() {
             self.entries.resize_with(index + 1, || None);
         }
         self.entries[index] = Some(TextCacheEntry {
-            text: item.text.clone(),
-            size: item.size,
+            text: text.to_string(),
+            size,
             layout,
         });
     }
@@ -432,6 +489,7 @@ impl Renderer {
         width: u32,
         height: u32,
         scale: f32,
+        view: View,
         ann: &OutputAnnotations,
         overlay: &Overlay,
         damage: Option<Rect>,
@@ -442,6 +500,7 @@ impl Renderer {
             width,
             height,
             scale,
+            view,
             ann,
             overlay,
             damage,
@@ -460,6 +519,7 @@ impl Renderer {
         width: u32,
         height: u32,
         scale: f32,
+        view: View,
         ann: &OutputAnnotations,
         overlay: &Overlay,
         damage: Option<Rect>,
@@ -467,7 +527,8 @@ impl Renderer {
         skip: &[ItemId],
     ) {
         let FrameCache { text, base } = cache;
-        text.sync(ann.texts.len(), scale);
+        let screen = Screen { scale, view };
+        text.sync(ann.texts.len(), screen.len(1.0));
         let region = match damage {
             None => DamageRegion::All,
             Some(d) => DamageRegion::from_logical(d, scale, width, height),
@@ -483,6 +544,7 @@ impl Renderer {
             width,
             height,
             scale,
+            view,
             skip: skip.to_vec(),
             scrim: scrim.is_some(),
         };
@@ -492,7 +554,7 @@ impl Renderer {
         } else {
             let renderer = &mut *self;
             let built = base.rasterise(key, |target| {
-                renderer.draw_document(target, ann, scale, text, skip, scrim)
+                renderer.draw_document(target, ann, screen, text, skip, scrim)
             });
             if built {
                 base.fill(buf, region, width, height);
@@ -505,16 +567,16 @@ impl Renderer {
             return;
         };
         if draw_document {
-            self.draw_document(&mut pixmap, ann, scale, text, skip, scrim);
+            self.draw_document(&mut pixmap, ann, screen, text, skip, scrim);
         }
         if let Some(s) = &overlay.stroke {
-            draw_stroke(&mut pixmap, s, scale);
+            draw_stroke(&mut pixmap, s, screen);
         }
         if let Some(s) = &overlay.shape {
-            draw_shape(&mut pixmap, s, scale);
+            draw_shape(&mut pixmap, s, screen);
         }
         if let Some(t) = &overlay.text {
-            self.draw_text(&mut pixmap, &t.item, scale, Some(t), None);
+            self.draw_text(&mut pixmap, &t.item, screen, Some(t), None);
         }
         // The elements a live gesture is dragging, at the position the gesture puts them. They are
         // the same copies the release writes into the document, so the preview cannot lie.
@@ -525,17 +587,17 @@ impl Renderer {
                 match id {
                     ItemId::Stroke(i) => {
                         if let Some(s) = ann.strokes.get(*i) {
-                            draw_stroke(&mut pixmap, &transform.stroke(s), scale);
+                            draw_stroke(&mut pixmap, &transform.stroke(s), screen);
                         }
                     }
                     ItemId::Text(i) => {
                         if let Some(item) = ann.texts.get(*i) {
-                            self.draw_text(&mut pixmap, &transform.text(item), scale, None, None);
+                            self.draw_text(&mut pixmap, &transform.text(item), screen, None, None);
                         }
                     }
                     ItemId::Shape(i) => {
                         if let Some(s) = ann.shapes.get(*i) {
-                            draw_shape(&mut pixmap, &transform.shape(s), scale);
+                            draw_shape(&mut pixmap, &transform.shape(s), screen);
                         }
                     }
                 }
@@ -546,10 +608,10 @@ impl Renderer {
             .as_ref()
             .and_then(|s| selection_frame(ann, &s.items, s.transform))
         {
-            draw_selection(&mut pixmap, frame, scale);
+            draw_selection(&mut pixmap, view.screen_rect(frame), screen);
         }
         if let Some(marquee) = overlay.marquee {
-            draw_marquee(&mut pixmap, marquee, scale);
+            draw_marquee(&mut pixmap, marquee, screen);
         }
         if let Some(toolbar) = &overlay.toolbar {
             // The toolbar is static content: only a tool, colour, size or mode change repaints
@@ -565,8 +627,11 @@ impl Renderer {
                 self.draw_toolbar(&mut pixmap, toolbar, scale);
             }
         }
-        if let Some([x, y]) = overlay.eraser {
-            draw_eraser_marker(&mut pixmap, x * scale, y * scale, scale);
+        if let Some(at) = overlay.eraser {
+            // The marker is what the pointer aims with, so its size is a screen length even though
+            // the point it sits on is the canvas point it will erase.
+            let p = screen.point(at);
+            draw_eraser_marker(&mut pixmap, p, screen.ui(1.0));
         }
     }
 
@@ -579,7 +644,7 @@ impl Renderer {
         &mut self,
         pixmap: &mut PixmapMut,
         ann: &OutputAnnotations,
-        scale: f32,
+        screen: Screen,
         text: &mut TextLayoutCache,
         skip: &[ItemId],
         scrim: Option<[u8; 4]>,
@@ -592,13 +657,13 @@ impl Renderer {
             if skip.contains(&ItemId::Stroke(index)) {
                 continue;
             }
-            draw_stroke(pixmap, s, scale);
+            draw_stroke(pixmap, s, screen);
         }
         for (index, s) in ann.shapes.iter().enumerate() {
             if skip.contains(&ItemId::Shape(index)) {
                 continue;
             }
-            draw_shape(pixmap, s, scale);
+            draw_shape(pixmap, s, screen);
         }
         for (index, item) in ann.texts.iter().enumerate() {
             // The box under edit is the overlay's, and a box a gesture is dragging is drawn with
@@ -608,12 +673,13 @@ impl Renderer {
             if skip.contains(&ItemId::Text(index)) {
                 continue;
             }
-            if !text.matches(index, item) {
-                let layout = self.prepare_text(&item.text, item, scale);
-                text.insert(index, item, layout);
+            let size = screen.len(item.size);
+            if !text.matches(index, &item.text, size) {
+                let layout = self.prepare_text(&item.text, item, screen);
+                text.insert(index, &item.text, size, layout);
             }
             if let Some(layout) = text.get_mut(index) {
-                self.draw_prepared_text(pixmap, item, scale, layout, None);
+                self.draw_prepared_text(pixmap, item, screen, layout, None);
             }
         }
     }
@@ -732,7 +798,16 @@ impl Renderer {
                                 TOOLBAR_FOREGROUND,
                                 value,
                             );
-                            self.draw_text(pixmap, &item, scale, None, None);
+                            self.draw_text(
+                                pixmap,
+                                &item,
+                                Screen {
+                                    scale,
+                                    view: View::default(),
+                                },
+                                None,
+                                None,
+                            );
                         }
                         Mark::Swatch(_) => {}
                     }
@@ -749,7 +824,16 @@ impl Renderer {
                 );
                 // The label is uncovered by the capsule growing over it: a glyph appears once
                 // the edge has passed it, and at rest the edge is past its trailing padding.
-                self.draw_text(pixmap, &item, scale, None, Some(ox + width));
+                self.draw_text(
+                    pixmap,
+                    &item,
+                    Screen {
+                        scale,
+                        view: View::default(),
+                    },
+                    None,
+                    Some(ox + width),
+                );
             }
         }
     }
@@ -868,8 +952,11 @@ impl Renderer {
         buffer.layout_runs().map(|r| r.line_w).fold(0.0, f32::max)
     }
 
-    fn prepare_text(&mut self, text: &str, item: &TextItem, scale: f32) -> PreparedText {
-        let size = item.size * scale;
+    /// Shapes `text` at the size the view puts on screen. The prepared box comes back in **canvas**
+    /// coordinates, because that is what a click and the selection frame measure; a caller that needs
+    /// it on screen maps it through the view.
+    fn prepare_text(&mut self, text: &str, item: &TextItem, screen: Screen) -> PreparedText {
+        let size = screen.len(item.size);
         let mut buffer = Buffer::new_empty(Metrics::new(size, size * LINE_HEIGHT_SCALE));
         buffer.set_size(None, None);
         buffer.set_text(text, &Attrs::new(), Shaping::Advanced, None);
@@ -892,8 +979,10 @@ impl Renderer {
         let paint_bounds = Rect {
             x: item.x,
             y: item.y,
-            w: max_right / scale,
-            h: max_bottom / scale,
+            // The prepared layout is in device pixels at the effective size; the box a click and the
+            // selection measure is in canvas units.
+            w: max_right / screen.len(1.0),
+            h: max_bottom / screen.len(1.0),
         }
         .grown(1.0);
         PreparedText {
@@ -908,8 +997,8 @@ impl Renderer {
 
     /// The region a text box's content occupies, which is what a click that re-enters it is
     /// tested against.
-    pub fn text_edit_bounds(&mut self, text: &str, item: &TextItem, scale: f32) -> Rect {
-        self.prepare_text(text, item, scale)
+    pub fn text_edit_bounds(&mut self, text: &str, item: &TextItem, screen: Screen) -> Rect {
+        self.prepare_text(text, item, screen)
             .paint_bounds
             .grown(CURSOR_WIDTH)
     }
@@ -920,15 +1009,16 @@ impl Renderer {
         &mut self,
         pixmap: &mut PixmapMut,
         item: &TextItem,
-        scale: f32,
+        screen: Screen,
         prepared: &mut PreparedText,
         reveal: Option<f32>,
     ) {
-        let (ox, oy) = (item.x * scale, item.y * scale);
+        let origin = screen.point([item.x, item.y]);
+        let (ox, oy) = (origin[0], origin[1]);
         let c = parse_hex(&item.color);
         let color = Color::rgba(c[0], c[1], c[2], c[3]);
         let (clip_w, clip_h) = (pixmap.width(), pixmap.height());
-        let reveal = reveal.map(|x| x * scale);
+        let reveal = reveal.map(|x| screen.point([x, 0.0])[0]);
         prepared.buffer.draw(
             &mut self.font_system,
             &mut self.cache,
@@ -955,7 +1045,7 @@ impl Renderer {
         &mut self,
         pixmap: &mut PixmapMut,
         item: &TextItem,
-        scale: f32,
+        screen: Screen,
         edit: Option<&TextOverlay>,
         reveal: Option<f32>,
     ) {
@@ -982,22 +1072,23 @@ impl Renderer {
         if display.is_empty() && edit.is_none() {
             return;
         }
-        let mut prepared = self.prepare_text(display.as_ref(), item, scale);
+        let mut prepared = self.prepare_text(display.as_ref(), item, screen);
         let geometry = caret_geometry(&prepared, caret.unwrap_or(committed.len()), preedit.len());
-        self.draw_prepared_text(pixmap, item, scale, &mut prepared, reveal);
+        self.draw_prepared_text(pixmap, item, screen, &mut prepared, reveal);
 
         if edit.is_some() {
-            let size = item.size * scale;
+            let size = screen.len(item.size);
             let c = parse_hex(&item.color);
             let color = Color::rgba(c[0], c[1], c[2], c[3]);
-            let (ox, oy) = (item.x * scale, item.y * scale);
+            let origin = screen.point([item.x, item.y]);
+            let (ox, oy) = (origin[0], origin[1]);
             if let Some((x0, x1)) = geometry.preedit {
                 fill(
                     pixmap,
                     ox + x0,
                     oy + (geometry.baseline + size * 0.15),
                     (x1 - x0).max(0.0),
-                    UNDERLINE_HEIGHT * scale,
+                    screen.ui(UNDERLINE_HEIGHT),
                     color,
                 );
             }
@@ -1008,7 +1099,7 @@ impl Renderer {
                 pixmap,
                 ox + geometry.x,
                 oy + geometry.top,
-                CURSOR_WIDTH * scale,
+                screen.ui(CURSOR_WIDTH),
                 geometry.height,
                 color,
             );
@@ -1147,34 +1238,34 @@ pub fn transient_bounds(overlay: &Overlay) -> Option<Rect> {
 
 /// The selection frame and its handles, in logical pixels: one hairline and accent-filled
 /// capsules, so the interface gains no shape and no colour it did not already have.
-fn draw_selection(pixmap: &mut PixmapMut, frame: Rect, scale: f32) {
+fn draw_selection(pixmap: &mut PixmapMut, frame: Rect, screen: Screen) {
     let c = parse_hex(TOOLBAR_ACCENT);
     let mut paint = Paint::default();
     paint.set_color_rgba8(c[0], c[1], c[2], c[3]);
     paint.anti_alias = true;
+    // The frame's place comes from the canvas and its weight from the interface, so the handles stay
+    // the same size to aim at at every zoom.
     let hairline = SkStroke {
-        width: scale,
+        width: screen.ui(TOOLBAR_HAIRLINE),
         ..Default::default()
     };
-    if let Some(path) = rounded_rect_path(frame, 0.0) {
+    if let Some(path) = rounded_rect_path(screen.ui_rect(frame), 0.0) {
         pixmap.stroke_path(&path, &paint, &hairline, Transform::identity(), None);
     }
     // The stem is what makes the rotation handle read as part of the frame rather than as a dot
     // that floats above it.
-    let knob = rotate_handle(frame);
+    let middle_top = [frame.x + frame.w / 2.0, frame.y];
+    let knob = rotate_handle(frame, SELECT_ROTATE_GAP);
     let mut stem = PathBuilder::new();
-    stem.move_to((frame.x + frame.w / 2.0) * scale, frame.y * scale);
-    stem.line_to(knob[0] * scale, knob[1] * scale);
+    stem.move_to(middle_top[0] * screen.scale, middle_top[1] * screen.scale);
+    stem.line_to(knob[0] * screen.scale, knob[1] * screen.scale);
     if let Some(path) = stem.finish() {
         pixmap.stroke_path(&path, &paint, &hairline, Transform::identity(), None);
     }
     for point in Handle::ALL.iter().map(|h| h.point(frame)).chain([knob]) {
         let mut dot = PathBuilder::new();
-        dot.push_circle(
-            point[0] * scale,
-            point[1] * scale,
-            SELECT_HANDLE / 2.0 * scale,
-        );
+        let point = [point[0] * screen.scale, point[1] * screen.scale];
+        dot.push_circle(point[0], point[1], screen.ui(SELECT_HANDLE / 2.0));
         if let Some(path) = dot.finish() {
             pixmap.fill_path(
                 &path,
@@ -1188,8 +1279,8 @@ fn draw_selection(pixmap: &mut PixmapMut, frame: Rect, scale: f32) {
 }
 
 /// The marquee of a selection drag: the same hairline, with no fill of its own.
-fn draw_marquee(pixmap: &mut PixmapMut, marquee: Rect, scale: f32) {
-    let Some(path) = rounded_rect_path(marquee, 0.0) else {
+fn draw_marquee(pixmap: &mut PixmapMut, marquee: Rect, screen: Screen) {
+    let Some(path) = rounded_rect_path(screen.rect(marquee), 0.0) else {
         return;
     };
     let c = parse_hex(TOOLBAR_ACCENT);
@@ -1197,7 +1288,7 @@ fn draw_marquee(pixmap: &mut PixmapMut, marquee: Rect, scale: f32) {
     paint.set_color_rgba8(c[0], c[1], c[2], c[3]);
     paint.anti_alias = true;
     let hairline = SkStroke {
-        width: scale,
+        width: screen.ui(TOOLBAR_HAIRLINE),
         ..Default::default()
     };
     pixmap.stroke_path(&path, &paint, &hairline, Transform::identity(), None);
@@ -1419,7 +1510,12 @@ fn draw_icon(pixmap: &mut PixmapMut, icon: Icon, square: Rect, scale: f32, color
         ..Default::default()
     };
     // A stroke or a shape is drawn in logical pixels by the code that draws the real one, so the
-    // icon is the same drawing, only smaller.
+    // icon is the same drawing, only smaller. An icon is interface, not canvas: it takes the output's
+    // scale and no view, so it stays the same size however the drawing is zoomed.
+    let icon_screen = Screen {
+        scale,
+        view: View::default(),
+    };
     let l = Rect {
         x: x / scale,
         y: y / scale,
@@ -1448,8 +1544,31 @@ fn draw_icon(pixmap: &mut PixmapMut, icon: Icon, square: Rect, scale: f32, color
                 from,
                 to,
             },
-            scale,
+            icon_screen,
         );
+        return;
+    }
+    if icon == Icon::Hand {
+        // A palm with three fingers and a thumb: a hand, drawn in the same stroke language as the
+        // rest of the set.
+        let mut hand = PathBuilder::new();
+        for at in [0.28, 0.5, 0.72] {
+            hand.move_to(x + w * at, y + h * 0.42);
+            hand.line_to(x + w * at, y + h * 0.95);
+        }
+        hand.move_to(x + w * 0.06, y + h * 0.62);
+        hand.line_to(x + w * 0.3, y + h * 0.5);
+        hand.move_to(x + w * 0.28, y + h * 0.42);
+        hand.line_to(x + w * 0.28, y + h * 0.2);
+        hand.move_to(x + w * 0.5, y + h * 0.42);
+        hand.line_to(x + w * 0.5, y + h * 0.1);
+        hand.move_to(x + w * 0.72, y + h * 0.42);
+        hand.line_to(x + w * 0.72, y + h * 0.22);
+        hand.move_to(x + w * 0.28, y + h * 0.95);
+        hand.line_to(x + w * 0.72, y + h * 0.95);
+        if let Some(path) = hand.finish() {
+            pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+        }
         return;
     }
     if icon == Icon::Pen {
@@ -1465,7 +1584,7 @@ fn draw_icon(pixmap: &mut PixmapMut, icon: Icon, square: Rect, scale: f32, color
                     [l.x + l.w * 0.95, l.y + l.h * 0.2],
                 ],
             },
-            scale,
+            icon_screen,
         );
         return;
     }
@@ -1529,8 +1648,14 @@ fn draw_icon(pixmap: &mut PixmapMut, icon: Icon, square: Rect, scale: f32, color
             path.cubic_to(x + arm, y + arc, x + w - arm, y + arc, x + w - arm, y + top);
             path.line_to(x + w - arm, y + h * 0.45);
         }
-        // Drawn by the two branches above.
-        Icon::Pen | Icon::Circle | Icon::Rect | Icon::Diamond | Icon::Line | Icon::Arrow => return,
+        // Drawn by the branches above.
+        Icon::Pen
+        | Icon::Hand
+        | Icon::Circle
+        | Icon::Rect
+        | Icon::Diamond
+        | Icon::Line
+        | Icon::Arrow => return,
     }
     if let Some(path) = path.finish() {
         pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
@@ -1553,7 +1678,7 @@ fn sk_rect(r: Rect) -> Option<tiny_skia::Rect> {
 
 /// A shape, in device pixels: its outline stroked with its own pen width, and the head of an arrow
 /// filled, because a stroked triangle would read as a hollow head rather than as an arrow.
-fn draw_shape(pixmap: &mut PixmapMut, s: &Shape, scale: f32) {
+fn draw_shape(pixmap: &mut PixmapMut, s: &Shape, screen: Screen) {
     if s.is_empty() {
         return;
     }
@@ -1562,13 +1687,13 @@ fn draw_shape(pixmap: &mut PixmapMut, s: &Shape, scale: f32) {
     paint.set_color_rgba8(c[0], c[1], c[2], c[3]);
     paint.anti_alias = true;
     let stroke = SkStroke {
-        width: s.width * scale,
+        width: screen.len(s.width),
         line_cap: LineCap::Round,
         line_join: LineJoin::Round,
         ..Default::default()
     };
-    let from = [s.from[0] * scale, s.from[1] * scale];
-    let to = [s.to[0] * scale, s.to[1] * scale];
+    let from = screen.point(s.from);
+    let to = screen.point(s.to);
     let box_ = rect_of(from, to);
     match s.kind {
         ShapeKind::Circle | ShapeKind::Rect | ShapeKind::Diamond => {
@@ -1608,8 +1733,8 @@ fn draw_shape(pixmap: &mut PixmapMut, s: &Shape, scale: f32) {
                 return;
             }
             let (ux, uy) = (dx / len, dy / len);
-            let head = s.head_len() * scale;
-            let half = s.head_half() * scale;
+            let head = screen.len(s.head_len());
+            let half = screen.len(s.head_half());
             let base = [to[0] - ux * head, to[1] - uy * head];
             let (px, py) = (-uy * half, ux * half);
             let mut head_path = PathBuilder::new();
@@ -1630,25 +1755,26 @@ fn draw_shape(pixmap: &mut PixmapMut, s: &Shape, scale: f32) {
     }
 }
 
-fn draw_stroke(pixmap: &mut PixmapMut, s: &Stroke, scale: f32) {
+fn draw_stroke(pixmap: &mut PixmapMut, s: &Stroke, screen: Screen) {
     let c = parse_hex(&s.color);
     let mut paint = Paint::default();
     paint.set_color_rgba8(c[0], c[1], c[2], c[3]);
     paint.anti_alias = true;
-    let width = s.width * scale;
+    let width = screen.len(s.width);
     let transform = Transform::identity();
 
     match s.points.as_slice() {
         [] => {}
         [only] => {
             let mut pb = PathBuilder::new();
-            pb.push_circle(only[0] * scale, only[1] * scale, width / 2.0);
+            let p = screen.point(*only);
+            pb.push_circle(p[0], p[1], width / 2.0);
             if let Some(path) = pb.finish() {
                 pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding, transform, None);
             }
         }
         points => {
-            let Some(path) = smoothed_path(points, scale) else {
+            let Some(path) = smoothed_path(points, screen) else {
                 return;
             };
             let stroke = SkStroke {
@@ -1666,27 +1792,30 @@ fn draw_stroke(pixmap: &mut PixmapMut, s: &Stroke, scale: f32) {
 /// pair of consecutive samples, with the interior samples as control points, so a slow
 /// drag does not render as a chain of straight segments. The stored samples are never
 /// modified. Two samples are a straight line; the caller draws a single sample as a dot.
-pub fn smoothed_path(points: &[[f32; 2]], scale: f32) -> Option<tiny_skia::Path> {
+pub fn smoothed_path(points: &[[f32; 2]], screen: Screen) -> Option<tiny_skia::Path> {
     let (first, rest) = points.split_first()?;
+    let (fx, fy) = {
+        let p = screen.point(*first);
+        (p[0], p[1])
+    };
     let mut pb = PathBuilder::new();
-    pb.move_to(first[0] * scale, first[1] * scale);
+    pb.move_to(fx, fy);
     for w in rest.windows(2) {
-        pb.quad_to(
-            w[0][0] * scale,
-            w[0][1] * scale,
-            (w[0][0] + w[1][0]) / 2.0 * scale,
-            (w[0][1] + w[1][1]) / 2.0 * scale,
-        );
+        let a = screen.point(w[0]);
+        let mid = screen.point([(w[0][0] + w[1][0]) / 2.0, (w[0][1] + w[1][1]) / 2.0]);
+        pb.quad_to(a[0], a[1], mid[0], mid[1]);
     }
     if let Some(last) = rest.last() {
-        pb.line_to(last[0] * scale, last[1] * scale);
+        let p = screen.point(*last);
+        pb.line_to(p[0], p[1]);
     }
     pb.finish()
 }
 
-fn draw_eraser_marker(pixmap: &mut PixmapMut, x: f32, y: f32, scale: f32) {
+/// `at` is in device pixels and `scale` is the output's, so the marker keeps its size at any zoom.
+fn draw_eraser_marker(pixmap: &mut PixmapMut, at: [f32; 2], scale: f32) {
     let mut pb = PathBuilder::new();
-    pb.push_circle(x, y, ERASER_MARKER_RADIUS * scale);
+    pb.push_circle(at[0], at[1], ERASER_MARKER_RADIUS * scale);
     let Some(path) = pb.finish() else { return };
     let mut paint = Paint::default();
     paint.set_color_rgba8(255, 255, 255, 220);
@@ -1779,6 +1908,14 @@ fn parse_hex(s: &str) -> [u8; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The identity view at a given output scale, for the tests that only care about the document.
+    fn screen(scale: f32) -> Screen {
+        Screen {
+            scale,
+            view: View::default(),
+        }
+    }
     use crate::canvas::{Selection, TextBuffer, Transform};
 
     fn text_item(text: &str) -> TextItem {
@@ -1802,6 +1939,7 @@ mod tests {
             200,
             100,
             1.0,
+            View::default(),
             annotations,
             &Overlay::default(),
             None,
@@ -1853,6 +1991,7 @@ mod tests {
             width: 200,
             height: 100,
             scale: 1.0,
+            view: View::default(),
             skip: Vec::new(),
             scrim: false,
         }));
@@ -1904,6 +2043,7 @@ mod tests {
             200,
             100,
             1.0,
+            View::default(),
             &annotations,
             &Overlay::default(),
             None,
@@ -1957,9 +2097,27 @@ mod tests {
             ..Default::default()
         };
         let mut cold = vec![0; 640 * 400 * 4];
-        renderer.render(&mut cold, 640, 400, 1.0, &annotations, &overlay, None);
+        renderer.render(
+            &mut cold,
+            640,
+            400,
+            1.0,
+            View::default(),
+            &annotations,
+            &overlay,
+            None,
+        );
         let mut warm = vec![0; 640 * 400 * 4];
-        renderer.render(&mut warm, 640, 400, 1.0, &annotations, &overlay, None);
+        renderer.render(
+            &mut warm,
+            640,
+            400,
+            1.0,
+            View::default(),
+            &annotations,
+            &overlay,
+            None,
+        );
         assert_eq!(cold, warm);
     }
 
@@ -1977,9 +2135,18 @@ mod tests {
             }),
             ..Default::default()
         };
-        let bounds = renderer.text_edit_bounds("new text", &item, 1.0);
+        let bounds = renderer.text_edit_bounds("new text", &item, screen(1.0));
         let mut expected = vec![0; 200 * 100 * 4];
-        renderer.render(&mut expected, 200, 100, 1.0, &annotations, &overlay, None);
+        renderer.render(
+            &mut expected,
+            200,
+            100,
+            1.0,
+            View::default(),
+            &annotations,
+            &overlay,
+            None,
+        );
         let mut actual = vec![0; 200 * 100 * 4];
         let mut cache = FrameCache::default();
         renderer.render_with_cache(
@@ -1987,6 +2154,7 @@ mod tests {
             200,
             100,
             1.0,
+            View::default(),
             &annotations,
             &overlay,
             Some(bounds),
@@ -2016,8 +2184,8 @@ mod tests {
             text: Some(edit),
             ..Default::default()
         };
-        let old_bounds = renderer.text_edit_bounds("before", &old_document.texts[0], 1.0);
-        let new_bounds = renderer.text_edit_bounds("after", &new_document.texts[0], 1.0);
+        let old_bounds = renderer.text_edit_bounds("before", &old_document.texts[0], screen(1.0));
+        let new_bounds = renderer.text_edit_bounds("after", &new_document.texts[0], screen(1.0));
         let damage = old_bounds.union(new_bounds);
 
         let mut old_frame = vec![0; 200 * 100 * 4];
@@ -2026,6 +2194,7 @@ mod tests {
             200,
             100,
             1.0,
+            View::default(),
             &old_document,
             &Overlay::default(),
             None,
@@ -2045,6 +2214,7 @@ mod tests {
             200,
             100,
             1.0,
+            View::default(),
             &OutputAnnotations::default(),
             &expected_overlay,
             None,
@@ -2057,6 +2227,7 @@ mod tests {
             200,
             100,
             1.0,
+            View::default(),
             &old_document,
             &overlay,
             Some(damage),
@@ -2092,6 +2263,7 @@ mod tests {
             200,
             100,
             1.0,
+            View::default(),
             &stored,
             &live,
             None,
@@ -2114,6 +2286,7 @@ mod tests {
             200,
             100,
             1.0,
+            View::default(),
             &moved,
             &settled,
             None,
@@ -2152,6 +2325,7 @@ mod tests {
             200,
             100,
             1.0,
+            View::default(),
             &stored,
             &live,
             None,
@@ -2165,6 +2339,7 @@ mod tests {
             200,
             100,
             1.0,
+            View::default(),
             &stored,
             &settled,
             None,
@@ -2182,6 +2357,7 @@ mod tests {
             200,
             100,
             1.0,
+            View::default(),
             &stored,
             &settled,
             None,
@@ -2233,6 +2409,7 @@ mod tests {
                 wd,
                 hd,
                 scale,
+                View::default(),
                 &OutputAnnotations::default(),
                 &Overlay {
                     toolbar: Some(rail),
@@ -2264,7 +2441,7 @@ mod tests {
                 assert!(ink > 0, "{icon:?} drew nothing at scale {scale}");
             }
             assert_eq!(
-                icons, 12,
+                icons, 13,
                 "every function has an icon, and only functions do"
             );
         }
@@ -2294,10 +2471,11 @@ mod tests {
             "D" => Some(Keysym::D),
             "L" => Some(Keysym::L),
             "A" => Some(Keysym::A),
+            "H" => Some(Keysym::H),
             _ => None,
         };
         let blocks = toolbar_blocks(&rail_state());
-        assert_eq!(blocks.len(), 18);
+        assert_eq!(blocks.len(), 19);
         let mut stated = 0;
         for block in &blocks {
             let Some(action) = block.action else {
@@ -2324,7 +2502,7 @@ mod tests {
             };
             assert!(applies, "'{}' names a key that does not do it", block.label);
         }
-        // Seventeen blocks apply something: five colours, nine tools, two size steps and lock.
-        assert_eq!(stated, 17);
+        // Eighteen blocks apply something: five colours, ten tools, two size steps and lock.
+        assert_eq!(stated, 18);
     }
 }

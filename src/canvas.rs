@@ -25,6 +25,12 @@ const MIN_SCALE: f32 = 0.05;
 pub const TEXT_SIZE_MIN: f32 = 8.0;
 pub const TEXT_SIZE_MAX: f32 = 72.0;
 
+/// The zoom range, and the factor one classic wheel notch applies. Multiplicative, so zooming in and
+/// back out returns to where it started.
+pub const ZOOM_MIN: f32 = 0.2;
+pub const ZOOM_MAX: f32 = 8.0;
+pub const ZOOM_STEP: f32 = 1.15;
+
 /// Arrowhead length as a multiple of the pen width, and the floor below which a hairline arrow
 /// would stop reading as an arrow, in logical pixels.
 const ARROW_HEAD_SCALE: f32 = 4.0;
@@ -50,6 +56,8 @@ pub enum Tool {
     Diamond,
     Line,
     Arrow,
+    /// Pans the canvas and nothing else: it is the one tool whose gesture cannot touch the document.
+    Hand,
 }
 
 /// What clicking one control of the edit-mode toolbar does. Each variant has exactly the
@@ -84,6 +92,7 @@ impl Tool {
             Tool::Diamond => "D",
             Tool::Line => "L",
             Tool::Arrow => "A",
+            Tool::Hand => "H",
         }
     }
 }
@@ -153,11 +162,13 @@ impl OutputAnnotations {
     /// Eraser hit test: text boxes win over everything, then the nearest stroke or shape within the
     /// threshold. A shape is hit by its outline, never from inside it, so a rectangle's interior
     /// keeps belonging to whatever is drawn inside it.
-    pub fn hit(&self, x: f32, y: f32) -> Option<ItemId> {
+    /// `tolerance` is a **canvas** distance: the caller converts the interface's own reach through
+    /// the view, so a zoomed-out drawing is not a drawing whose lines are harder to hit.
+    pub fn hit(&self, x: f32, y: f32, tolerance: f32) -> Option<ItemId> {
         if let Some(i) = self.texts.iter().position(|t| t.bounds().contains(x, y)) {
             return Some(ItemId::Text(i));
         }
-        let limit = ERASER_THRESHOLD * ERASER_THRESHOLD;
+        let limit = tolerance * tolerance;
         let mut best: Option<(ItemId, f32)> = None;
         let mut consider = |id: ItemId, d: f32| {
             if d <= limit && best.is_none_or(|(_, nearest)| d < nearest) {
@@ -175,8 +186,8 @@ impl OutputAnnotations {
 
     /// Remove the element under `(x, y)`, returning the box it occupied, so the frame that
     /// repaints it knows what to damage.
-    pub fn erase(&mut self, x: f32, y: f32) -> Option<Rect> {
-        match self.hit(x, y) {
+    pub fn erase(&mut self, x: f32, y: f32, tolerance: f32) -> Option<Rect> {
+        match self.hit(x, y, tolerance) {
             Some(ItemId::Stroke(i)) => {
                 let box_ = self.strokes[i].bounds();
                 self.strokes.remove(i);
@@ -741,6 +752,90 @@ pub fn rect_of(a: [f32; 2], b: [f32; 2]) -> Rect {
     Rect::from_corners(a, b)
 }
 
+/// How one output is looking at the canvas: `screen = canvas * zoom + offset`, both in logical pixels.
+/// Not part of the document and never persisted, because it is a way of looking at a drawing rather
+/// than something the drawing is. The canvas itself has no extent: any coordinate is a real place, so
+/// there is no clamping, no edge and no growth rule to keep in step with the content.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct View {
+    pub zoom: f32,
+    /// Where the canvas origin is on screen, in logical pixels.
+    pub offset: [f32; 2],
+}
+
+impl Default for View {
+    fn default() -> Self {
+        Self {
+            zoom: 1.0,
+            offset: [0.0, 0.0],
+        }
+    }
+}
+
+impl View {
+    /// Whether this view is the one a frame drawn before the view existed would have used.
+    pub fn is_identity(self) -> bool {
+        self.zoom == 1.0 && self.offset == [0.0, 0.0]
+    }
+
+    pub fn to_screen(self, p: [f32; 2]) -> [f32; 2] {
+        [
+            p[0] * self.zoom + self.offset[0],
+            p[1] * self.zoom + self.offset[1],
+        ]
+    }
+
+    pub fn to_canvas(self, p: [f32; 2]) -> [f32; 2] {
+        [
+            (p[0] - self.offset[0]) / self.zoom,
+            (p[1] - self.offset[1]) / self.zoom,
+        ]
+    }
+
+    /// Pan by a screen delta: the drawing moves with the pointer 1:1, which is what makes a grab feel
+    /// like a grab.
+    pub fn pan_by(&mut self, delta: [f32; 2]) {
+        self.offset[0] += delta[0];
+        self.offset[1] += delta[1];
+    }
+
+    /// Zoom by `factor` about a screen point, which stays where it is. The zoom clamps, and the anchor
+    /// is honoured whatever the clamp did, so a burst of wheel events lands on the limit rather than
+    /// overshooting it and needing a burst back.
+    pub fn zoom_about(&mut self, anchor: [f32; 2], factor: f32) {
+        let canvas = self.to_canvas(anchor);
+        self.zoom_onto(factor, canvas, anchor);
+    }
+
+    /// Zoom by `factor` so that a given canvas point lands under `anchor` on screen. This is what a
+    /// pinch needs and a wheel does not: the fingers both move and change their distance, so the
+    /// canvas point they started on has to end up under where they are now.
+    pub fn zoom_onto(&mut self, factor: f32, canvas: [f32; 2], anchor: [f32; 2]) {
+        self.zoom = (self.zoom * factor).clamp(ZOOM_MIN, ZOOM_MAX);
+        self.offset = [
+            anchor[0] - canvas[0] * self.zoom,
+            anchor[1] - canvas[1] * self.zoom,
+        ];
+    }
+
+    /// A canvas rectangle as the screen rectangle it covers.
+    pub fn screen_rect(self, r: Rect) -> Rect {
+        let origin = self.to_screen([r.x, r.y]);
+        Rect {
+            x: origin[0],
+            y: origin[1],
+            w: r.w * self.zoom,
+            h: r.h * self.zoom,
+        }
+    }
+
+    /// A screen length as a canvas length: what the pointer aims with, such as the eraser's radius,
+    /// expressed in the document's own units.
+    pub fn canvas_len(self, screen: f32) -> f32 {
+        screen / self.zoom
+    }
+}
+
 /// The box an element occupies, which is what the frame and the marquee measure. A text box
 /// contributes its conservative estimate rather than its ink, so a frame errs outside the drawn
 /// glyphs instead of cutting through them.
@@ -777,17 +872,19 @@ pub fn selection_frame(
         .reduce(Rect::union)
 }
 
-/// The centre of the rotation handle: out of the middle of the frame's top edge.
-pub fn rotate_handle(frame: Rect) -> [f32; 2] {
-    [frame.x + frame.w / 2.0, frame.y - SELECT_ROTATE_GAP]
+/// The centre of the rotation handle: out of the middle of the frame's top edge, `gap` above it. The
+/// gap is an interface length, so a caller holding a canvas frame passes `gap / zoom` and a caller
+/// holding a screen frame passes it as it is.
+pub fn rotate_handle(frame: Rect, gap: f32) -> [f32; 2] {
+    [frame.x + frame.w / 2.0, frame.y - gap]
 }
 
 /// What a press at `(x, y)` grabs on the frame. A handle wins over the element below it, so a
 /// gesture that starts on one never moves or re-selects anything.
-pub fn grab_at(frame: Rect, x: f32, y: f32) -> Option<Grab> {
-    let limit = SELECT_HANDLE_HIT * SELECT_HANDLE_HIT;
+pub fn grab_at(frame: Rect, x: f32, y: f32, hit: f32) -> Option<Grab> {
+    let limit = hit * hit;
     let p = [x, y];
-    if dist_squared(p, rotate_handle(frame)) <= limit {
+    if dist_squared(p, rotate_handle(frame, hit.max(SELECT_ROTATE_GAP))) <= limit {
         return Some(Grab::Rotate);
     }
     Handle::ALL
@@ -798,15 +895,15 @@ pub fn grab_at(frame: Rect, x: f32, y: f32) -> Option<Grab> {
 
 /// Everything a selection paints: the frame, its handles and the rotation handle, which is what
 /// the frame that repaints it has to damage.
-pub fn selection_bounds(frame: Rect) -> Rect {
-    let handle = rotate_handle(frame);
+pub fn selection_bounds(frame: Rect, hit: f32) -> Rect {
+    let handle = rotate_handle(frame, hit.max(SELECT_ROTATE_GAP));
     let dot = Rect {
-        x: handle[0] - SELECT_HANDLE_HIT,
-        y: handle[1] - SELECT_HANDLE_HIT,
-        w: 2.0 * SELECT_HANDLE_HIT,
-        h: 2.0 * SELECT_HANDLE_HIT,
+        x: handle[0] - hit,
+        y: handle[1] - hit,
+        w: 2.0 * hit,
+        h: 2.0 * hit,
     };
-    frame.grown(SELECT_HANDLE_HIT).union(dot)
+    frame.grown(hit).union(dot)
 }
 
 /// The elements a marquee catches: those whose whole box is inside it, so an element that only

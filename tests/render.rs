@@ -1,9 +1,9 @@
 use sgraffito::canvas::{
-    Doc, OutputAnnotations, Overlay, PALETTE, Rect, Stroke, TextBuffer, TextItem, TextOverlay,
-    Tool, Toolbar, ToolbarAction,
+    Doc, ERASER_THRESHOLD, OutputAnnotations, Overlay, PALETTE, Rect, Shape, ShapeKind, Stroke,
+    TextBuffer, TextItem, TextOverlay, Tool, Toolbar, ToolbarAction, View,
 };
 use sgraffito::render::{
-    DamageRegion, FrameCache, Renderer, buffer_format, toolbar_bounds, transient_bounds,
+    DamageRegion, FrameCache, Renderer, Screen, buffer_format, toolbar_bounds, transient_bounds,
     transient_damage,
 };
 use wayland_client::protocol::wl_shm::Format;
@@ -58,6 +58,7 @@ fn empty_doc_leaves_buffer_transparent() {
         W,
         H,
         1.0,
+        View::default(),
         &OutputAnnotations::default(),
         &Overlay::default(),
         None,
@@ -69,7 +70,16 @@ fn empty_doc_leaves_buffer_transparent() {
 fn committed_stroke_draws_ink_on_the_line_only() {
     let mut buf = buffer(W, H);
     let a = ann(vec![line(50.0, 20.0, 180.0)], vec![]);
-    Renderer::new().render(&mut buf, W, H, 1.0, &a, &Overlay::default(), None);
+    Renderer::new().render(
+        &mut buf,
+        W,
+        H,
+        1.0,
+        View::default(),
+        &a,
+        &Overlay::default(),
+        None,
+    );
     assert!(alpha(&buf, W, 100, 50) > 0);
     assert_eq!(alpha(&buf, W, 100, 10), 0);
     assert_eq!(alpha(&buf, W, 100, 90), 0);
@@ -80,7 +90,16 @@ fn scale_multiplies_coordinates() {
     let (w, h) = (W * 2, H * 2);
     let mut buf = buffer(w, h);
     let a = ann(vec![line(50.0, 20.0, 180.0)], vec![]);
-    Renderer::new().render(&mut buf, w, h, 2.0, &a, &Overlay::default(), None);
+    Renderer::new().render(
+        &mut buf,
+        w,
+        h,
+        2.0,
+        View::default(),
+        &a,
+        &Overlay::default(),
+        None,
+    );
     assert!(alpha(&buf, w, 200, 100) > 0);
     assert_eq!(alpha(&buf, w, 200, 50), 0);
 }
@@ -98,7 +117,16 @@ fn text_item_draws_ink() {
             text: "H".into(),
         }],
     );
-    Renderer::new().render(&mut buf, W, H, 1.0, &a, &Overlay::default(), None);
+    Renderer::new().render(
+        &mut buf,
+        W,
+        H,
+        1.0,
+        View::default(),
+        &a,
+        &Overlay::default(),
+        None,
+    );
     assert!(ink(&buf) > 0);
     assert_eq!(alpha(&buf, W, 190, 90), 0);
 }
@@ -115,6 +143,7 @@ fn overlay_in_progress_stroke_is_drawn() {
         W,
         H,
         1.0,
+        View::default(),
         &OutputAnnotations::default(),
         &overlay,
         None,
@@ -134,6 +163,7 @@ fn overlay_eraser_marker_is_drawn() {
         W,
         H,
         1.0,
+        View::default(),
         &OutputAnnotations::default(),
         &overlay,
         None,
@@ -165,6 +195,7 @@ fn overlay_text_box_draws_text_and_cursor() {
         W,
         H,
         1.0,
+        View::default(),
         &OutputAnnotations::default(),
         &overlay,
         None,
@@ -198,6 +229,7 @@ fn the_caret_spans_the_whole_line_box() {
         w,
         h,
         1.0,
+        View::default(),
         &OutputAnnotations::default(),
         &overlay,
         None,
@@ -238,6 +270,7 @@ fn preedit_renders_more_ink_than_committed_text_alone() {
         W,
         H,
         1.0,
+        View::default(),
         &OutputAnnotations::default(),
         &make(""),
         None,
@@ -247,6 +280,7 @@ fn preedit_renders_more_ink_than_committed_text_alone() {
         W,
         H,
         1.0,
+        View::default(),
         &OutputAnnotations::default(),
         &make("ni"),
         None,
@@ -271,7 +305,16 @@ fn stroke_is_smoothed_through_the_sample_midpoints() {
         }],
         vec![],
     );
-    Renderer::new().render(&mut buf, 120, 80, 1.0, &a, &Overlay::default(), None);
+    Renderer::new().render(
+        &mut buf,
+        120,
+        80,
+        1.0,
+        View::default(),
+        &a,
+        &Overlay::default(),
+        None,
+    );
     // The ends are still exactly on the first and last sample, with round caps.
     assert!(alpha(&buf, 120, 10, 60) > 0);
     assert!(alpha(&buf, 120, 100, 20) > 0);
@@ -292,7 +335,16 @@ fn single_sample_stroke_is_a_dot() {
         }],
         vec![],
     );
-    Renderer::new().render(&mut buf, W, H, 1.0, &a, &Overlay::default(), None);
+    Renderer::new().render(
+        &mut buf,
+        W,
+        H,
+        1.0,
+        View::default(),
+        &a,
+        &Overlay::default(),
+        None,
+    );
     assert!(alpha(&buf, W, 60, 40) > 0);
     assert_eq!(alpha(&buf, W, 60, 50), 0);
 }
@@ -311,7 +363,7 @@ fn frame(
         None => DamageRegion::All,
         Some(d) => DamageRegion::from_logical(d, 1.0, w, h),
     };
-    Renderer::new().render(buf, w, h, 1.0, ann, overlay, damage);
+    Renderer::new().render(buf, w, h, 1.0, View::default(), ann, overlay, damage);
     region.swap_rb(buf, w, h);
 }
 
@@ -350,11 +402,20 @@ fn toolbar_draws_ink_only_when_it_is_present() {
         ..Default::default()
     };
     let mut buf = buffer(640, 900);
-    Renderer::new().render(&mut buf, 640, 900, 1.0, &doc, &with, None);
+    Renderer::new().render(&mut buf, 640, 900, 1.0, View::default(), &doc, &with, None);
     assert!(ink(&buf) > 0);
 
     let mut plain = buffer(640, 900);
-    Renderer::new().render(&mut plain, 640, 900, 1.0, &doc, &Overlay::default(), None);
+    Renderer::new().render(
+        &mut plain,
+        640,
+        900,
+        1.0,
+        View::default(),
+        &doc,
+        &Overlay::default(),
+        None,
+    );
     assert_eq!(ink(&plain), 0);
 }
 
@@ -371,6 +432,7 @@ fn toolbar_is_a_left_edge_rail_at_the_optical_centre() {
         w,
         h,
         1.0,
+        View::default(),
         &OutputAnnotations::default(),
         &overlay,
         None,
@@ -487,6 +549,7 @@ fn every_block_of_the_rail_is_reachable_and_no_row_is_a_gap() {
         Tool::Diamond,
         Tool::Line,
         Tool::Arrow,
+        Tool::Hand,
     ] {
         assert!(actions.contains(&ToolbarAction::Tool(tool)), "{tool:?}");
     }
@@ -508,9 +571,9 @@ fn every_block_of_the_rail_is_reachable_and_no_row_is_a_gap() {
         ToolbarAction::Lock,
         "Esc is not last"
     );
-    // Seventeen clickable blocks: five colours, nine tools, `[`, `]` and `Esc`. The size readout is
+    // Eighteen clickable blocks: five colours, ten tools, `[`, `]` and `Esc`. The size readout is
     // drawn between the two size keys but owned by `[`, so it is not one of them.
-    assert_eq!(actions.len(), 17, "a drawn block cannot be hit");
+    assert_eq!(actions.len(), 18, "a drawn block cannot be hit");
     // Outside the rail the toolbar takes nothing: those presses are drawing gestures.
     let band = toolbar_bounds(w, h);
     assert_eq!(
@@ -596,6 +659,7 @@ fn a_hovered_block_stretches_to_say_what_it_does() {
             w,
             h,
             1.0,
+            View::default(),
             &OutputAnnotations::default(),
             &overlay,
             None,
@@ -640,7 +704,7 @@ fn the_eraser_cannot_reach_the_toolbar() {
     let mut doc = OutputAnnotations::default();
     let band = toolbar_bounds(w, h);
     for y in [band.y + 20.0, band.y + band.h / 2.0] {
-        assert!(doc.erase(band.x + 20.0, y).is_none());
+        assert!(doc.erase(band.x + 20.0, y, ERASER_THRESHOLD).is_none());
     }
 }
 
@@ -899,6 +963,7 @@ fn abgr_buffer_carries_rgba_bytes_so_it_needs_no_swap() {
         w,
         h,
         1.0,
+        View::default(),
         &ann(vec![line(4.0, 0.0, 8.0)], vec![]),
         &Overlay::default(),
         None,
@@ -949,6 +1014,7 @@ fn doc_strokes_of_other_outputs_are_not_drawn() {
         W,
         H,
         1.0,
+        View::default(),
         &OutputAnnotations::default(),
         &Overlay::default(),
         None,
@@ -972,6 +1038,7 @@ fn rail_frame(w: u32, h: u32, wheel: &Toolbar, hover: Option<ToolbarAction>, gro
         w,
         h,
         1.0,
+        View::default(),
         &OutputAnnotations::default(),
         &overlay,
         None,
@@ -1174,6 +1241,7 @@ fn edit_frame(w: u32, h: u32, text: &str, cursor: usize, preedit: &str) -> Vec<u
         w,
         h,
         1.0,
+        View::default(),
         &OutputAnnotations::default(),
         &overlay,
         None,
@@ -1245,7 +1313,14 @@ fn a_cjk_click_lands_inside_the_measured_box() {
         text: "买牛奶".into(),
     };
     let mut renderer = Renderer::new();
-    let measured = renderer.text_edit_bounds(&item.text, &item, 1.0);
+    let measured = renderer.text_edit_bounds(
+        &item.text,
+        &item,
+        Screen {
+            scale: 1.0,
+            view: View::default(),
+        },
+    );
     let (w, h) = (200u32, 100u32);
     let mut buf = buffer(w, h);
     renderer.render(
@@ -1253,6 +1328,7 @@ fn a_cjk_click_lands_inside_the_measured_box() {
         w,
         h,
         1.0,
+        View::default(),
         &ann(vec![], vec![item.clone()]),
         &Overlay::default(),
         None,
@@ -1309,6 +1385,7 @@ fn the_rail_is_pinned_to_the_top_margin_when_it_cannot_be_centred() {
         short_w,
         short_h,
         1.0,
+        View::default(),
         &OutputAnnotations::default(),
         &overlay,
         None,
@@ -1344,6 +1421,7 @@ fn the_rail_sits_on_a_plate() {
         w,
         h,
         1.0,
+        View::default(),
         &OutputAnnotations::default(),
         &overlay,
         None,
@@ -1399,6 +1477,7 @@ fn the_rail_sits_on_a_plate() {
         w,
         h,
         1.0,
+        View::default(),
         &OutputAnnotations::default(),
         &Overlay {
             toolbar: Some(stretched),
@@ -1441,6 +1520,7 @@ fn an_edit_mode_frame_is_painted_on_a_scrim() {
         w,
         h,
         1.0,
+        View::default(),
         &OutputAnnotations::default(),
         &edit,
         None,
@@ -1451,6 +1531,7 @@ fn an_edit_mode_frame_is_painted_on_a_scrim() {
         w,
         h,
         1.0,
+        View::default(),
         &OutputAnnotations::default(),
         &locked,
         None,
@@ -1499,6 +1580,7 @@ fn a_cached_frame_keeps_the_scrim_after_a_document_change() {
         w,
         h,
         1.0,
+        View::default(),
         &before,
         &overlay,
         None,
@@ -1512,6 +1594,7 @@ fn a_cached_frame_keeps_the_scrim_after_a_document_change() {
         w,
         h,
         1.0,
+        View::default(),
         &after,
         &overlay,
         None,
@@ -1520,7 +1603,16 @@ fn a_cached_frame_keeps_the_scrim_after_a_document_change() {
     );
     // A fresh render of the new document, so the two paths are compared rather than assumed equal.
     let mut fresh = buffer(w, h);
-    Renderer::new().render(&mut fresh, w, h, 1.0, &after, &overlay, None);
+    Renderer::new().render(
+        &mut fresh,
+        w,
+        h,
+        1.0,
+        View::default(),
+        &after,
+        &overlay,
+        None,
+    );
     assert_eq!(second, fresh);
     let (x, y) = (w - 20, h - 20);
     assert_eq!(
@@ -1528,4 +1620,98 @@ fn a_cached_frame_keeps_the_scrim_after_a_document_change() {
         SCRIM,
         "the rebuilt raster lost the scrim"
     );
+}
+
+#[test]
+fn a_panned_and_zoomed_frame_puts_the_drawing_where_the_view_says() {
+    // The whole point of the view: a canvas point lands at the screen point the transform names, and
+    // the rail stays exactly where it was, because it is a control rather than part of the drawing.
+    let (w, h) = (400u32, 300u32);
+    let doc = OutputAnnotations {
+        strokes: vec![Stroke {
+            color: "#e01b24".into(),
+            width: 4.0,
+            points: vec![[100.0, 100.0], [140.0, 100.0]],
+        }],
+        texts: vec![],
+        shapes: vec![],
+    };
+    let view = View {
+        zoom: 2.0,
+        offset: [30.0, -10.0],
+    };
+    let rail = rail();
+    let overlay = Overlay {
+        toolbar: Some(rail),
+        ..Default::default()
+    };
+    let mut buf = buffer(w, h);
+    Renderer::new().render(&mut buf, w, h, 1.0, view, &doc, &overlay, None);
+    // The stroke's canvas point (100,100) is at (230,190) on screen: red there, and not where it was.
+    let red_at = |x: u32, y: u32| {
+        let i = ((y * w + x) * 4) as usize;
+        buf[i] > 120 && buf[i + 1] < 80 && buf[i + 2] < 80
+    };
+    assert!(red_at(230, 190), "the stroke is not where the view puts it");
+    assert!(
+        !red_at(100, 100),
+        "the stroke is still where the canvas had it"
+    );
+    // The rail is in the same place it is at 1:1: the block column's first row is painted there.
+    let (ox, oy) = (
+        toolbar_bounds(w as f32, h as f32).x + 6.0 + 1.0,
+        toolbar_bounds(w as f32, h as f32).y + 1.0,
+    );
+    assert!(
+        content(&buf, w, (ox + 15.0) as u32, (oy + 20.0) as u32),
+        "the rail moved with the view"
+    );
+}
+
+#[test]
+fn the_default_view_draws_what_no_view_drew() {
+    // A frame at 1:1 with no pan has to be the frame this program drew before the view existed,
+    // down to the byte: that is what keeps this change from moving a pixel it does not mean to.
+    let (w, h) = (400u32, 300u32);
+    let doc = OutputAnnotations {
+        strokes: vec![Stroke {
+            color: "#e01b24".into(),
+            width: 4.0,
+            points: vec![[40.0, 40.0], [180.0, 90.0]],
+        }],
+        texts: vec![TextItem {
+            x: 40.0,
+            y: 140.0,
+            color: "#ffffff".into(),
+            size: 20.0,
+            text: "milk".into(),
+        }],
+        shapes: vec![Shape {
+            kind: ShapeKind::Circle,
+            color: "#33d17a".into(),
+            width: 3.0,
+            from: [200.0, 150.0],
+            to: [300.0, 250.0],
+        }],
+    };
+    let overlay = Overlay {
+        toolbar: Some(rail()),
+        ..Default::default()
+    };
+    let mut plain = buffer(w, h);
+    Renderer::new().render(&mut plain, w, h, 1.0, View::default(), &doc, &overlay, None);
+    let mut cached = buffer(w, h);
+    Renderer::new().render_with_cache(
+        &mut cached,
+        w,
+        h,
+        1.0,
+        View::default(),
+        &doc,
+        &overlay,
+        None,
+        &mut FrameCache::default(),
+        &[],
+    );
+    assert_eq!(plain, cached);
 }

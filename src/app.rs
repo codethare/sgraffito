@@ -42,9 +42,10 @@ use wayland_client::{
 };
 
 use crate::canvas::{
-    Doc, Gesture, Grab, Handle, ItemId, OutputAnnotations, Overlay, Rect, Selection, Shape,
-    ShapeKind, TEXT_SIZE_MAX, TEXT_SIZE_MIN, TextBuffer, TextItem, TextOverlay, Toolbar, Transform,
-    grab_at, marquee_select, selection_bounds, selection_frame,
+    Doc, ERASER_THRESHOLD, Gesture, Grab, Handle, ItemId, OutputAnnotations, Overlay, Rect,
+    SELECT_HANDLE_HIT, Selection, Shape, ShapeKind, TEXT_SIZE_MAX, TEXT_SIZE_MIN, TextBuffer,
+    TextItem, TextOverlay, Toolbar, Transform, View, grab_at, marquee_select, selection_bounds,
+    selection_frame,
 };
 
 pub use crate::canvas::{PALETTE, Tool, ToolbarAction};
@@ -52,12 +53,14 @@ use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::
     Shape as CursorShape, WpCursorShapeDeviceV1,
 };
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1::WpCursorShapeManagerV1;
+use wayland_protocols::wp::pointer_gestures::zv1::client::zwp_pointer_gesture_pinch_v1::ZwpPointerGesturePinchV1;
+use wayland_protocols::wp::pointer_gestures::zv1::client::zwp_pointer_gestures_v1::ZwpPointerGesturesV1;
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3::ZwpTextInputManagerV3;
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::ZwpTextInputV3;
 
-use crate::input::stepped_size;
+use crate::input::{PinchData, stepped_size};
 use crate::render::{
-    DamageRegion, FrameCache, Renderer, buffer_format, toolbar_bounds, transient_bounds,
+    DamageRegion, FrameCache, Renderer, Screen, buffer_format, toolbar_bounds, transient_bounds,
     transient_damage,
 };
 use crate::store::{self, Store};
@@ -72,6 +75,8 @@ pub const TEXT_SIZE: f32 = 18.0;
 pub const TEXT_SIZE_STEP: f32 = 2.0;
 
 pub(crate) const BTN_LEFT: u32 = 0x110;
+/// The wheel, pressed: a pan anchored at the point the press started on.
+pub(crate) const BTN_MIDDLE: u32 = 0x112;
 /// Max shm buffers kept per output: the compositor may still hold the previous one.
 const MAX_BUFFERS: usize = 2;
 /// How long the pop-out of a hovered block takes, one frame of it, and the relaxed poll the
@@ -153,6 +158,9 @@ pub struct Output {
     buffers: Vec<Buffer>,
     buffer_size: (u32, u32),
     pub(crate) overlay: Overlay,
+    /// How this output is looking at the canvas. Never persisted, and carried across a surface
+    /// recreation like `name`: losing the view on every `Esc` would be felt immediately.
+    pub(crate) view: View,
     cache: FrameCache,
 }
 
@@ -239,6 +247,35 @@ pub struct App {
     pub(crate) gesture: Option<Gesture>,
     /// The frame handle under the pointer, which is what the pointer shape says it would grab.
     pub(crate) selection_grab: Option<Grab>,
+    /// The pan gesture in flight: where the pointer was, so a motion event pans by its own delta. A pan
+    /// is not a document change, so nothing about it is in the document, in the file, or something
+    /// `Esc` has to commit or abandon.
+    pub(crate) pan: Option<[f32; 2]>,
+
+    // pointer gestures (zwp_pointer_gestures_v1; sctk does not wrap it)
+    /// The manager, when the compositor has one.
+    gestures: Option<ZwpPointerGesturesV1>,
+    /// The pinch gesture of this seat's pointer.
+    pinch: Option<ZwpPointerGesturePinchV1>,
+    /// Where the pointer last was, and on which output: a pinch's focal point arrives as a delta from
+    /// where the fingers went down, so the gesture needs somewhere to measure it from.
+    pub(crate) pointer_at: Option<(u32, [f32; 2])>,
+    /// What a pinch remembers from its `begin`: the output it is on, the screen point the fingers
+    /// started at, the canvas point that was under it, and the scale the protocol last reported.
+    pub(crate) pinch_state: Option<PinchState>,
+}
+
+/// A pinch in flight, as the protocol reports it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PinchState {
+    pub(crate) key: u32,
+    /// The screen point the fingers went down on.
+    pub(crate) origin: [f32; 2],
+    /// The canvas point that was under `origin`, which has to stay under the fingers.
+    pub(crate) canvas: [f32; 2],
+    /// The cumulative scale of the last update: the protocol reports scale relative to the start, so
+    /// consecutive updates need a ratio rather than a product.
+    pub(crate) scale: f32,
 }
 
 impl App {
@@ -306,9 +343,15 @@ impl App {
             toolbar_hover_since: None,
             gesture: None,
             selection_grab: None,
+            pan: None,
+            gestures: None,
+            pinch: None,
+            pointer_at: None,
+            pinch_state: None,
         };
         app.bind_text_input_manager();
         app.bind_cursor_shape();
+        app.bind_pointer_gestures();
         app.sync_outputs();
         Ok(app)
     }
@@ -403,6 +446,7 @@ impl App {
                     toolbar,
                     ..Default::default()
                 },
+                view: View::default(),
                 cache: FrameCache::default(),
             },
         );
@@ -419,6 +463,10 @@ impl App {
         self.end_text_edit();
         self.commit_any_gesture();
         self.cancel_transients();
+        // The view is kept across a mode switch, but a gesture that was holding the pointer is not:
+        // the surfaces it was panning are about to be recreated.
+        self.pan = None;
+        self.pinch_state = None;
         self.keyboard_focus = None;
         self.pointer_over_toolbar = false;
         self.toolbar_hover = None;
@@ -430,13 +478,20 @@ impl App {
             let Some(old) = self.outputs.remove(&key) else {
                 continue;
             };
-            let (was_configured, name, output) =
-                (old.configured, old.name.clone(), old.output.clone());
+            let (was_configured, name, view, output) = (
+                old.configured,
+                old.name.clone(),
+                old.view,
+                old.output.clone(),
+            );
             drop(old);
             self.create_surface(output);
             if let Some(out) = self.outputs.get_mut(&key) {
                 out.configured = was_configured;
                 out.name = name;
+                // The view is where the user was looking, and recreating a surface is not a reason to
+                // send them back to the origin.
+                out.view = view;
                 out.dirty = true;
             }
         }
@@ -544,6 +599,12 @@ impl App {
         if self.mode == Mode::Locked || self.pointer_over_toolbar {
             return CursorShape::Default;
         }
+        if self.pan.is_some() {
+            return CursorShape::Grabbing;
+        }
+        if self.tool == Tool::Hand {
+            return CursorShape::Grab;
+        }
         if self.tool == Tool::Selection {
             // With the selection tool armed the shape says what a press would grab, which is what
             // the pointer is over rather than what the tool is.
@@ -566,6 +627,23 @@ impl App {
             return;
         };
         device.set_shape(serial, self.desired_cursor());
+    }
+
+    /// Bind `zwp_pointer_gestures_v1`; without it a touchpad's two-finger zoom is simply never sent,
+    /// and everything else about panning and zooming still works.
+    pub(crate) fn bind_pointer_gestures(&mut self) {
+        let bound = self
+            .registry_state
+            .bind_one::<ZwpPointerGesturesV1, App, PinchData>(&self.qh, 1..=3, PinchData);
+        match bound {
+            Ok(manager) => {
+                self.gestures = Some(manager);
+                log("pointer gestures protocol zwp_pointer_gestures_v1 available");
+            }
+            Err(e) => log(&format!(
+                "compositor does not provide zwp_pointer_gestures_v1 ({e}); a touchpad's pinch cannot zoom, so use the wheel or the hand tool"
+            )),
+        }
     }
 
     /// Bind `wp_cursor_shape_v1`; the pointer keeps the compositor's own shape without it.
@@ -740,11 +818,17 @@ impl App {
                 .as_ref()
                 .map(|s| s.items.clone())
                 .unwrap_or_default();
-            frame = selection_frame(ann, &held, None);
-            under = ann.hit(x, y);
+            // The frame is drawn and grabbed in screen space, because the handles are interface
+            // lengths; the document's own hit test is asked in canvas coordinates.
+            frame = selection_frame(ann, &held, None).map(|f| out.view.screen_rect(f));
+            under = ann.hit(
+                out.view.to_canvas([x, y])[0],
+                out.view.to_canvas([x, y])[1],
+                out.view.canvas_len(ERASER_THRESHOLD),
+            );
         }
         if let Some(frame) = frame
-            && let Some(grab) = grab_at(frame, x, y)
+            && let Some(grab) = grab_at(frame, x, y, SELECT_HANDLE_HIT)
         {
             self.gesture = Some(Gesture::start(Some(grab), frame, x, y));
             self.sync_cursor();
@@ -821,6 +905,131 @@ impl App {
         // settles it on whatever is under it now.
         self.selection_grab = None;
         self.sync_cursor();
+    }
+
+    /// Start panning from a screen point. A pan takes the pointer for its duration: it cannot also
+    /// draw, erase, select or place text, and a gesture in flight is finished rather than continued
+    /// beside it.
+    pub(crate) fn begin_pan(&mut self, key: u32, x: f32, y: f32) {
+        self.end_text_edit();
+        self.commit_transient_drawing();
+        self.commit_any_gesture();
+        self.pan = Some([x, y]);
+        // Nothing else owns the pointer now.
+        self.gesture = None;
+        self.selection_grab = None;
+        let _ = key;
+        self.sync_cursor();
+    }
+
+    /// Pan the output the pointer is on by the pointer's own movement, so the canvas point under it
+    /// stays under it.
+    pub(crate) fn drag_pan(&mut self, key: u32, x: f32, y: f32) {
+        let Some(last) = self.pan.as_mut() else {
+            return;
+        };
+        let delta = [x - last[0], y - last[1]];
+        *last = [x, y];
+        if delta == [0.0, 0.0] {
+            return;
+        }
+        self.view_changed(key, |view| view.pan_by(delta));
+    }
+
+    /// Zoom about a screen point, which stays where it is.
+    pub(crate) fn zoom_about(&mut self, key: u32, anchor: [f32; 2], factor: f32) {
+        self.view_changed(key, |view| view.zoom_about(anchor, factor));
+    }
+
+    /// Let go of a pan.
+    pub(crate) fn end_pan(&mut self) {
+        if self.pan.take().is_some() {
+            self.sync_cursor();
+        }
+    }
+
+    /// A pinch started: remember where the fingers are and what is under them, because the protocol
+    /// reports everything about a pinch as a delta from here.
+    pub(crate) fn pinch_begin(
+        &mut self,
+        surface: &wayland_client::protocol::wl_surface::WlSurface,
+    ) {
+        let Some(key) = self.output_of(surface) else {
+            return;
+        };
+        let Some((at_key, at)) = self.pointer_at else {
+            return;
+        };
+        if at_key != key {
+            return;
+        }
+        let view = match self.outputs.get(&key) {
+            Some(out) => out.view,
+            None => return,
+        };
+        // A pinch is a view gesture, so it takes the pointer like a pan does.
+        self.pan = None;
+        self.gesture = None;
+        self.pinch_state = Some(PinchState {
+            key,
+            origin: at,
+            canvas: view.to_canvas(at),
+            scale: 1.0,
+        });
+        self.sync_cursor();
+    }
+
+    /// One pinch update: the focal point has moved by `(dx, dy)` from where the fingers went down and
+    /// the scale is cumulative, so both are relative to what `pinch_begin` remembered.
+    pub(crate) fn pinch_update(&mut self, dx: f32, dy: f32, scale: f32) {
+        let Some(state) = self.pinch_state.as_mut() else {
+            return;
+        };
+        let factor = if state.scale > 0.0 {
+            scale / state.scale
+        } else {
+            1.0
+        };
+        state.scale = scale;
+        let anchor = [state.origin[0] + dx, state.origin[1] + dy];
+        let (key, canvas) = (state.key, state.canvas);
+        if factor != 1.0 {
+            self.view_changed(key, |view| view.zoom_onto(factor, canvas, anchor));
+        } else {
+            // The fingers only moved: the canvas point they started on follows them.
+            self.view_changed(key, |view| {
+                let zoom = view.zoom;
+                view.offset = [anchor[0] - canvas[0] * zoom, anchor[1] - canvas[1] * zoom];
+            });
+        }
+    }
+
+    /// A pinch ended.
+    pub(crate) fn pinch_end(&mut self) {
+        if self.pinch_state.take().is_some() {
+            self.sync_cursor();
+        }
+    }
+
+    /// Whether a pan is in flight, which is what the pointer shape and the press path both ask.
+    pub(crate) fn panning(&self) -> bool {
+        self.pan.is_some()
+    }
+
+    /// Apply a change to one output's view. The raster is screen-space, so a view change moves every
+    /// pixel of it: the cache is dropped, the boxes the previous frame cached describe a view that no
+    /// longer exists, and the frame that follows repaints the whole surface.
+    pub(crate) fn view_changed(&mut self, key: u32, f: impl FnOnce(&mut View)) {
+        let Some(out) = self.outputs.get_mut(&key) else {
+            return;
+        };
+        f(&mut out.view);
+        out.pending = None;
+        out.last_transient = None;
+        out.last_text_bounds = None;
+        out.cache.invalidate();
+        out.dirty = true;
+        self.dirty = true;
     }
 
     /// Drop the selection everywhere, and the marquee with it. Returns whether anything was held.
@@ -1080,7 +1289,14 @@ impl App {
         let existing = self.doc.outputs.get(bucket.as_ref()).and_then(|ann| {
             ann.texts.iter().position(|t| {
                 self.renderer
-                    .text_edit_bounds(&t.text, t, scale)
+                    .text_edit_bounds(
+                        &t.text,
+                        t,
+                        Screen {
+                            scale,
+                            view: out.view,
+                        },
+                    )
                     .contains(x, y)
             })
         });
@@ -1343,25 +1559,35 @@ impl App {
         // What this frame has to touch. Painting a box is only valid on the buffer that holds
         // the previous frame: on any other buffer the pixels outside the box are older. If the
         // previous buffer is in flight we fell back to the other one, so fill everything.
-        let transient = transient_bounds(&out.overlay);
+        // Every box below is a **screen** box: the overlay's geometry is canvas, so it is mapped
+        // through this output's view once, here, and everything downstream — the cached boxes, the
+        // damage region, the union — is screen-space like the raster it damages.
+        let view = out.view;
+        // The handles are interface lengths: on screen they are the constants themselves.
+        let handle_hit = SELECT_HANDLE_HIT;
+        let transient = transient_bounds(&out.overlay).map(|b| view.screen_rect(b));
         let bucket = out.bucket(id);
         let empty = OutputAnnotations::default();
         let ann = self.doc.outputs.get(bucket.as_ref()).unwrap_or(&empty);
-        // The frame and its handles are not document elements, so they are only ever drawn live;
-        // the box they occupy is what the frame that repaints them has to damage.
+        // The frame and its handles are not document elements, so they are only ever drawn live; the
+        // box they occupy is what the frame that repaints them has to damage. The handles are
+        // interface-sized, so the frame is mapped first and grown on screen.
         let selected = out
             .overlay
             .selection
             .as_ref()
             .and_then(|s| selection_frame(ann, &s.items, s.transform));
         let transient = match (transient, selected) {
-            (Some(a), Some(b)) => Some(a.union(selection_bounds(b))),
-            (a, b) => a.or(b.map(selection_bounds)),
+            (Some(a), Some(b)) => Some(a.union(selection_bounds(view.screen_rect(b), handle_hit))),
+            (a, b) => a.or(b.map(|b| selection_bounds(view.screen_rect(b), handle_hit))),
         };
         let current_text_bounds = out.overlay.text.as_ref().and_then(|edit| {
             (edit.preedit.is_empty()).then(|| {
-                self.renderer
-                    .text_edit_bounds(&edit.buffer.text, &edit.item, scale)
+                view.screen_rect(self.renderer.text_edit_bounds(
+                    &edit.buffer.text,
+                    &edit.item,
+                    Screen { scale, view },
+                ))
             })
         });
         let edit_index_valid = out
@@ -1382,7 +1608,7 @@ impl App {
             out.last_text_bounds
                 .unwrap()
                 .union(current_text_bounds.unwrap())
-                .union(out.overlay.text.as_ref().unwrap().item.paint_bounds())
+                .union(view.screen_rect(out.overlay.text.as_ref().unwrap().item.paint_bounds()))
         });
         let text_needs_full = out.overlay.text.is_some() && out.text_dirty && !local_text;
         // The raster never holds the box under edit, and it never holds the elements a live
@@ -1401,8 +1627,9 @@ impl App {
             None
         } else if let Some(pending) = out.pending {
             // A document change with a known box: the changed element is in the rebuilt raster,
-            // and outside the box the previous frame is still right, so the box is enough.
-            let mut box_ = pending;
+            // and outside the box the previous frame is still right, so the box is enough. The box the
+            // document reported is canvas; this region is screen.
+            let mut box_ = view.screen_rect(pending);
             for extra in [out.last_transient, transient].into_iter().flatten() {
                 box_ = box_.union(extra);
             }
@@ -1448,6 +1675,7 @@ impl App {
                 px.0,
                 px.1,
                 scale,
+                out.view,
                 ann,
                 &out.overlay,
                 damage,
@@ -1556,6 +1784,8 @@ pub fn tool_cursor(tool: Tool) -> CursorShape {
         }
         Tool::Eraser => CursorShape::Cell,
         Tool::Text => CursorShape::Text,
+        // The hand tool's gesture is a pan, and the grab shapes say exactly that.
+        Tool::Hand => CursorShape::Grab,
         // The selection tool creates nothing of its own, so the pointer stays the plain arrow
         // until it is over something it would act on.
         Tool::Selection => CursorShape::Default,
@@ -1771,6 +2001,12 @@ impl SeatHandler for App {
                     .cursor_shape_manager
                     .as_ref()
                     .map(|manager| manager.get_pointer(&pointer, qh, GlobalData));
+                // The pinch belongs to this pointer, and sctk does not wrap the protocol, so it is
+                // fetched by hand the way the text input object is.
+                self.pinch = self
+                    .gestures
+                    .as_ref()
+                    .map(|gestures| gestures.get_pinch_gesture(&pointer, qh, PinchData));
             }
         }
         if capability == Capability::Keyboard {

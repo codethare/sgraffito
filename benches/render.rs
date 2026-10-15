@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use sgraffito::canvas::{
     OutputAnnotations, Overlay, Rect, Stroke, TextBuffer, TextItem, TextOverlay, Tool, Toolbar,
-    ToolbarAction,
+    ToolbarAction, View,
 };
 use sgraffito::render::{FrameCache, Renderer, toolbar_bounds, transient_bounds, transient_damage};
 
@@ -150,6 +150,7 @@ fn render_frame(
         width,
         height,
         scale,
+        View::default(),
         annotations,
         overlay,
         damage,
@@ -275,6 +276,19 @@ fn main() {
     );
     // The frame that reports a committed stroke: the document is rasterised again, but only the
     // stroke's own box is filled, so this is the one frame a change still costs.
+    // A pan or a zoom rebuilds the whole document raster, because the raster is screen-space and a
+    // view change moves every pixel of it: this is that frame, over a dense drawing, and it is the
+    // cost of moving the canvas at all.
+    measure(
+        "pan-cold-dense",
+        3840,
+        2160,
+        1.0,
+        &dense,
+        &Overlay::default(),
+        None,
+        true,
+    );
     measure(
         "dense-commit",
         3840,

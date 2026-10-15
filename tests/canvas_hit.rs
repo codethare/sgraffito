@@ -1,4 +1,4 @@
-use sgraffito::canvas::{ItemId, OutputAnnotations, Rect, Stroke, TextItem};
+use sgraffito::canvas::{ERASER_THRESHOLD, ItemId, OutputAnnotations, Rect, Stroke, TextItem};
 
 fn line(y: f32, x0: f32, x1: f32) -> Stroke {
     Stroke {
@@ -29,24 +29,30 @@ fn text(x: f32, y: f32, s: &str) -> TextItem {
 #[test]
 fn hits_stroke_within_threshold() {
     let a = ann(vec![line(100.0, 0.0, 200.0)], vec![]);
-    assert_eq!(a.hit(50.0, 101.0), Some(ItemId::Stroke(0)));
+    assert_eq!(
+        a.hit(50.0, 101.0, ERASER_THRESHOLD),
+        Some(ItemId::Stroke(0))
+    );
 }
 
 #[test]
 fn threshold_boundary_is_inclusive() {
     let a = ann(vec![line(100.0, 0.0, 200.0)], vec![]);
-    assert_eq!(a.hit(50.0, 108.0), Some(ItemId::Stroke(0)));
-    assert_eq!(a.hit(50.0, 108.5), None);
+    assert_eq!(
+        a.hit(50.0, 108.0, ERASER_THRESHOLD),
+        Some(ItemId::Stroke(0))
+    );
+    assert_eq!(a.hit(50.0, 108.5, ERASER_THRESHOLD), None);
 }
 
 #[test]
 fn misses_far_away_point() {
     let a = ann(vec![line(100.0, 0.0, 200.0)], vec![]);
-    assert_eq!(a.hit(50.0, 120.0), None);
+    assert_eq!(a.hit(50.0, 120.0, ERASER_THRESHOLD), None);
     assert!(
         ann(vec![line(100.0, 0.0, 200.0)], vec![])
             .clone()
-            .erase(400.0, 400.0)
+            .erase(400.0, 400.0, ERASER_THRESHOLD)
             .is_none()
     );
 }
@@ -54,7 +60,7 @@ fn misses_far_away_point() {
 #[test]
 fn misses_beyond_stroke_ends() {
     let a = ann(vec![line(100.0, 0.0, 200.0)], vec![]);
-    assert_eq!(a.hit(220.0, 100.0), None);
+    assert_eq!(a.hit(220.0, 100.0, ERASER_THRESHOLD), None);
 }
 
 #[test]
@@ -63,15 +69,24 @@ fn picks_nearest_stroke() {
         vec![line(100.0, 0.0, 200.0), line(104.0, 0.0, 200.0)],
         vec![],
     );
-    assert_eq!(a.hit(50.0, 101.0), Some(ItemId::Stroke(0)));
-    assert_eq!(a.hit(50.0, 103.0), Some(ItemId::Stroke(1)));
+    assert_eq!(
+        a.hit(50.0, 101.0, ERASER_THRESHOLD),
+        Some(ItemId::Stroke(0))
+    );
+    assert_eq!(
+        a.hit(50.0, 103.0, ERASER_THRESHOLD),
+        Some(ItemId::Stroke(1))
+    );
 }
 
 #[test]
 fn hits_text_box() {
     let a = ann(vec![], vec![text(100.0, 200.0, "buy milk")]);
-    assert_eq!(a.hit(110.0, 210.0), Some(ItemId::Text(0)));
-    assert_eq!(a.hit(100.0 + 0.6 * 18.0 * 8.0 + 5.0, 210.0), None);
+    assert_eq!(a.hit(110.0, 210.0, ERASER_THRESHOLD), Some(ItemId::Text(0)));
+    assert_eq!(
+        a.hit(100.0 + 0.6 * 18.0 * 8.0 + 5.0, 210.0, ERASER_THRESHOLD),
+        None
+    );
 }
 
 #[test]
@@ -79,7 +94,7 @@ fn text_wins_over_stroke_at_same_point() {
     let t = text(100.0, 200.0, "note");
     let s = line(205.0, 90.0, 200.0);
     let a = ann(vec![s], vec![t]);
-    assert_eq!(a.hit(110.0, 205.0), Some(ItemId::Text(0)));
+    assert_eq!(a.hit(110.0, 205.0, ERASER_THRESHOLD), Some(ItemId::Text(0)));
 }
 
 #[test]
@@ -89,16 +104,16 @@ fn erase_removes_only_hit_item() {
         vec![],
     );
     // The erased element's box comes back, so the frame that reports it knows what to damage.
-    assert!(a.erase(50.0, 101.0).is_some());
+    assert!(a.erase(50.0, 101.0, ERASER_THRESHOLD).is_some());
     assert_eq!(a.strokes.len(), 1);
     assert_eq!(a.strokes[0].points[0][1], 140.0);
-    assert!(a.erase(50.0, 101.0).is_none());
+    assert!(a.erase(50.0, 101.0, ERASER_THRESHOLD).is_none());
 }
 
 #[test]
 fn erase_removes_text_box() {
     let mut a = ann(vec![], vec![text(100.0, 200.0, "note")]);
-    assert!(a.erase(110.0, 210.0).is_some());
+    assert!(a.erase(110.0, 210.0, ERASER_THRESHOLD).is_some());
     assert!(a.texts.is_empty());
 }
 
@@ -106,8 +121,11 @@ fn erase_removes_text_box() {
 fn multi_line_text_box_grows() {
     let a = ann(vec![], vec![text(0.0, 0.0, "ab\ncdef")]);
     // Two lines: height is 2 * 1.2 * size, width comes from the longest line
-    assert_eq!(a.hit(10.0, 1.2 * 18.0 + 1.0), Some(ItemId::Text(0)));
-    assert_eq!(a.hit(10.0, 2.4 * 18.0 + 1.0), None);
+    assert_eq!(
+        a.hit(10.0, 1.2 * 18.0 + 1.0, ERASER_THRESHOLD),
+        Some(ItemId::Text(0))
+    );
+    assert_eq!(a.hit(10.0, 2.4 * 18.0 + 1.0, ERASER_THRESHOLD), None);
 }
 
 #[test]
@@ -190,8 +208,8 @@ fn stroke_bounds_cover_the_width_and_handle_the_empty_and_single_case() {
 // --- selection: the frame, the marquee and the three gestures -------------------------------
 
 use sgraffito::canvas::{
-    Gesture, Grab, Handle, SELECT_HANDLE_HIT, Selection, Transform, grab_at, item_bounds,
-    marquee_select, rotate_handle, selection_bounds, selection_frame,
+    Gesture, Grab, Handle, SELECT_HANDLE_HIT, SELECT_ROTATE_GAP, Selection, Transform, grab_at,
+    item_bounds, marquee_select, rotate_handle, selection_bounds, selection_frame,
 };
 
 fn stroke_at(x: f32, y: f32) -> Stroke {
@@ -271,16 +289,37 @@ fn a_handle_is_grabbed_within_its_target_and_a_handle_wins() {
         h: 100.0,
     };
     // The element under a corner is not what the press resolves to: the handle is.
-    assert_eq!(grab_at(frame, 100.0, 100.0), Some(Grab::Handle(Handle::Nw)));
     assert_eq!(
-        grab_at(frame, 100.0 + SELECT_HANDLE_HIT, 100.0),
+        grab_at(frame, 100.0, 100.0, SELECT_HANDLE_HIT),
         Some(Grab::Handle(Handle::Nw))
     );
-    assert_eq!(grab_at(frame, 100.0 + SELECT_HANDLE_HIT + 1.0, 100.0), None);
-    assert_eq!(grab_at(frame, 200.0, 100.0), Some(Grab::Handle(Handle::N)));
-    let knob = rotate_handle(frame);
-    assert_eq!(grab_at(frame, knob[0], knob[1]), Some(Grab::Rotate));
-    assert_eq!(grab_at(frame, 200.0, 150.0), None, "the middle is a move");
+    assert_eq!(
+        grab_at(frame, 100.0 + SELECT_HANDLE_HIT, 100.0, SELECT_HANDLE_HIT),
+        Some(Grab::Handle(Handle::Nw))
+    );
+    assert_eq!(
+        grab_at(
+            frame,
+            100.0 + SELECT_HANDLE_HIT + 1.0,
+            100.0,
+            SELECT_HANDLE_HIT
+        ),
+        None
+    );
+    assert_eq!(
+        grab_at(frame, 200.0, 100.0, SELECT_HANDLE_HIT),
+        Some(Grab::Handle(Handle::N))
+    );
+    let knob = rotate_handle(frame, SELECT_ROTATE_GAP);
+    assert_eq!(
+        grab_at(frame, knob[0], knob[1], SELECT_HANDLE_HIT),
+        Some(Grab::Rotate)
+    );
+    assert_eq!(
+        grab_at(frame, 200.0, 150.0, SELECT_HANDLE_HIT),
+        None,
+        "the middle is a move"
+    );
 }
 
 #[test]
@@ -291,8 +330,8 @@ fn the_selection_box_covers_the_frame_the_handles_and_the_rotation_handle() {
         w: 200.0,
         h: 100.0,
     };
-    let box_ = selection_bounds(frame);
-    let knob = rotate_handle(frame);
+    let box_ = selection_bounds(frame, SELECT_HANDLE_HIT);
+    let knob = rotate_handle(frame, SELECT_ROTATE_GAP);
     assert!(
         box_.contains(knob[0], knob[1]),
         "the rotation handle is in it"
@@ -645,12 +684,21 @@ fn a_clicks_inside_a_rectangle_reaches_the_stroke_inside_it() {
         shapes: vec![rect],
         ..a
     };
-    assert_eq!(a.hit(200.0, 150.0), Some(ItemId::Stroke(0)));
-    assert_eq!(a.hit(200.0, 101.0), Some(ItemId::Shape(0)));
+    assert_eq!(
+        a.hit(200.0, 150.0, ERASER_THRESHOLD),
+        Some(ItemId::Stroke(0))
+    );
+    assert_eq!(
+        a.hit(200.0, 101.0, ERASER_THRESHOLD),
+        Some(ItemId::Shape(0))
+    );
     // The nearer of the two wins when both are in reach.
-    assert_eq!(a.hit(105.0, 150.0), Some(ItemId::Shape(0)));
+    assert_eq!(
+        a.hit(105.0, 150.0, ERASER_THRESHOLD),
+        Some(ItemId::Shape(0))
+    );
     // And the stroke is what the eraser removes, leaving the rectangle alone.
-    assert!(a.erase(200.0, 150.0).is_some());
+    assert!(a.erase(200.0, 150.0, ERASER_THRESHOLD).is_some());
     assert!(a.strokes.is_empty() && a.shapes.len() == 1);
 }
 
@@ -760,4 +808,130 @@ fn removing_nothing_removes_nothing() {
     assert!(a.remove(&[ItemId::Stroke(0), ItemId::Stroke(0)]).is_some());
     assert_eq!(a.strokes.len(), 1);
     assert_eq!(a.strokes[0].points[0], [100.0, 0.0]);
+}
+
+// --- the view: canvas to screen ---------------------------------------------------------------
+
+use sgraffito::canvas::{View, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP};
+
+#[test]
+fn the_identity_view_maps_every_point_to_itself() {
+    let view = View::default();
+    assert!(view.is_identity());
+    for p in [[0.0, 0.0], [12.0, -40.0], [1920.0, 1080.0]] {
+        assert_eq!(view.to_screen(p), p);
+        assert_eq!(view.to_canvas(p), p);
+    }
+    assert_eq!(view.canvas_len(8.0), 8.0);
+}
+
+#[test]
+fn a_pan_moves_every_point_by_the_same_screen_delta() {
+    let mut view = View {
+        zoom: 2.0,
+        ..Default::default()
+    };
+    let delta = [30.0, -12.0];
+    // The screen point the gesture started on, and the canvas point under it: after the pan, that
+    // screen point has moved by the delta and still has the same canvas point under it. That is what
+    // makes a grab feel like a grab.
+    let start = [130.0, 250.0];
+    let grabbed = view.to_canvas(start);
+    let moved = [start[0] + delta[0], start[1] + delta[1]];
+    view.pan_by(delta);
+    let still_there = view.to_canvas(moved);
+    assert!(
+        (still_there[0] - grabbed[0]).abs() < 0.001 && (still_there[1] - grabbed[1]).abs() < 0.001,
+        "{grabbed:?} -> {still_there:?}"
+    );
+    // A pan moves a canvas point by exactly the delta on screen.
+    let p = [40.0, 60.0];
+    let before = view.to_screen(p);
+    view.pan_by(delta);
+    assert_eq!(
+        view.to_screen(p),
+        [before[0] + delta[0], before[1] + delta[1]]
+    );
+    assert_eq!(view.zoom, 2.0, "a pan does not change the zoom");
+}
+
+#[test]
+fn a_zoom_about_a_point_leaves_that_point_under_it() {
+    let mut view = View {
+        zoom: 1.3,
+        offset: [40.0, -25.0],
+    };
+    for anchor in [[0.0, 0.0], [120.0, 300.0], [1919.0, 1079.0]] {
+        let canvas_under = view.to_canvas(anchor);
+        view.zoom_about(anchor, ZOOM_STEP);
+        let after = view.to_canvas(anchor);
+        assert!(
+            (after[0] - canvas_under[0]).abs() < 0.01 && (after[1] - canvas_under[1]).abs() < 0.01,
+            "the anchor moved: {canvas_under:?} -> {after:?}"
+        );
+    }
+    // Zooming in and back out by the same step returns to the same view.
+    let mut view = View {
+        zoom: 1.0,
+        offset: [7.0, 9.0],
+    };
+    view.zoom_about([100.0, 100.0], ZOOM_STEP);
+    view.zoom_about([100.0, 100.0], 1.0 / ZOOM_STEP);
+    assert!((view.zoom - 1.0).abs() < 0.0001);
+    assert!((view.offset[0] - 7.0).abs() < 0.01 && (view.offset[1] - 9.0).abs() < 0.01);
+}
+
+#[test]
+fn the_zoom_stops_at_its_range_and_keeps_the_anchor() {
+    let mut view = View::default();
+    for _ in 0..200 {
+        view.zoom_about([500.0, 400.0], ZOOM_STEP);
+    }
+    assert_eq!(view.zoom, ZOOM_MAX);
+    // At the limit the drawing stays where the last zoom about the point put it.
+    let canvas_under = view.to_canvas([500.0, 400.0]);
+    view.zoom_about([500.0, 400.0], ZOOM_STEP);
+    assert_eq!(view.zoom, ZOOM_MAX);
+    let after = view.to_canvas([500.0, 400.0]);
+    assert!((after[0] - canvas_under[0]).abs() < 0.001);
+    for _ in 0..400 {
+        view.zoom_about([500.0, 400.0], 1.0 / ZOOM_STEP);
+    }
+    assert_eq!(view.zoom, ZOOM_MIN);
+    assert!(view.zoom > 0.0, "a zoom is never zero or negative");
+}
+
+#[test]
+fn a_screen_length_is_a_canvas_length_over_the_zoom() {
+    let view = View {
+        zoom: 4.0,
+        ..Default::default()
+    };
+    // The eraser's radius is what the pointer aims with, so zooming out reaches further in the
+    // drawing's own units.
+    assert_eq!(view.canvas_len(8.0), 2.0);
+    let half = View {
+        zoom: 0.5,
+        ..Default::default()
+    };
+    assert_eq!(half.canvas_len(8.0), 16.0);
+}
+
+#[test]
+fn a_canvas_box_maps_to_the_screen_box_it_covers() {
+    let view = View {
+        zoom: 2.0,
+        offset: [10.0, 20.0],
+    };
+    let box_ = Rect {
+        x: 5.0,
+        y: 6.0,
+        w: 30.0,
+        h: 40.0,
+    };
+    let screen = view.screen_rect(box_);
+    assert_eq!(screen.x, 20.0);
+    assert_eq!(screen.y, 32.0);
+    assert_eq!(screen.w, 60.0);
+    assert_eq!(screen.h, 80.0);
 }

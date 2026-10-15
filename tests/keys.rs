@@ -199,3 +199,51 @@ fn only_delete_removes_a_selection() {
     assert!(!deletes_selection(Keysym::d));
     assert!(!deletes_selection(Keysym::Escape));
 }
+
+#[test]
+fn the_hand_tool_has_its_own_key() {
+    assert_eq!(tool_for_keysym(Keysym::h), Some(Tool::Hand));
+    assert_eq!(tool_for_keysym(Keysym::H), Some(Tool::Hand));
+}
+
+#[test]
+fn the_two_finger_swipe_pans_and_the_wheel_zooms() {
+    use sgraffito::input::{AxisIntent, axis_intent};
+    use wayland_client::protocol::wl_pointer::AxisSource;
+    // The protocol's own source is what tells them apart, so nothing has to be guessed.
+    assert_eq!(axis_intent(Some(AxisSource::Finger)), AxisIntent::Pan);
+    assert_eq!(axis_intent(Some(AxisSource::Wheel)), AxisIntent::Zoom);
+    // A source neither of them — a smooth axis, a tilt, or a compositor that sends none — is left
+    // alone rather than guessed at.
+    assert_eq!(
+        axis_intent(Some(AxisSource::Continuous)),
+        AxisIntent::Ignore
+    );
+    assert_eq!(axis_intent(None), AxisIntent::Ignore);
+}
+
+#[test]
+fn one_wheel_notch_is_exactly_one_zoom_step() {
+    use sgraffito::canvas::ZOOM_STEP;
+    use sgraffito::input::zoom_factor;
+    use smithay_client_toolkit::seat::pointer::AxisScroll;
+    let notch = |value120: i32| AxisScroll {
+        value120,
+        ..Default::default()
+    };
+    let none = AxisScroll::default();
+    // A classic wheel's notch.
+    assert!((zoom_factor(notch(120), none) - ZOOM_STEP).abs() < 0.0001);
+    // Backwards is the reciprocal, so a notch in and a notch out return to where you were.
+    assert!((zoom_factor(notch(-120), none) * ZOOM_STEP - 1.0).abs() < 0.0001);
+    // A high-resolution wheel's fraction of a notch.
+    assert!((zoom_factor(notch(60), none) - ZOOM_STEP.sqrt()).abs() < 0.0001);
+    // Nothing to zoom about.
+    assert_eq!(zoom_factor(none, none), 1.0);
+    // A wheel that only reports steps, the way older compositors send it.
+    let steps = AxisScroll {
+        discrete: -3,
+        ..Default::default()
+    };
+    assert!((zoom_factor(steps, none) - ZOOM_STEP.powi(-3)).abs() < 0.0001);
+}

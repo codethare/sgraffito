@@ -30,18 +30,22 @@ the user writes in Chinese and expects Chinese in chat, English in the artifacts
   - edit mode is painted on a **scrim**: black at 90% opacity over the whole output, under the
     annotations and the rail, so the windows behind the surface are dimmed. It is the requirement
     the plate's earlier change had read more narrowly.
+  - the canvas pans and zooms: an unbounded plane, a per-output `View`, two-finger swipe to pan,
+    pinch or wheel to zoom, the middle button and a new hand tool (`H`) to pan, and `Delete` already
+    removing a selection.
   - the plans and the decisions are in `openspec/changes/selection-and-transform/`,
     `openspec/changes/shape-tools/`, `openspec/changes/toolbar-icons/`,
-    `openspec/changes/delete-key-and-rail-plate/` and `openspec/changes/edit-mode-scrim/` (all four
-    artifacts complete in each, 30/30, 28/28, 14/14, 12/12 and 11/11 tasks ticked, all five
-    `openspec validate <change> --strict` valid).
+    `openspec/changes/delete-key-and-rail-plate/`, `openspec/changes/edit-mode-scrim/` and
+    `openspec/changes/canvas-pan-and-zoom/` (all four artifacts complete in each, 30/30, 28/28,
+    14/14, 12/12, 11/11 and 27/27 tasks ticked, all six `openspec validate <change> --strict`
+    valid).
 - `openspec/specs/` holds only `.gitkeep`, so every change dir under `openspec/changes/` stays
   unarchived and `openspec validate <change> --strict` always prints
   `INFO ... only ADDED requirements are allowed for new specs`. That is expected here, not a
   failure; only the `Change '<name>' is valid` line matters.
 - `openspec/` and `CLAUDE.md` are gitignored on purpose; the specs and the contract live
   outside the repository.
-- `cargo test` is 131 tests across the lib plus six files in `tests/`.
+- `cargo test` is 142 tests across the lib plus six files in `tests/`.
 
 ## What the last sessions changed and why, oldest first
 
@@ -267,6 +271,44 @@ the user writes in Chinese and expects Chinese in chat, English in the artifacts
     - Checked by eye: the frame composited over a bright checkered wallpaper, in edit mode (the
       wallpaper is dimmed to near-black, the annotations and the rail read clearly) and in locked mode
       (no scrim, the wallpaper at full strength).
+
+12. **The canvas pans and zooms** (`openspec/changes/canvas-pan-and-zoom/`). Annotations were pinned to
+    output-local coordinates at 1:1, so a note written past the edge of the screen was unreachable and
+    there was no way to see a whole drawing. The user asked for a plane that grows with the content,
+    and chose an **unbounded plane with no visible edge** over a board rectangle with one.
+    - `View { zoom, offset }` with `screen = canvas * zoom + offset` (per output, in `Output`, **not**
+      persisted, and carried across the surface recreation a mode switch does — `set_mode` already
+      carries `name` that way, and losing the view on every `Esc` would be felt at once).
+    - **One transform at the input boundary, one per draw site.** Everything the document is asked is
+      canvas coordinates; the interface — the rail, the plate, the scrim, the selection's handles, the
+      marquee's hairline — is screen space and ignores the zoom. `Screen { scale, view }` carries both
+      to the draw sites, with `point`/`len` for canvas and `ui`/`ui_rect` for interface lengths. The
+      eraser's radius is divided by the zoom, because it is what the pointer aims with.
+    - The selection frame is mapped to **screen** before the handles are placed or grabbed, so
+      `grab_at`, `selection_bounds` and `draw_selection` all work in the same units the handles are
+      drawn in; `rotate_handle` and `grab_at` gained the gap/radius they use as a parameter.
+    - A view change is a whole-surface frame: `BaseKey` gained the view and the raster is screen space,
+      so a pan or a zoom rebuilds it. **Measured: 32.5 ms median at 4K over 200 strokes** (bench case
+      `pan-cold-dense`), against 19.7 ms for the commit that rebuilds the same raster, because a pan
+      also copies the whole surface back out. That is the most expensive thing the program does, and
+      the partial rebuild bounded by the exposed band is the fix — it is the same work as the
+      existing next step 1.
+    - The gestures: `axis_intent(source)` maps `Finger` to pan and `Wheel` to zoom and **ignores
+      anything else** rather than guessing (`Discrete` is not an axis *source*, as the first draft of
+      the plan assumed — the compiler said so). `zoom_factor` makes one notch exactly `ZOOM_STEP`.
+      The pinch is bound by hand from `zwp_pointer_gestures_v1` (sctk 0.21 wraps no part of it) with a
+      `Dispatch2` impl next to the text-input one, and the protocol reports the scale as **cumulative
+      since `begin`**, so consecutive updates take a ratio. The middle button and the hand tool share
+      `begin_pan`/`drag_pan`/`end_pan`.
+    - A pan is not a document change: it never touches `doc_changed_at`, never reaches the file, and
+      `Esc` has nothing to commit or abandon. It takes the pointer for its duration, and it ends on
+      the button's release or on the pointer leaving the surface — the left-release case was a real
+      bug caught while finishing (the hand tool would have gone on panning with no button down), which
+      is the kind of thing the missing input test would have caught.
+    - What is **not** verified: no touchpad or wheel exists in this environment, so none of these
+      gestures has been used for real. The pure parts are tested (the view's maths, the axis mapping,
+      the notch arithmetic, a panned and zoomed frame landing where the transform says, the rail not
+      moving with the view), and the wiring to the compositor is not.
 
 ## Where things live
 

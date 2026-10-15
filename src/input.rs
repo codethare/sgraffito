@@ -7,10 +7,20 @@ use smithay_client_toolkit::dispatch2::Dispatch2;
 use smithay_client_toolkit::seat::keyboard::{
     KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers,
 };
-use smithay_client_toolkit::seat::pointer::{PointerEvent, PointerEventKind, PointerHandler};
-use wayland_client::protocol::{wl_keyboard, wl_pointer, wl_seat, wl_surface};
+use smithay_client_toolkit::seat::pointer::{
+    AxisScroll, PointerEvent, PointerEventKind, PointerHandler,
+};
+use wayland_client::protocol::{
+    wl_keyboard, wl_pointer, wl_pointer::AxisSource, wl_seat, wl_surface,
+};
 use wayland_client::{Connection, QueueHandle};
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape;
+use wayland_protocols::wp::pointer_gestures::zv1::client::zwp_pointer_gesture_pinch_v1::{
+    self, ZwpPointerGesturePinchV1,
+};
+use wayland_protocols::wp::pointer_gestures::zv1::client::zwp_pointer_gestures_v1::{
+    self, ZwpPointerGesturesV1,
+};
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3::{
     self, ZwpTextInputManagerV3,
 };
@@ -19,10 +29,11 @@ use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::{
 };
 
 use crate::app::{
-    App, BTN_LEFT, Mode, PALETTE, Tool, ToolbarAction, log, read_selection, text_mime,
+    App, BTN_LEFT, BTN_MIDDLE, Mode, PALETTE, Tool, ToolbarAction, log, read_selection, text_mime,
 };
 use crate::canvas::{
-    Caret, OutputAnnotations, Rect, ShapeKind, Stroke, TextBuffer, grab_at, selection_frame,
+    Caret, ERASER_THRESHOLD, OutputAnnotations, Rect, SELECT_HANDLE_HIT, ShapeKind, Stroke,
+    TextBuffer, ZOOM_STEP, grab_at, selection_frame,
 };
 
 /// What a local key does while a text box is focused.
@@ -91,6 +102,45 @@ pub fn bytes_to_delete(before_length: u32, preedit_bytes: usize) -> usize {
 }
 
 /// Key mapping while no text box is edited: `P`/`E`/`T` switch tools.
+/// What a `wl_pointer` axis event is asking the canvas for. The protocol's own source is what tells
+/// the touchpad's two-finger swipe from a wheel, so no heuristic is needed and no guess is made: a
+/// source we do not know changes nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AxisIntent {
+    Pan,
+    Zoom,
+    Ignore,
+}
+
+pub fn axis_intent(source: Option<AxisSource>) -> AxisIntent {
+    match source {
+        Some(AxisSource::Finger) => AxisIntent::Pan,
+        Some(AxisSource::Wheel) => AxisIntent::Zoom,
+        // `Continuous` is a smooth axis that could be either device, and a tilt is another axis
+        // entirely: both are left alone rather than guessed at.
+        _ => AxisIntent::Ignore,
+    }
+}
+
+/// The zoom factor one axis event asks for: a wheel notch is exactly one step, and a high-resolution
+/// wheel is the same step to that fraction of a notch.
+pub fn zoom_factor(vertical: AxisScroll, horizontal: AxisScroll) -> f32 {
+    let notches = if vertical.value120 != 0 {
+        vertical.value120 as f32 / 120.0
+    } else if vertical.discrete != 0 {
+        vertical.discrete as f32
+    } else if horizontal.value120 != 0 {
+        horizontal.value120 as f32 / 120.0
+    } else if horizontal.discrete != 0 {
+        horizontal.discrete as f32
+    } else {
+        // A wheel that only reports pixels: a notch is around 15 of them, which is what the
+        // compositor's own default step comes to.
+        0.0
+    };
+    ZOOM_STEP.powf(notches)
+}
+
 /// Whether this key removes the selection. `Delete` and the keypad's — as `Return` and `KP_Enter`
 /// both end a line — and deliberately not `Backspace`, which deletes a character while a text box is
 /// focused: one key should not mean "one character" and "everything selected" depending on the tool.
@@ -111,6 +161,7 @@ pub fn tool_for_keysym(keysym: Keysym) -> Option<Tool> {
         Keysym::d | Keysym::D => Some(Tool::Diamond),
         Keysym::l | Keysym::L => Some(Tool::Line),
         Keysym::a | Keysym::A => Some(Tool::Arrow),
+        Keysym::h | Keysym::H => Some(Tool::Hand),
         _ => None,
     }
 }
@@ -292,6 +343,9 @@ impl PointerHandler for App {
                 continue;
             };
             let (x, y) = (event.position.0 as f32, event.position.1 as f32);
+            // A pinch reports its focal point as a delta from where the fingers went down, and it is
+            // dispatched outside this frame, so the last pointer position is what it measures from.
+            self.pointer_at = Some((key, [x, y]));
             match event.kind {
                 PointerEventKind::Motion { .. } => self.pointer_motion(&key, x, y),
                 PointerEventKind::Enter { serial } => {
@@ -303,12 +357,27 @@ impl PointerHandler for App {
                 PointerEventKind::Press { button, .. } if button == BTN_LEFT => {
                     self.pointer_press(&key, x, y)
                 }
+                // The wheel, pressed: a pan anchored where it went down, whatever tool is armed.
+                PointerEventKind::Press { button, .. } if button == BTN_MIDDLE => {
+                    self.begin_pan(key, x, y)
+                }
+                PointerEventKind::Release { button, .. } if button == BTN_MIDDLE => self.end_pan(),
                 PointerEventKind::Release { button, .. } if button == BTN_LEFT => {
                     self.pointer_release(&key)
                 }
+                PointerEventKind::Axis {
+                    horizontal,
+                    vertical,
+                    source,
+                    ..
+                } => self.pointer_axis(key, [x, y], horizontal, vertical, source),
                 PointerEventKind::Leave { .. } => {
                     // The release may never come back to this surface (multi-output drag), so finish here.
                     self.pointer_release(&key);
+                    // A pan or a pinch is a view gesture with the same problem: finish it here rather
+                    // than leave it holding the pointer with nothing under it.
+                    self.end_pan();
+                    self.pinch_end();
                     if self.toolbar_hover.take().is_some() {
                         self.refresh_toolbar_hover();
                     }
@@ -512,7 +581,9 @@ impl App {
                 .selection
                 .as_ref()
                 .and_then(|s| selection_frame(ann, &s.items, None))
-                .and_then(|frame| grab_at(frame, x, y))
+                // The handles are interface lengths, so the frame is grabbed in screen space.
+                .map(|frame| out.view.screen_rect(frame))
+                .and_then(|frame| grab_at(frame, x, y, SELECT_HANDLE_HIT))
         };
         if grab != self.selection_grab {
             self.selection_grab = grab;
@@ -524,6 +595,35 @@ impl App {
 impl App {
     /// The toolbar consumes its own presses: a click on a control is not a drawing gesture, and
     /// it returns before the press reaches the tools.
+    /// A scroll or a wheel. The two-finger swipe pans and the wheel zooms about the pointer; the
+    /// document is not touched by either, because both are the view.
+    fn pointer_axis(
+        &mut self,
+        key: u32,
+        at: [f32; 2],
+        horizontal: AxisScroll,
+        vertical: AxisScroll,
+        source: Option<AxisSource>,
+    ) {
+        match axis_intent(source) {
+            AxisIntent::Pan => {
+                // 1:1 with the axis value, in the direction the compositor's own natural-scrolling
+                // decision already points: the drawing follows the fingers.
+                let delta = [-horizontal.absolute as f32, -vertical.absolute as f32];
+                if delta != [0.0, 0.0] {
+                    self.view_changed(key, |view| view.pan_by(delta));
+                }
+            }
+            AxisIntent::Zoom => {
+                let factor = zoom_factor(vertical, horizontal);
+                if factor != 1.0 {
+                    self.zoom_about(key, at, factor);
+                }
+            }
+            AxisIntent::Ignore => {}
+        }
+    }
+
     fn pointer_press(&mut self, key: &u32, x: f32, y: f32) {
         if self.mode != Mode::Edit {
             return;
@@ -532,10 +632,24 @@ impl App {
             self.apply_toolbar_action(action);
             return;
         }
+        // A pan owns the pointer while it runs: nothing else may start under it.
+        if self.panning() {
+            return;
+        }
+        // The hand tool's only gesture is a pan.
+        if self.tool == Tool::Hand {
+            self.begin_pan(*key, x, y);
+            return;
+        }
         // A click anywhere else finishes the text edit and any previous gesture first, so typed
         // content is kept and a new gesture starts from a clean transient state.
         self.end_text_edit();
         self.commit_transient_drawing();
+        // The pointer speaks screen coordinates and the document speaks canvas ones, so everything
+        // below is the canvas point under the pointer.
+        let Some(canvas) = self.outputs.get(key).map(|out| out.view.to_canvas([x, y])) else {
+            return;
+        };
         match self.tool {
             Tool::Pen => {
                 if let Some(out) = self.outputs.get_mut(key) {
@@ -543,22 +657,23 @@ impl App {
                     out.overlay.stroke = Some(Stroke {
                         color: PALETTE[self.color_idx].to_string(),
                         width,
-                        points: vec![[x, y]],
+                        points: vec![canvas],
                     });
                 }
             }
             Tool::Eraser => {
                 if let Some(out) = self.outputs.get_mut(key) {
-                    out.overlay.eraser = Some([x, y]);
+                    out.overlay.eraser = Some(canvas);
                 }
             }
-            Tool::Text => self.begin_text_edit(key, x, y),
+            Tool::Text => self.begin_text_edit(key, canvas[0], canvas[1]),
             Tool::Selection => self.select_press(*key, x, y),
-            Tool::Circle => self.begin_shape(key, x, y, ShapeKind::Circle),
-            Tool::Rect => self.begin_shape(key, x, y, ShapeKind::Rect),
-            Tool::Diamond => self.begin_shape(key, x, y, ShapeKind::Diamond),
-            Tool::Line => self.begin_shape(key, x, y, ShapeKind::Line),
-            Tool::Arrow => self.begin_shape(key, x, y, ShapeKind::Arrow),
+            Tool::Circle => self.begin_shape(key, canvas[0], canvas[1], ShapeKind::Circle),
+            Tool::Rect => self.begin_shape(key, canvas[0], canvas[1], ShapeKind::Rect),
+            Tool::Diamond => self.begin_shape(key, canvas[0], canvas[1], ShapeKind::Diamond),
+            Tool::Line => self.begin_shape(key, canvas[0], canvas[1], ShapeKind::Line),
+            Tool::Arrow => self.begin_shape(key, canvas[0], canvas[1], ShapeKind::Arrow),
+            Tool::Hand => {}
         }
         if let Some(out) = self.outputs.get_mut(key) {
             // A press starts or ends something: repaint that output whole.
@@ -569,6 +684,11 @@ impl App {
 
     fn pointer_motion(&mut self, key: &u32, x: f32, y: f32) {
         if self.mode != Mode::Edit {
+            return;
+        }
+        // A pan takes the pointer: it does not highlight the rail and it does not draw.
+        if self.panning() {
+            self.drag_pan(*key, x, y);
             return;
         }
         // The toolbar is not drawing area: a drag passing over it neither draws under it nor
@@ -596,6 +716,7 @@ impl App {
         let Some(out) = self.outputs.get_mut(key) else {
             return;
         };
+        let canvas = out.view.to_canvas([x, y]);
         match self.tool {
             // Only a press starts a stroke: hovering with no button held must not draw.
             Tool::Pen => {
@@ -603,21 +724,21 @@ impl App {
                     return;
                 };
                 if let Some(last) = stroke.points.last()
-                    && !wants_sampling(*last, [x, y])
+                    && !wants_sampling(*last, canvas)
                 {
                     return;
                 }
-                stroke.points.push([x, y]);
+                stroke.points.push(canvas);
             }
-            Tool::Eraser => out.overlay.eraser = Some([x, y]),
+            Tool::Eraser => out.overlay.eraser = Some(canvas),
             // Only a press starts a shape: motion moves the second of its two points.
             Tool::Circle | Tool::Rect | Tool::Diamond | Tool::Line | Tool::Arrow => {
                 match out.overlay.shape.as_mut() {
-                    Some(shape) => shape.to = [x, y],
+                    Some(shape) => shape.to = canvas,
                     None => return,
                 }
             }
-            Tool::Text | Tool::Selection => return,
+            Tool::Text | Tool::Selection | Tool::Hand => return,
         }
         // Only the transient overlay moved, so the next frame can damage just its box.
         out.transient_dirty = true;
@@ -720,6 +841,13 @@ impl App {
         let tool = self.tool;
         let id = *key;
         let bucket = self.outputs.get(key).map(|o| o.bucket(id).into_owned());
+        // The eraser's radius is what the pointer aims with, so it is a screen length expressed in
+        // the document's own units.
+        let tolerance = self
+            .outputs
+            .get(key)
+            .map(|o| o.view.canvas_len(ERASER_THRESHOLD))
+            .unwrap_or(ERASER_THRESHOLD);
         // What this gesture changed, so the frame that reports it can damage just that box: a
         // committed stroke, the element the eraser removed, or both.
         let mut changed: Option<Rect> = None;
@@ -763,7 +891,7 @@ impl App {
                 if tool == Tool::Eraser
                     && let Some([x, y]) = eraser
                     && let Some(ann) = self.doc.outputs.get_mut(&bucket)
-                    && let Some(erased) = ann.erase(x, y)
+                    && let Some(erased) = ann.erase(x, y, tolerance)
                 {
                     changed = Some(match changed {
                         Some(changed) => changed.union(erased),
@@ -783,5 +911,45 @@ impl App {
         }
         // A gesture the pointer was dragging ends here, and is written into the document.
         self.release_selection(id);
+        // A pan the left button was holding — the hand tool's — ends with the button, or the pointer
+        // would go on panning the canvas as it moves with no button down at all.
+        self.end_pan();
+    }
+}
+
+/// User data for the pointer gesture objects. sctk wraps no part of `zwp_pointer_gestures_v1`, so the
+/// manager and its pinch are dispatched here the way the text input object is.
+pub struct PinchData;
+
+impl Dispatch2<ZwpPointerGesturesV1, App> for PinchData {
+    fn event(
+        &self,
+        _app: &mut App,
+        _proxy: &ZwpPointerGesturesV1,
+        _event: zwp_pointer_gestures_v1::Event,
+        _conn: &Connection,
+        _qh: &QueueHandle<App>,
+    ) {
+    }
+}
+
+impl Dispatch2<ZwpPointerGesturePinchV1, App> for PinchData {
+    fn event(
+        &self,
+        app: &mut App,
+        _proxy: &ZwpPointerGesturePinchV1,
+        event: zwp_pointer_gesture_pinch_v1::Event,
+        _conn: &Connection,
+        _qh: &QueueHandle<App>,
+    ) {
+        use zwp_pointer_gesture_pinch_v1::Event;
+        match event {
+            Event::Begin { surface, .. } => app.pinch_begin(&surface),
+            Event::Update { dx, dy, scale, .. } => {
+                app.pinch_update(dx as f32, dy as f32, scale as f32)
+            }
+            Event::End { .. } => app.pinch_end(),
+            _ => {}
+        }
     }
 }
