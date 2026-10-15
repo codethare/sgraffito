@@ -42,13 +42,14 @@ use wayland_client::{
 };
 
 use crate::canvas::{
-    Doc, Gesture, Grab, Handle, ItemId, OutputAnnotations, Overlay, Rect, Selection, TEXT_SIZE_MAX,
-    TEXT_SIZE_MIN, TextBuffer, TextItem, TextOverlay, Toolbar, Transform, grab_at, marquee_select,
-    selection_bounds, selection_frame,
+    Doc, Gesture, Grab, Handle, ItemId, OutputAnnotations, Overlay, Rect, Selection, Shape,
+    ShapeKind, TEXT_SIZE_MAX, TEXT_SIZE_MIN, TextBuffer, TextItem, TextOverlay, Toolbar, Transform,
+    grab_at, marquee_select, selection_bounds, selection_frame,
 };
+
 pub use crate::canvas::{PALETTE, Tool, ToolbarAction};
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::{
-    Shape, WpCursorShapeDeviceV1,
+    Shape as CursorShape, WpCursorShapeDeviceV1,
 };
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1::WpCursorShapeManagerV1;
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3::ZwpTextInputManagerV3;
@@ -460,37 +461,36 @@ impl App {
         }
     }
 
-    /// The size the active tool creates content with. The selection tool creates nothing, so it
-    /// shows the pen width, which is the size the next stroke will take.
+    /// The size the active tool creates content with. The selection tool creates nothing and a
+    /// shape is stroked with the pen, so both show the pen width, which is the size the next stroke
+    /// or shape will be drawn with.
     fn active_size(&self) -> f32 {
-        match self.tool {
-            Tool::Text => self.text_size,
-            Tool::Pen | Tool::Eraser | Tool::Selection => self.pen_width,
+        if self.tool.uses_pen_width() {
+            self.pen_width
+        } else {
+            self.text_size
         }
     }
 
     /// `[` and `]` step the active tool's size, clamped to its range. The toolbar shows the
     /// value, so it is repainted (a whole-surface frame, like a tool or colour change).
     pub(crate) fn nudge_size(&mut self, dir: f32) {
-        match self.tool {
-            Tool::Text => {
-                self.text_size = stepped_size(
-                    self.text_size,
-                    dir,
-                    TEXT_SIZE_STEP,
-                    TEXT_SIZE_MIN,
-                    TEXT_SIZE_MAX,
-                )
-            }
-            Tool::Pen | Tool::Eraser | Tool::Selection => {
-                self.pen_width = stepped_size(
-                    self.pen_width,
-                    dir,
-                    PEN_WIDTH_STEP,
-                    PEN_WIDTH_MIN,
-                    PEN_WIDTH_MAX,
-                )
-            }
+        if self.tool.uses_pen_width() {
+            self.pen_width = stepped_size(
+                self.pen_width,
+                dir,
+                PEN_WIDTH_STEP,
+                PEN_WIDTH_MIN,
+                PEN_WIDTH_MAX,
+            );
+        } else {
+            self.text_size = stepped_size(
+                self.text_size,
+                dir,
+                TEXT_SIZE_STEP,
+                TEXT_SIZE_MIN,
+                TEXT_SIZE_MAX,
+            );
         }
         self.refresh_toolbar();
     }
@@ -540,18 +540,18 @@ impl App {
 
     /// The shape the pointer should have now: the active tool's, or the compositor's own
     /// default while the pointer is on the toolbar or the daemon is locked.
-    fn desired_cursor(&self) -> Shape {
+    fn desired_cursor(&self) -> CursorShape {
         if self.mode == Mode::Locked || self.pointer_over_toolbar {
-            return Shape::Default;
+            return CursorShape::Default;
         }
         if self.tool == Tool::Selection {
             // With the selection tool armed the shape says what a press would grab, which is what
             // the pointer is over rather than what the tool is.
             return match (self.gesture.is_some(), self.selection_grab) {
-                (true, _) => Shape::Grabbing,
+                (true, _) => CursorShape::Grabbing,
                 (false, Some(Grab::Handle(handle))) => handle_cursor(handle),
-                (false, Some(Grab::Rotate)) => Shape::Grab,
-                (false, None) => Shape::Default,
+                (false, Some(Grab::Rotate)) => CursorShape::Grab,
+                (false, None) => CursorShape::Default,
             };
         }
         tool_cursor(self.tool)
@@ -587,7 +587,7 @@ impl App {
     pub(crate) fn set_tool(&mut self, tool: Tool) {
         if self.tool != tool {
             self.end_text_edit();
-            self.commit_transient_strokes();
+            self.commit_transient_drawing();
             // A gesture in progress is written rather than dropped, and then the selection goes
             // with the tool that could act on it.
             self.commit_any_gesture();
@@ -635,14 +635,21 @@ impl App {
         }
     }
 
-    /// Commit any in-progress strokes before a tool change or a new pointer gesture.
-    pub(crate) fn commit_transient_strokes(&mut self) {
+    /// Commit any in-progress stroke or shape before a tool change or a new pointer gesture.
+    pub(crate) fn commit_transient_drawing(&mut self) {
         let mut pending = Vec::new();
+        let mut shapes = Vec::new();
         let mut overlay_changed = false;
         for (key, out) in self.outputs.iter_mut() {
             if let Some(stroke) = out.overlay.stroke.take() {
                 if !stroke.points.is_empty() {
                     pending.push((*key, out.bucket(*key).into_owned(), stroke));
+                }
+                overlay_changed = true;
+            }
+            if let Some(shape) = out.overlay.shape.take() {
+                if !shape.is_empty() {
+                    shapes.push((*key, out.bucket(*key).into_owned(), shape));
                 }
                 overlay_changed = true;
             }
@@ -652,9 +659,13 @@ impl App {
         }
         // The first output to commit reports the change; every output is drawn every iteration
         // anyway, and their rasters were all dropped by `doc_changed_at`.
-        let key = pending.first().map(|(key, _, _)| *key).unwrap_or_default();
+        let key = pending
+            .first()
+            .map(|(key, _, _)| *key)
+            .or_else(|| shapes.first().map(|(key, _, _)| *key))
+            .unwrap_or_default();
         let mut committed_box: Option<Rect> = None;
-        let committed = !pending.is_empty();
+        let committed = !pending.is_empty() || !shapes.is_empty();
         for (_, bucket, stroke) in pending {
             if let Some(box_) = stroke.bounds() {
                 committed_box = Some(match committed_box {
@@ -668,6 +679,19 @@ impl App {
                 .or_default()
                 .strokes
                 .push(stroke);
+        }
+        for (_, bucket, shape) in shapes {
+            let box_ = shape.bounds();
+            committed_box = Some(match committed_box {
+                Some(pending) => pending.union(box_),
+                None => box_,
+            });
+            self.doc
+                .outputs
+                .entry(bucket)
+                .or_default()
+                .shapes
+                .push(shape);
         }
         if committed {
             self.doc_changed_at(key, committed_box.unwrap_or_default());
@@ -685,6 +709,7 @@ impl App {
             return;
         };
         let changed = out.overlay.stroke.take().is_some()
+            || out.overlay.shape.take().is_some()
             || out.overlay.eraser.take().is_some()
             || out.overlay.selection.take().is_some()
             || out.overlay.marquee.take().is_some();
@@ -913,6 +938,12 @@ impl App {
                         ann.texts[i] = moved;
                         Some(changed)
                     }
+                    ItemId::Shape(i) if i < ann.shapes.len() => {
+                        let moved = transform.shape(&ann.shapes[i]);
+                        let changed = ann.shapes[i].bounds().union(moved.bounds());
+                        ann.shapes[i] = moved;
+                        Some(changed)
+                    }
                     _ => None,
                 };
                 box_ = match (box_, changed) {
@@ -1053,6 +1084,24 @@ impl App {
         }
         self.dirty = true;
         self.sync_text_input();
+    }
+
+    /// Start a shape at the press point. Motion moves its second point and the release commits it,
+    /// so a shape is the pen's gesture with a kind, and a live shape is transient exactly as an
+    /// in-progress stroke is. A shape is stroked with the pen width and never filled.
+    pub(crate) fn begin_shape(&mut self, key: &u32, x: f32, y: f32, kind: ShapeKind) {
+        let color = PALETTE[self.color_idx].to_string();
+        let width = self.pen_width;
+        let Some(out) = self.outputs.get_mut(key) else {
+            return;
+        };
+        out.overlay.shape = Some(Shape {
+            kind,
+            color,
+            width,
+            from: [x, y],
+            to: [x, y],
+        });
     }
 
     /// Handle one command from the socket and return the response line.
@@ -1462,25 +1511,28 @@ pub fn read_selection(reader: impl Read) -> String {
 
 /// The pointer shape of a tool, as `wp_cursor_shape_v1` names it. The eraser takes the closest
 /// named shape to a region eraser; there are no custom cursor images.
-pub fn tool_cursor(tool: Tool) -> Shape {
+pub fn tool_cursor(tool: Tool) -> CursorShape {
     match tool {
-        Tool::Pen => Shape::Crosshair,
-        Tool::Eraser => Shape::Cell,
-        Tool::Text => Shape::Text,
+        // Every tool that draws where the pointer is gets the crosshair, the shape tools included.
+        Tool::Pen | Tool::Circle | Tool::Rect | Tool::Diamond | Tool::Line | Tool::Arrow => {
+            CursorShape::Crosshair
+        }
+        Tool::Eraser => CursorShape::Cell,
+        Tool::Text => CursorShape::Text,
         // The selection tool creates nothing of its own, so the pointer stays the plain arrow
         // until it is over something it would act on.
-        Tool::Selection => Shape::Default,
+        Tool::Selection => CursorShape::Default,
     }
 }
 
 /// The pointer shape a resize handle takes: the protocol's own diagonal or edge shape for the
 /// direction it drags in.
-pub fn handle_cursor(handle: Handle) -> Shape {
+pub fn handle_cursor(handle: Handle) -> CursorShape {
     match handle {
-        Handle::Nw | Handle::Se => Shape::NwseResize,
-        Handle::Ne | Handle::Sw => Shape::NeswResize,
-        Handle::N | Handle::S => Shape::NsResize,
-        Handle::E | Handle::W => Shape::EwResize,
+        Handle::Nw | Handle::Se => CursorShape::NwseResize,
+        Handle::Ne | Handle::Sw => CursorShape::NeswResize,
+        Handle::N | Handle::S => CursorShape::NsResize,
+        Handle::E | Handle::W => CursorShape::EwResize,
     }
 }
 

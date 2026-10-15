@@ -14,6 +14,12 @@ fn maps_letters_to_tools_both_cases() {
     assert_eq!(tool_for_keysym(Keysym::t), Some(Tool::Text));
     assert_eq!(tool_for_keysym(Keysym::s), Some(Tool::Selection));
     assert_eq!(tool_for_keysym(Keysym::S), Some(Tool::Selection));
+    assert_eq!(tool_for_keysym(Keysym::o), Some(Tool::Circle));
+    assert_eq!(tool_for_keysym(Keysym::r), Some(Tool::Rect));
+    assert_eq!(tool_for_keysym(Keysym::d), Some(Tool::Diamond));
+    assert_eq!(tool_for_keysym(Keysym::l), Some(Tool::Line));
+    assert_eq!(tool_for_keysym(Keysym::a), Some(Tool::Arrow));
+    assert_eq!(tool_for_keysym(Keysym::A), Some(Tool::Arrow));
     assert_eq!(tool_for_keysym(Keysym::x), None);
 }
 
@@ -163,6 +169,16 @@ fn each_tool_has_its_own_pointer_shape() {
     // The selection tool creates nothing, so it keeps the plain arrow until the pointer is over
     // something a press would act on.
     assert_eq!(tool_cursor(Tool::Selection), Shape::Default);
+    // Every tool that draws where the pointer is gets the crosshair, the shape tools included.
+    for tool in [
+        Tool::Circle,
+        Tool::Rect,
+        Tool::Diamond,
+        Tool::Line,
+        Tool::Arrow,
+    ] {
+        assert_eq!(tool_cursor(tool), Shape::Crosshair, "{tool:?}");
+    }
     assert_eq!(handle_cursor(Handle::Se), Shape::NwseResize);
     assert_eq!(handle_cursor(Handle::Nw), Shape::NwseResize);
     assert_eq!(handle_cursor(Handle::Ne), Shape::NeswResize);

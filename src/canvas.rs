@@ -25,6 +25,16 @@ const MIN_SCALE: f32 = 0.05;
 pub const TEXT_SIZE_MIN: f32 = 8.0;
 pub const TEXT_SIZE_MAX: f32 = 72.0;
 
+/// Arrowhead length as a multiple of the pen width, and the floor below which a hairline arrow
+/// would stop reading as an arrow, in logical pixels.
+const ARROW_HEAD_SCALE: f32 = 4.0;
+const ARROW_HEAD_MIN: f32 = 9.0;
+/// Half the arrowhead's width, as a fraction of its length.
+const ARROW_HEAD_HALF: f32 = 0.45;
+/// Segments an ellipse is flattened into where it is measured rather than drawn. At 96 the flatness
+/// is under a pixel even for a shape the size of a 4K output, against a hit tolerance of eight.
+const ELLIPSE_SEGMENTS: usize = 96;
+
 /// Built-in palette (`#rrggbb`).
 pub const PALETTE: [&str; 5] = ["#e01b24", "#f6d32d", "#33d17a", "#3584e4", "#ffffff"];
 
@@ -35,6 +45,11 @@ pub enum Tool {
     Eraser,
     Text,
     Selection,
+    Circle,
+    Rect,
+    Diamond,
+    Line,
+    Arrow,
 }
 
 /// What clicking one control of the edit-mode toolbar does. Each variant has exactly the
@@ -47,6 +62,14 @@ pub enum ToolbarAction {
     SizeStep(f32),
     /// The `Esc` control: finish the text box being edited first, lock on the next click.
     Lock,
+}
+
+impl Tool {
+    /// Whether the tool strokes with the pen width. Every tool that draws does, except the text
+    /// tool, which has a size of its own.
+    pub fn uses_pen_width(self) -> bool {
+        !matches!(self, Tool::Text)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -67,11 +90,36 @@ pub struct TextItem {
     pub text: String,
 }
 
+/// The five kinds a shape tool draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ShapeKind {
+    Circle,
+    Rect,
+    Diamond,
+    Line,
+    Arrow,
+}
+
+/// A shape is two points and a kind, and nothing else: its outline is derived from the pair when it
+/// is drawn and when it is hit, so it costs the same in the file whether it is ten pixels or a whole
+/// output across, and a resize or a rotation is the arithmetic a pair of points already takes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Shape {
+    pub kind: ShapeKind,
+    /// `#rrggbb`
+    pub color: String,
+    pub width: f32,
+    pub from: [f32; 2],
+    pub to: [f32; 2],
+}
+
 /// An item the eraser hit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemId {
     Stroke(usize),
     Text(usize),
+    Shape(usize),
 }
 
 /// Annotations belonging to a single output.
@@ -81,26 +129,34 @@ pub struct OutputAnnotations {
     pub strokes: Vec<Stroke>,
     #[serde(default)]
     pub texts: Vec<TextItem>,
+    #[serde(default)]
+    pub shapes: Vec<Shape>,
 }
 
 impl OutputAnnotations {
-    /// Eraser hit test: text boxes win over strokes, nearest one of each kind.
+    /// Eraser hit test: text boxes win over everything, then the nearest stroke or shape within the
+    /// threshold. A shape is hit by its outline, never from inside it, so a rectangle's interior
+    /// keeps belonging to whatever is drawn inside it.
     pub fn hit(&self, x: f32, y: f32) -> Option<ItemId> {
         if let Some(i) = self.texts.iter().position(|t| t.bounds().contains(x, y)) {
             return Some(ItemId::Text(i));
         }
         let limit = ERASER_THRESHOLD * ERASER_THRESHOLD;
-        let mut best: Option<(usize, f32)> = None;
-        for (i, s) in self.strokes.iter().enumerate() {
-            let d = s.distance_squared(x, y);
-            if d <= limit && best.is_none_or(|(_, bd)| d < bd) {
-                best = Some((i, d));
+        let mut best: Option<(ItemId, f32)> = None;
+        let mut consider = |id: ItemId, d: f32| {
+            if d <= limit && best.is_none_or(|(_, nearest)| d < nearest) {
+                best = Some((id, d));
             }
+        };
+        for (i, s) in self.strokes.iter().enumerate() {
+            consider(ItemId::Stroke(i), s.distance_squared(x, y));
         }
-        best.map(|(i, _)| ItemId::Stroke(i))
+        for (i, s) in self.shapes.iter().enumerate() {
+            consider(ItemId::Shape(i), s.distance_squared(x, y));
+        }
+        best.map(|(id, _)| id)
     }
 
-    /// Delete the hit item; returns whether anything was removed.
     /// Remove the element under `(x, y)`, returning the box it occupied, so the frame that
     /// repaints it knows what to damage.
     pub fn erase(&mut self, x: f32, y: f32) -> Option<Rect> {
@@ -115,7 +171,102 @@ impl OutputAnnotations {
                 self.texts.remove(i);
                 Some(box_)
             }
+            Some(ItemId::Shape(i)) => {
+                let box_ = self.shapes[i].bounds();
+                self.shapes.remove(i);
+                Some(box_)
+            }
             None => None,
+        }
+    }
+}
+
+impl Shape {
+    /// Length of the arrowhead, from the pen width with a floor so a hairline arrow still reads as
+    /// an arrow.
+    pub fn head_len(&self) -> f32 {
+        (self.width * ARROW_HEAD_SCALE).max(ARROW_HEAD_MIN)
+    }
+
+    /// Half the arrowhead's width: how far it spreads off the line it ends.
+    pub fn head_half(&self) -> f32 {
+        self.head_len() * ARROW_HEAD_HALF
+    }
+
+    /// Whether the shape has nothing to draw: a line whose ends meet, or a box with no extent in one
+    /// direction. Such a shape is never written, so a click with a shape tool armed cannot leave an
+    /// element that is invisible but still erasable.
+    pub fn is_empty(&self) -> bool {
+        match self.kind {
+            ShapeKind::Line | ShapeKind::Arrow => self.from == self.to,
+            _ => self.from[0] == self.to[0] || self.from[1] == self.to[1],
+        }
+    }
+
+    /// Axis-aligned box of everything the shape draws, in logical pixels, anti-aliasing and the
+    /// arrowhead included. A rectangle and a diamond are inside the box of their two points, a
+    /// circle touches the middle of its edges, and the head of an arrow leaves that box.
+    pub fn bounds(&self) -> Rect {
+        let head = match self.kind {
+            ShapeKind::Arrow => self.head_half(),
+            _ => 0.0,
+        };
+        rect_of(self.from, self.to).grown(self.width / 2.0 + 1.0 + head)
+    }
+
+    /// The shape as a polyline in logical pixels: what a hit test measures against. A closed shape
+    /// repeats its first point, so the closing edge is a segment like any other, and an arrow adds
+    /// the three edges of its head, which is enough to be hit anywhere inside it.
+    ///
+    /// ponytail: the outline is a flat approximation while the frame draws the real curve — a
+    /// 96-gon, whose flatness is under a pixel even at 4K, against the eraser's tolerance of eight.
+    /// Raise the segment count if a shape ever has to be hit more precisely than that.
+    pub fn outline(&self) -> Vec<[f32; 2]> {
+        let Rect { x, y, w, h } = rect_of(self.from, self.to);
+        let (x1, y1) = (x + w, y + h);
+        let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+        match self.kind {
+            ShapeKind::Circle => (0..=ELLIPSE_SEGMENTS)
+                .map(|i| {
+                    let t = i as f32 / ELLIPSE_SEGMENTS as f32 * std::f32::consts::TAU;
+                    [cx + t.cos() * w / 2.0, cy + t.sin() * h / 2.0]
+                })
+                .collect(),
+            ShapeKind::Rect => vec![[x, y], [x1, y], [x1, y1], [x, y1], [x, y]],
+            ShapeKind::Diamond => vec![[cx, y], [x1, cy], [cx, y1], [x, cy], [cx, y]],
+            ShapeKind::Line => vec![self.from, self.to],
+            ShapeKind::Arrow => {
+                let (dx, dy) = (self.to[0] - self.from[0], self.to[1] - self.from[1]);
+                let len = (dx * dx + dy * dy).sqrt();
+                if len <= f32::EPSILON {
+                    return vec![self.from, self.to];
+                }
+                let (ux, uy) = (dx / len, dy / len);
+                let (head, half) = (self.head_len(), self.head_half());
+                let base = [self.to[0] - ux * head, self.to[1] - uy * head];
+                let (px, py) = (-uy * half, ux * half);
+                vec![
+                    self.from,
+                    self.to,
+                    [base[0] + px, base[1] + py],
+                    [base[0] - px, base[1] - py],
+                    self.to,
+                ]
+            }
+        }
+    }
+
+    /// Squared distance from a point to the shape's outline.
+    pub fn distance_squared(&self, x: f32, y: f32) -> f32 {
+        let p = [x, y];
+        let outline = self.outline();
+        match outline.as_slice() {
+            [] => f32::INFINITY,
+            [only] => dist_squared(p, *only),
+            points => points
+                .windows(2)
+                .map(|w| segment_dist_squared(p, w[0], w[1]))
+                .fold(f32::INFINITY, f32::min),
         }
     }
 }
@@ -446,6 +597,16 @@ impl Transform {
         }
         out
     }
+
+    /// The shape this makes of one the document holds: its two points moved, with its kind and its
+    /// pen width untouched, so a scaled circle stays a circle and a turned arrow keeps its head.
+    pub fn shape(self, s: &Shape) -> Shape {
+        Shape {
+            from: self.point(s.from),
+            to: self.point(s.to),
+            ..s.clone()
+        }
+    }
 }
 
 /// What the selection tool holds, and the live gesture acting on it. Transient: never part of the
@@ -510,6 +671,11 @@ impl TextItem {
     }
 }
 
+/// The rectangle two points span, in any order.
+pub fn rect_of(a: [f32; 2], b: [f32; 2]) -> Rect {
+    Rect::from_corners(a, b)
+}
+
 /// The box an element occupies, which is what the frame and the marquee measure. A text box
 /// contributes its conservative estimate rather than its ink, so a frame errs outside the drawn
 /// glyphs instead of cutting through them.
@@ -517,6 +683,7 @@ pub fn item_bounds(ann: &OutputAnnotations, id: ItemId) -> Option<Rect> {
     match id {
         ItemId::Stroke(i) => ann.strokes.get(i)?.bounds(),
         ItemId::Text(i) => ann.texts.get(i).map(TextItem::paint_bounds),
+        ItemId::Shape(i) => ann.shapes.get(i).map(Shape::bounds),
     }
 }
 
@@ -538,6 +705,7 @@ pub fn selection_frame(
                     .map(|s| t.stroke(s).bounds())
                     .unwrap_or(None),
                 ItemId::Text(i) => ann.texts.get(*i).map(|x| t.text(x).paint_bounds()),
+                ItemId::Shape(i) => ann.shapes.get(*i).map(|s| t.shape(s).bounds()),
             },
             None => item_bounds(ann, *id),
         })
@@ -594,6 +762,11 @@ pub fn marquee_select(ann: &OutputAnnotations, marquee: Rect) -> Vec<ItemId> {
             .filter(|i| ann.strokes[*i].bounds().is_some_and(inside))
             .map(ItemId::Stroke),
     );
+    ids.extend(
+        (0..ann.shapes.len())
+            .filter(|i| inside(ann.shapes[*i].bounds()))
+            .map(ItemId::Shape),
+    );
     ids
 }
 
@@ -629,6 +802,8 @@ pub struct Doc {
 pub struct Overlay {
     /// Stroke still being drawn, not yet committed.
     pub stroke: Option<Stroke>,
+    /// Shape still being dragged out, not yet committed.
+    pub shape: Option<Shape>,
     /// Eraser cursor position.
     pub eraser: Option<[f32; 2]>,
     /// Text box being edited, preedit included.

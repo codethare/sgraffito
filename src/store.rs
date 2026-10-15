@@ -10,7 +10,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::canvas::{Doc, OutputAnnotations};
 
-pub const VERSION: u32 = 1;
+/// The version this daemon writes. Version 1 had no `shapes` list; version 2 adds one. Both are
+/// read, because a version 1 file is a version 2 file with no shapes in it, and an older build
+/// reading a version 2 file would silently drop every shape on its next save — which is what the
+/// number is for.
+pub const VERSION: u32 = 2;
+/// The oldest version whose files still load.
+pub const MIN_VERSION: u32 = 1;
 pub const DEBOUNCE: Duration = Duration::from_secs(1);
 pub const RETRY_DELAY: Duration = Duration::from_secs(1);
 
@@ -43,6 +49,7 @@ pub fn path() -> Option<PathBuf> {
 }
 
 /// Load annotations. Missing means empty; corrupt or unsupported versions are backed up as `.bak` and treated as empty.
+/// A version older than [`MIN_VERSION`] or newer than [`VERSION`] is unsupported and is backed up.
 pub fn load(path: &Path) -> Doc {
     let raw = match fs::read(path) {
         Ok(raw) => raw,
@@ -54,7 +61,9 @@ pub fn load(path: &Path) -> Doc {
     };
     let parsed = serde_json::from_slice::<File>(&raw).map_err(|e| e.to_string());
     match parsed {
-        Ok(file) if file.version == VERSION => Doc {
+        // A supported older version loads; its missing fields already default. It is written back
+        // in the current version the next time the daemon saves.
+        Ok(file) if (MIN_VERSION..=VERSION).contains(&file.version) => Doc {
             outputs: file.outputs,
         },
         Ok(file) => {

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use sgraffito::canvas::{Doc, OutputAnnotations, Stroke, TextItem};
+use sgraffito::canvas::{Doc, OutputAnnotations, Shape, ShapeKind, Stroke, TextItem};
 use sgraffito::store::{self, Store};
 
 fn tmpdir(tag: &str) -> PathBuf {
@@ -27,6 +27,13 @@ fn sample() -> Doc {
                 color: "#ffffff".into(),
                 size: 18.0,
                 text: "买牛奶".into(), // CJK on purpose: multi-byte content must survive
+            }],
+            shapes: vec![Shape {
+                kind: ShapeKind::Arrow,
+                color: "#3584e4".into(),
+                width: 3.0,
+                from: [30.0, 400.0],
+                to: [180.0, 260.0],
             }],
         },
     );
@@ -64,9 +71,53 @@ fn saved_file_has_version_and_output_buckets() {
     let p = dir.join("annotations.json");
     store::save(&p, &sample()).unwrap();
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-    assert_eq!(v["version"], 1);
+    assert_eq!(v["version"], 2);
     assert_eq!(v["outputs"]["eDP-1"]["strokes"][0]["points"][0][0], 12.0);
     assert_eq!(v["outputs"]["eDP-1"]["texts"][0]["text"], "买牛奶"); // CJK survives the round trip
+    // A shape is two points and a kind, however large it would be drawn: no samples, no box.
+    let shape = &v["outputs"]["eDP-1"]["shapes"][0];
+    assert_eq!(shape["kind"], "arrow");
+    assert_eq!(shape["from"], serde_json::json!([30.0, 400.0]));
+    assert_eq!(shape["to"], serde_json::json!([180.0, 260.0]));
+    assert_eq!(
+        shape.as_object().unwrap().len(),
+        5,
+        "kind, color, width, from, to"
+    );
+}
+
+#[test]
+fn a_version_1_file_loads_and_is_not_backed_up() {
+    let dir = tmpdir("v1");
+    let p = dir.join("annotations.json");
+    // What an earlier release wrote: no `shapes` key at all.
+    std::fs::write(
+        &p,
+        r##"{"version":1,"outputs":{"eDP-1":{"strokes":[{"color":"#e01b24","width":3.0,"points":[[1.0,2.0]]}],"texts":[]}}}"##,
+    )
+    .unwrap();
+    let doc = store::load(&p);
+    assert_eq!(doc.outputs["eDP-1"].strokes.len(), 1, "the strokes load");
+    assert!(
+        doc.outputs["eDP-1"].shapes.is_empty(),
+        "no shape is invented"
+    );
+    assert!(
+        !dir.join("annotations.json.bak").exists(),
+        "it is not backed up"
+    );
+}
+
+#[test]
+fn a_shape_survives_a_round_trip() {
+    let dir = tmpdir("shapes");
+    let p = dir.join("annotations.json");
+    store::save(&p, &sample()).unwrap();
+    let back = store::load(&p);
+    assert_eq!(
+        back.outputs["eDP-1"].shapes,
+        sample().outputs["eDP-1"].shapes
+    );
 }
 
 #[test]

@@ -23,7 +23,11 @@ fn ink(buf: &[u8]) -> usize {
 }
 
 fn ann(strokes: Vec<Stroke>, texts: Vec<TextItem>) -> OutputAnnotations {
-    OutputAnnotations { strokes, texts }
+    OutputAnnotations {
+        strokes,
+        texts,
+        shapes: vec![],
+    }
 }
 
 fn line(y: f32, x0: f32, x1: f32) -> Stroke {
@@ -451,7 +455,17 @@ fn every_block_of_the_rail_is_reachable_and_no_row_is_a_gap() {
             actions.push(*action);
         }
     }
-    for tool in [Tool::Pen, Tool::Eraser, Tool::Text, Tool::Selection] {
+    for tool in [
+        Tool::Pen,
+        Tool::Eraser,
+        Tool::Text,
+        Tool::Selection,
+        Tool::Circle,
+        Tool::Rect,
+        Tool::Diamond,
+        Tool::Line,
+        Tool::Arrow,
+    ] {
         assert!(actions.contains(&ToolbarAction::Tool(tool)), "{tool:?}");
     }
     for index in 0..PALETTE.len() {
@@ -472,8 +486,9 @@ fn every_block_of_the_rail_is_reachable_and_no_row_is_a_gap() {
         ToolbarAction::Lock,
         "Esc is not last"
     );
-    // Twelve clickable blocks: the size readout is drawn but owned by `[` above it.
-    assert_eq!(actions.len(), 12, "a drawn block cannot be hit");
+    // Seventeen clickable blocks: five colours, nine tools, `[`, `]` and `Esc`. The size readout is
+    // drawn between the two size keys but owned by `[`, so it is not one of them.
+    assert_eq!(actions.len(), 17, "a drawn block cannot be hit");
     // Outside the rail the toolbar takes nothing: those presses are drawing gestures.
     let band = toolbar_bounds(w, h);
     assert_eq!(
@@ -1232,5 +1247,54 @@ fn a_cjk_click_lands_inside_the_measured_box() {
     assert!(
         item.bounds().w < measured.w,
         "the estimate is not narrower here, so this checks nothing"
+    );
+}
+
+#[test]
+fn the_rail_is_pinned_to_the_top_margin_when_it_cannot_be_centred() {
+    // The rail grew to eighteen blocks. On an output with room it still centres on the optical
+    // centre; on one without, its top is the margin, so the bottom of it is what falls off the
+    // output rather than the whole rail sliding off the top.
+    let (w, tall) = (640u32, 1600u32);
+    let roomy = toolbar_bounds(w as f32, tall as f32);
+    assert!(
+        roomy.y > 8.0,
+        "a tall output centres the rail instead of pinning it: {roomy:?}"
+    );
+
+    let (short_w, short_h) = (640u32, 500u32);
+    let pinned = toolbar_bounds(short_w as f32, short_h as f32);
+    assert_eq!(
+        pinned.y,
+        8.0 - 1.0,
+        "the top is the margin, hairline included"
+    );
+    assert!(
+        pinned.y + pinned.h > short_h as f32,
+        "the rail is taller than the room the output has for it"
+    );
+
+    // What is drawn agrees with that box, and the top of the rail is inside the output.
+    let mut buf = buffer(short_w, short_h);
+    let overlay = Overlay {
+        toolbar: Some(toolbar(Tool::Pen, "#33d17a", 3.0, None)),
+        ..Default::default()
+    };
+    Renderer::new().render(
+        &mut buf,
+        short_w,
+        short_h,
+        1.0,
+        &OutputAnnotations::default(),
+        &overlay,
+        None,
+    );
+    let column: Vec<u32> = (0..short_h)
+        .filter(|y| alpha(&buf, short_w, 20, *y) > 0)
+        .collect();
+    let top = *column.first().expect("the rail is painted");
+    assert!(
+        top as f32 >= pinned.y && top as f32 <= pinned.y + 8.0,
+        "the rail starts at the margin, not off the top: {top}"
     );
 }

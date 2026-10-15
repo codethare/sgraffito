@@ -12,8 +12,9 @@ use tiny_skia::{
 use wayland_client::protocol::wl_shm::Format;
 
 use crate::canvas::{
-    Handle, ItemId, OutputAnnotations, Overlay, PALETTE, Rect, SELECT_HANDLE, Stroke, TextItem,
-    TextOverlay, Tool, Toolbar, ToolbarAction, rotate_handle, selection_frame,
+    Handle, ItemId, OutputAnnotations, Overlay, PALETTE, Rect, SELECT_HANDLE, Shape, ShapeKind,
+    Stroke, TextItem, TextOverlay, Tool, Toolbar, ToolbarAction, rect_of, rotate_handle,
+    selection_frame,
 };
 /// Radius of the eraser marker circle, in logical pixels.
 const ERASER_MARKER_RADIUS: f32 = 8.0;
@@ -47,11 +48,11 @@ const TOOLBAR_LABEL_PAD: f32 = 12.0;
 /// of the drawn rail. The strip is damaged whenever the rail changes, and joins a transient
 /// damage box that reaches it.
 const TOOLBAR_RESERVE: f32 = 224.0;
-/// Height of the whole column: thirteen blocks, nine gaps inside the groups and three between
+/// Height of the whole column: eighteen blocks, fourteen gaps inside the groups and three between
 /// them, all fixed, so the column's height never depends on the font, unlike the width a
 /// stretched block takes.
 const TOOLBAR_COLUMN: f32 =
-    2.0 * TOOLBAR_PAD + 13.0 * TOOLBAR_BLOCK + 9.0 * TOOLBAR_GAP + 3.0 * TOOLBAR_GROUP_GAP;
+    2.0 * TOOLBAR_PAD + 18.0 * TOOLBAR_BLOCK + 14.0 * TOOLBAR_GAP + 3.0 * TOOLBAR_GROUP_GAP;
 const TOOLBAR_CACHE_CAP: usize = 16;
 /// `#rrggbbaa`. The block fill stands in for a HUD material: a `wl_shm` layer surface cannot be
 /// blurred, so there is translucency but no real vibrancy. The alpha is the opacity that keeps
@@ -112,6 +113,11 @@ fn toolbar_blocks(toolbar: &Toolbar) -> Vec<Block> {
         (Tool::Eraser, "E", "eraser"),
         (Tool::Text, "T", "text: click to place"),
         (Tool::Selection, "S", "select: drag to move"),
+        (Tool::Circle, "O", "circle"),
+        (Tool::Rect, "R", "rectangle"),
+        (Tool::Diamond, "D", "diamond"),
+        (Tool::Line, "L", "line"),
+        (Tool::Arrow, "A", "arrow"),
     ] {
         blocks.push(Block {
             glyph: glyph.into(),
@@ -429,6 +435,9 @@ impl Renderer {
         if let Some(s) = &overlay.stroke {
             draw_stroke(&mut pixmap, s, scale);
         }
+        if let Some(s) = &overlay.shape {
+            draw_shape(&mut pixmap, s, scale);
+        }
         if let Some(t) = &overlay.text {
             self.draw_text(&mut pixmap, &t.item, scale, Some(t), None);
         }
@@ -447,6 +456,11 @@ impl Renderer {
                     ItemId::Text(i) => {
                         if let Some(item) = ann.texts.get(*i) {
                             self.draw_text(&mut pixmap, &transform.text(item), scale, None, None);
+                        }
+                    }
+                    ItemId::Shape(i) => {
+                        if let Some(s) = ann.shapes.get(*i) {
+                            draw_shape(&mut pixmap, &transform.shape(s), scale);
                         }
                     }
                 }
@@ -497,6 +511,12 @@ impl Renderer {
                 continue;
             }
             draw_stroke(pixmap, s, scale);
+        }
+        for (index, s) in ann.shapes.iter().enumerate() {
+            if skip.contains(&ItemId::Shape(index)) {
+                continue;
+            }
+            draw_shape(pixmap, s, scale);
         }
         for (index, item) in ann.texts.iter().enumerate() {
             // The box under edit is the overlay's, and a box a gesture is dragging is drawn with
@@ -991,10 +1011,12 @@ pub fn transient_damage(last: Option<Rect>, now: Option<Rect>, rail: Option<Rect
 }
 
 /// Bounding box of the transient overlay elements of a frame, in logical pixels: the
-/// in-progress stroke, the eraser marker and the marquee. `None` when the overlay draws none of
-/// them. The selection's own box needs the document, so the caller adds it.
+/// in-progress stroke, the shape being dragged out, the eraser marker and the marquee. `None` when
+/// the overlay draws none of them. The selection's own box needs the document, so the caller adds
+/// it.
 pub fn transient_bounds(overlay: &Overlay) -> Option<Rect> {
     let stroke = overlay.stroke.as_ref().and_then(Stroke::bounds);
+    let shape = overlay.shape.as_ref().map(Shape::bounds);
     let eraser = overlay.eraser.map(|[x, y]| {
         Rect {
             x,
@@ -1005,7 +1027,7 @@ pub fn transient_bounds(overlay: &Overlay) -> Option<Rect> {
         .grown(ERASER_MARKER_RADIUS + 2.0)
     });
     let marquee = overlay.marquee.map(|m| m.grown(SELECT_HANDLE));
-    [stroke, eraser, marquee]
+    [stroke, shape, eraser, marquee]
         .into_iter()
         .flatten()
         .reduce(Rect::union)
@@ -1261,6 +1283,90 @@ fn rounded_rect_path(box_: Rect, radius: f32) -> Option<tiny_skia::Path> {
     pb.finish()
 }
 
+/// This crate's rectangle as the one tiny-skia takes, which rejects a negative or non-finite one.
+fn sk_rect(r: Rect) -> Option<tiny_skia::Rect> {
+    tiny_skia::Rect::from_xywh(r.x, r.y, r.w, r.h)
+}
+
+/// A shape, in device pixels: its outline stroked with its own pen width, and the head of an arrow
+/// filled, because a stroked triangle would read as a hollow head rather than as an arrow.
+fn draw_shape(pixmap: &mut PixmapMut, s: &Shape, scale: f32) {
+    if s.is_empty() {
+        return;
+    }
+    let c = parse_hex(&s.color);
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(c[0], c[1], c[2], c[3]);
+    paint.anti_alias = true;
+    let stroke = SkStroke {
+        width: s.width * scale,
+        line_cap: LineCap::Round,
+        line_join: LineJoin::Round,
+        ..Default::default()
+    };
+    let from = [s.from[0] * scale, s.from[1] * scale];
+    let to = [s.to[0] * scale, s.to[1] * scale];
+    let box_ = rect_of(from, to);
+    match s.kind {
+        ShapeKind::Circle | ShapeKind::Rect | ShapeKind::Diamond => {
+            let Some(rect) = sk_rect(box_) else {
+                return;
+            };
+            let mut pb = PathBuilder::new();
+            match s.kind {
+                ShapeKind::Circle => pb.push_oval(rect),
+                ShapeKind::Rect => pb.push_rect(rect),
+                _ => {
+                    let (cx, cy) = (box_.x + box_.w / 2.0, box_.y + box_.h / 2.0);
+                    pb.move_to(cx, box_.y);
+                    pb.line_to(box_.x + box_.w, cy);
+                    pb.line_to(cx, box_.y + box_.h);
+                    pb.line_to(box_.x, cy);
+                    pb.close();
+                }
+            }
+            if let Some(path) = pb.finish() {
+                pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+            }
+        }
+        ShapeKind::Line | ShapeKind::Arrow => {
+            let mut pb = PathBuilder::new();
+            pb.move_to(from[0], from[1]);
+            pb.line_to(to[0], to[1]);
+            if let Some(path) = pb.finish() {
+                pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+            }
+            if s.kind != ShapeKind::Arrow {
+                return;
+            }
+            let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
+            let len = (dx * dx + dy * dy).sqrt();
+            if len <= f32::EPSILON {
+                return;
+            }
+            let (ux, uy) = (dx / len, dy / len);
+            let head = s.head_len() * scale;
+            let half = s.head_half() * scale;
+            let base = [to[0] - ux * head, to[1] - uy * head];
+            let (px, py) = (-uy * half, ux * half);
+            let mut head_path = PathBuilder::new();
+            head_path.move_to(to[0], to[1]);
+            head_path.line_to(base[0] + px, base[1] + py);
+            head_path.line_to(base[0] - px, base[1] - py);
+            head_path.close();
+            if let Some(path) = head_path.finish() {
+                pixmap.fill_path(
+                    &path,
+                    &paint,
+                    tiny_skia::FillRule::Winding,
+                    Transform::identity(),
+                    None,
+                );
+            }
+        }
+    }
+}
+
 fn draw_stroke(pixmap: &mut PixmapMut, s: &Stroke, scale: f32) {
     let c = parse_hex(&s.color);
     let mut paint = Paint::default();
@@ -1451,6 +1557,7 @@ mod tests {
                 points: vec![[10.0, 50.0], [190.0, 60.0]],
             }],
             texts: vec![text_item("cached text")],
+            shapes: vec![],
         }
     }
 
@@ -1461,6 +1568,7 @@ mod tests {
         let annotations = OutputAnnotations {
             strokes: vec![],
             texts: vec![text_item("cached text")],
+            shapes: vec![],
         };
         let mut cold = vec![0; 200 * 100 * 4];
         let mut warm = vec![0; 200 * 100 * 4];
@@ -1556,6 +1664,7 @@ mod tests {
         let mut annotations = OutputAnnotations {
             strokes: vec![],
             texts: vec![text_item("before")],
+            shapes: vec![],
         };
         let mut first = vec![0; 200 * 100 * 4];
         render_cached(&mut renderer, &mut cache, &annotations, &mut first);
@@ -1629,6 +1738,7 @@ mod tests {
         let old_document = OutputAnnotations {
             strokes: vec![],
             texts: vec![text_item("before")],
+            shapes: vec![],
         };
         let mut new_document = old_document.clone();
         new_document.texts[0].text = "after".into();
@@ -1747,5 +1857,81 @@ mod tests {
             &[],
         );
         assert_eq!(dragged, committed);
+    }
+
+    #[test]
+    fn a_live_shape_is_drawn_once_and_not_by_the_raster() {
+        // A shape being dragged out is the overlay's, so it is left out of the raster and drawn
+        // live. Painting it twice, or not at all, would show up against the same frame drawn from
+        // a document that already holds it.
+        let held = [ItemId::Shape(0)];
+        let shape = Shape {
+            kind: ShapeKind::Circle,
+            color: "#e01b24".into(),
+            width: 3.0,
+            from: [40.0, 20.0],
+            to: [160.0, 80.0],
+        };
+        let mut renderer = Renderer::new();
+        let stored = OutputAnnotations {
+            strokes: vec![],
+            texts: vec![],
+            shapes: vec![shape.clone()],
+        };
+        let live = Overlay {
+            shape: Some(shape.clone()),
+            ..Default::default()
+        };
+        let mut transient = vec![0; 200 * 100 * 4];
+        renderer.render_with_cache(
+            &mut transient,
+            200,
+            100,
+            1.0,
+            &stored,
+            &live,
+            None,
+            &mut FrameCache::default(),
+            &held,
+        );
+        let settled = Overlay::default();
+        let mut committed = vec![0; 200 * 100 * 4];
+        renderer.render_with_cache(
+            &mut committed,
+            200,
+            100,
+            1.0,
+            &stored,
+            &settled,
+            None,
+            &mut FrameCache::default(),
+            &[],
+        );
+        assert_eq!(transient, committed);
+
+        // The raster holds no shape while the gesture holds it: a frame that draws only the
+        // raster is blank where the shape is.
+        let mut cache = FrameCache::default();
+        let mut only_raster = vec![0; 200 * 100 * 4];
+        renderer.render_with_cache(
+            &mut only_raster,
+            200,
+            100,
+            1.0,
+            &stored,
+            &settled,
+            None,
+            &mut cache,
+            &held,
+        );
+        assert_eq!(
+            only_raster.iter().filter(|b| **b != 0).count(),
+            0,
+            "a skipped shape is absent from the raster"
+        );
+
+        // And the live shape is what the damage box covers, head and all.
+        let box_ = transient_bounds(&live).expect("a live shape has a box");
+        assert!(box_.contains(40.0, 50.0) && box_.contains(160.0, 50.0));
     }
 }

@@ -45,7 +45,7 @@ done
 export WAYLAND_DISPLAY="$sock"
 
 cat > "$XDG_DATA_HOME/sgraffito/annotations.json" <<'JSON'
-{"version":1,"outputs":{"HEADLESS-1":{"strokes":[{"color":"#e01b24","width":8,"points":[[100,300],[700,300]]}],"texts":[{"x":100,"y":100,"color":"#ffffff","size":40,"text":"hi 你好"}]},"HEADLESS-2":{"strokes":[{"color":"#e01b24","width":8,"points":[[50,75],[150,75]]}],"texts":[]}}}
+{"version":2,"outputs":{"HEADLESS-1":{"strokes":[{"color":"#e01b24","width":8,"points":[[100,300],[700,300]]}],"texts":[{"x":100,"y":100,"color":"#ffffff","size":40,"text":"hi 你好"}],"shapes":[{"kind":"circle","color":"#33d17a","width":6,"from":[500,430],"to":[700,560]}]},"HEADLESS-2":{"strokes":[{"color":"#e01b24","width":8,"points":[[50,75],[150,75]]}],"texts":[]}}}
 JSON
 
 "$bin" daemon > "$work/daemon.log" 2>&1 &
@@ -70,9 +70,12 @@ d = open(sys.argv[1], 'rb').read()
 px = d[d.index(b'255\n') + 4:]
 red = sum(1 for j in range(0, len(px), 3) if px[j] > 120 and px[j+1] < 80 and px[j+2] < 80)
 ink = sum(1 for j in range(0, len(px), 3) if max(px[j:j+3]) > 20)
+# A circle is stroked, never filled: its rim is ink and its middle is not.
+green = sum(1 for j in range(0, len(px), 3) if px[j+1] > 120 and px[j] < 100 and px[j+2] < 120)
 assert red > 1000, f"no red line drawn while locked (red={red})"
 assert ink > red, f"text was not rendered (ink={ink}, red={red})"
-print(f"  rendering ok: red={red} ink={ink}")
+assert green > 200, f"the shape was not rendered (green={green})"
+print(f"  rendering ok: red={red} green={green} ink={ink}")
 PY
 
 # 1b. the output scale reaches the compositor: on the scale-2 output a stroke between logical
@@ -120,8 +123,10 @@ grep -q "wp_cursor_shape_v1 available" "$work/daemon.log" \
 echo "  pointer shape protocol ok"
 
 # 2c. while editing, the toolbar is a vertical rail on the left edge: it paints two separated
-# bands of the left strip, and the top strip (where a horizontal bar used to sit) stays clear.
-# The seeded annotations start at x=100, so the strip x<60 can only hold the rail.
+# bands of the left strip, and nothing to the right of that strip in the top rows (where a
+# horizontal bar used to sit). The seeded annotations start at x=100, so the strip x<60 can only
+# hold the rail. This output is shorter than the rail, so the rail's top is the top margin and its
+# bottom is what falls off the output.
 "$bin" edit > /dev/null || fail "edit failed"
 sleep 0.5
 grim -o HEADLESS-1 -t ppm "$work/toolbar.ppm" 2>/dev/null || fail "grim on the toolbar failed"
@@ -136,10 +141,12 @@ def ink(x0, y0, x1, y1):
                if max(px[(y * w + x) * 3:(y * w + x) * 3 + 3]) > 20)
 high = ink(0, int(h * 0.14), 60, int(h * 0.20))
 low = ink(0, int(h * 0.62), 60, int(h * 0.68))
-top = ink(0, 0, w, 20)
+rail_top = ink(0, 0, 60, 20)
+right = ink(60, 0, w, 20)
 assert high > 100 and low > 100, f"no vertical rail on the left edge (high={high} low={low})"
-assert top == 0, f"the top strip is not clear (ink={top})"
-print(f"  rail ok: high={high} low={low} top={top}")
+assert rail_top > 0, "the rail is pinned to the margin, so it reaches the top rows"
+assert right == 0, f"the top strip is not clear to the right of the rail (ink={right})"
+print(f"  rail ok: high={high} low={low} top={rail_top}")
 PY
 "$bin" lock > /dev/null || fail "lock failed"
 
@@ -192,6 +199,7 @@ python3 -c "
 import json,os
 p=os.environ['XDG_DATA_HOME']+'/sgraffito/annotations.json'
 d=json.load(open(p))
+assert d['version']==2, d['version']
 assert d['outputs']=={}, d
 print('  file empty after clear ok')
 "

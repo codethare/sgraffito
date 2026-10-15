@@ -9,7 +9,11 @@ fn line(y: f32, x0: f32, x1: f32) -> Stroke {
 }
 
 fn ann(strokes: Vec<Stroke>, texts: Vec<TextItem>) -> OutputAnnotations {
-    OutputAnnotations { strokes, texts }
+    OutputAnnotations {
+        strokes,
+        texts,
+        shapes: vec![],
+    }
 }
 
 fn text(x: f32, y: f32, s: &str) -> TextItem {
@@ -490,4 +494,223 @@ fn the_gap_between_the_elements_of_a_selection_is_inside_its_frame() {
     );
     // With nothing held there is no frame, so a press there can only start a marquee.
     assert!(selection_frame(&a, &[], None).is_none());
+}
+
+// --- shapes: two points and a kind -----------------------------------------------------------
+
+use sgraffito::canvas::{Shape, ShapeKind};
+
+fn shape(kind: ShapeKind, from: [f32; 2], to: [f32; 2]) -> Shape {
+    Shape {
+        kind,
+        color: "#e01b24".into(),
+        width: 3.0,
+        from,
+        to,
+    }
+}
+
+#[test]
+fn every_kind_is_read_from_the_same_two_points() {
+    let a = ann(vec![], vec![]);
+    let _ = a;
+    let (from, to) = ([10.0, 20.0], [110.0, 70.0]);
+    // A rectangle is its own box, drawn as a closed loop of five points.
+    let rect = shape(ShapeKind::Rect, from, to).outline();
+    assert_eq!(
+        rect,
+        vec![
+            [10.0, 20.0],
+            [110.0, 20.0],
+            [110.0, 70.0],
+            [10.0, 70.0],
+            [10.0, 20.0]
+        ]
+    );
+    // A diamond's corners are that box's edge midpoints.
+    let diamond = shape(ShapeKind::Diamond, from, to).outline();
+    assert_eq!(
+        diamond[..4],
+        [[60.0, 20.0], [110.0, 45.0], [60.0, 70.0], [10.0, 45.0]]
+    );
+    // A line is just the two points, in the order they were dragged.
+    assert_eq!(shape(ShapeKind::Line, from, to).outline(), vec![from, to]);
+    // A circle's rim touches the middle of each edge of the box and is a closed loop.
+    let circle = shape(ShapeKind::Circle, from, to).outline();
+    assert!((circle[0][0] - 110.0).abs() < 0.01 && (circle[0][1] - 45.0).abs() < 0.01);
+    let (first, last) = (circle.first().unwrap(), circle.last().unwrap());
+    assert!(
+        (first[0] - last[0]).abs() < 0.01 && (first[1] - last[1]).abs() < 0.01,
+        "a circle is closed"
+    );
+}
+
+#[test]
+fn an_arrow_keeps_its_direction_and_carries_a_head_at_the_end() {
+    // Dragged right to left: the head is at `to`, and the line runs in that direction.
+    let arrow = shape(ShapeKind::Arrow, [200.0, 100.0], [40.0, 100.0]);
+    let outline = arrow.outline();
+    assert_eq!(
+        outline[0],
+        [200.0, 100.0],
+        "the tail is where the press was"
+    );
+    assert_eq!(
+        outline[1],
+        [40.0, 100.0],
+        "the head is where the pointer ended"
+    );
+    // The head's two wings sit back along the line, one on each side of it.
+    let (wing_a, wing_b, half) = (outline[2], outline[3], arrow.head_half());
+    assert!(wing_a[0] > 40.0, "the head points along the drag");
+    assert!(
+        (wing_a[0] - wing_b[0]).abs() < 0.01,
+        "the wings share the base's column"
+    );
+    let (up, down) = (wing_a[1].min(wing_b[1]), wing_a[1].max(wing_b[1]));
+    assert!(up < 100.0 && down > 100.0, "the wings straddle the line");
+    assert!((100.0 - up - half).abs() < 0.01 && (down - 100.0 - half).abs() < 0.01);
+    // A hairline arrow still gets a head big enough to read.
+    let thin = Shape {
+        width: 1.0,
+        ..arrow.clone()
+    };
+    assert!(thin.head_len() >= 9.0);
+}
+
+#[test]
+fn a_drag_with_no_extent_is_nothing_to_draw() {
+    for kind in [
+        ShapeKind::Circle,
+        ShapeKind::Rect,
+        ShapeKind::Diamond,
+        ShapeKind::Line,
+        ShapeKind::Arrow,
+    ] {
+        assert!(shape(kind, [5.0, 5.0], [5.0, 5.0]).is_empty(), "{kind:?}");
+    }
+    assert!(!shape(ShapeKind::Line, [5.0, 5.0], [6.0, 5.0]).is_empty());
+    // A direction one pixel wide is still a line, even though the box has no extent across it.
+    assert!(!shape(ShapeKind::Arrow, [5.0, 5.0], [5.0, 9.0]).is_empty());
+}
+
+#[test]
+fn a_shape_is_hit_by_its_outline_and_not_by_its_interior() {
+    let from = [100.0, 100.0];
+    let to = [300.0, 200.0];
+    let rect = shape(ShapeKind::Rect, from, to);
+    // The middle of a wide rectangle belongs to whatever is drawn inside it.
+    assert!(rect.distance_squared(200.0, 150.0) > sgraffito::canvas::ERASER_THRESHOLD.powi(2));
+    // Its edge is within reach.
+    assert!(rect.distance_squared(200.0, 101.0) <= sgraffito::canvas::ERASER_THRESHOLD.powi(2));
+
+    let circle = shape(ShapeKind::Circle, from, to);
+    assert!(circle.distance_squared(200.0, 150.0) > sgraffito::canvas::ERASER_THRESHOLD.powi(2));
+    assert!(circle.distance_squared(200.0, 100.0) <= sgraffito::canvas::ERASER_THRESHOLD.powi(2));
+
+    let diamond = shape(ShapeKind::Diamond, from, to);
+    assert!(diamond.distance_squared(200.0, 150.0) > sgraffito::canvas::ERASER_THRESHOLD.powi(2));
+    assert!(
+        diamond.distance_squared(200.0, 100.0) <= sgraffito::canvas::ERASER_THRESHOLD.powi(2),
+        "a diamond touches its box's edge midpoint"
+    );
+
+    let line = shape(ShapeKind::Line, from, to);
+    assert!(
+        line.distance_squared(200.0, 150.0) <= 1.0,
+        "a point on the segment is a hit"
+    );
+    // The head is solid, so a point inside it is a hit even though it is off the line. The
+    // centroid of the head's triangle is the worst case for an outline-only test.
+    let arrow = shape(ShapeKind::Arrow, from, to);
+    let head = arrow.outline();
+    let centroid = [
+        (head[1][0] + head[2][0] + head[3][0]) / 3.0,
+        (head[1][1] + head[2][1] + head[3][1]) / 3.0,
+    ];
+    assert!(
+        arrow.distance_squared(centroid[0], centroid[1])
+            <= sgraffito::canvas::ERASER_THRESHOLD.powi(2),
+        "the middle of the head is a hit"
+    );
+}
+
+#[test]
+fn a_clicks_inside_a_rectangle_reaches_the_stroke_inside_it() {
+    // The whole point of the outline hit test: an element inside a shape is reachable.
+    let rect = shape(ShapeKind::Rect, [100.0, 100.0], [300.0, 200.0]);
+    let inside = line(150.0, 150.0, 250.0);
+    let a = ann(vec![inside], vec![]);
+    let mut a = OutputAnnotations {
+        shapes: vec![rect],
+        ..a
+    };
+    assert_eq!(a.hit(200.0, 150.0), Some(ItemId::Stroke(0)));
+    assert_eq!(a.hit(200.0, 101.0), Some(ItemId::Shape(0)));
+    // The nearer of the two wins when both are in reach.
+    assert_eq!(a.hit(105.0, 150.0), Some(ItemId::Shape(0)));
+    // And the stroke is what the eraser removes, leaving the rectangle alone.
+    assert!(a.erase(200.0, 150.0).is_some());
+    assert!(a.strokes.is_empty() && a.shapes.len() == 1);
+}
+
+#[test]
+fn an_arrows_box_covers_its_head() {
+    let arrow = shape(ShapeKind::Arrow, [100.0, 100.0], [300.0, 100.0]);
+    let box_ = arrow.bounds();
+    // The head spreads perpendicular to the line, so the box is wider than the pen alone.
+    assert!(box_.h / 2.0 >= arrow.head_half(), "the box holds the head");
+    let plain = shape(ShapeKind::Line, [100.0, 100.0], [300.0, 100.0]);
+    assert!(
+        box_.h > plain.bounds().h,
+        "an arrow's box is grown by its head"
+    );
+    // Every edge allows for half the pen, a pixel of anti-aliasing and the head's spread.
+    let slack = arrow.width / 2.0 + 1.0 + arrow.head_half();
+    assert!(
+        (box_.x - (100.0 - slack)).abs() < 0.01,
+        "the left edge is the head away"
+    );
+}
+
+#[test]
+fn a_marquee_takes_a_wholly_contained_shape_and_not_a_clipped_one() {
+    let inside = shape(ShapeKind::Rect, [20.0, 20.0], [60.0, 50.0]);
+    let clipped = shape(ShapeKind::Rect, [80.0, 20.0], [200.0, 50.0]);
+    let clipped_bounds = clipped.bounds();
+    let a = OutputAnnotations {
+        strokes: vec![],
+        texts: vec![],
+        shapes: vec![inside, clipped],
+    };
+    let marquee = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: 120.0,
+        h: 100.0,
+    };
+    assert_eq!(marquee_select(&a, marquee), vec![ItemId::Shape(0)]);
+    assert_eq!(item_bounds(&a, ItemId::Shape(1)), Some(clipped_bounds));
+}
+
+#[test]
+fn a_transform_moves_both_points_of_a_shape_and_keeps_its_kind() {
+    let arrow = shape(ShapeKind::Arrow, [0.0, 0.0], [100.0, 0.0]);
+    let moved = Transform::Translate { dx: 10.0, dy: 5.0 }.shape(&arrow);
+    assert_eq!((moved.from, moved.to), ([10.0, 5.0], [110.0, 5.0]));
+    assert_eq!(moved.kind, ShapeKind::Arrow);
+    assert_eq!(
+        moved.width, arrow.width,
+        "a shape's pen does not change with a move"
+    );
+    // A resize scales the two points and leaves the kind alone, so a circle stays a circle.
+    let circle = shape(ShapeKind::Circle, [0.0, 0.0], [100.0, 100.0]);
+    let scaled = Transform::Scale {
+        anchor: [0.0, 0.0],
+        sx: 2.0,
+        sy: 2.0,
+    }
+    .shape(&circle);
+    assert_eq!((scaled.from, scaled.to), ([0.0, 0.0], [200.0, 200.0]));
+    assert_eq!(scaled.kind, ShapeKind::Circle);
 }

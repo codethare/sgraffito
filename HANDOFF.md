@@ -28,7 +28,7 @@ Chinese in chat, English in the artifacts.
   outside the repository.
 - `cargo test` is 96 tests across the lib plus six files in `tests/`.
 
-## What this session changed and why
+## What the last sessions changed and why, oldest first
 
 1. **The rail** (`render.rs`). Edit mode shows a vertical rail of 12 blocks against the left
    edge, its centre at 0.45 of the output height, which is the *optical* centre (roughly 5 %
@@ -94,8 +94,6 @@ Chinese in chat, English in the artifacts.
    - Measured at 4K: a drag 209 -> 78 us, a drag over 200 overlapping strokes 167 ms -> 77 us, a
      pop-out frame 8.1 -> 1.3 ms, a 1080p keystroke 3.1 ms -> 109 us. Recorded in the README.
 
-## What this session changed and why
-
 7. **The selection tool** (`openspec/changes/selection-and-transform/`). The program could add and
    remove elements but not move them, so a mind map whose nodes shift had to be erased and redrawn
    one `E` press at a time. The agreed scope, from the user's own description of that pain: pick one
@@ -131,24 +129,66 @@ Chinese in chat, English in the artifacts.
    - The rail gained the `S` block (`TOOLBAR_COLUMN` is a hand-written sum with a debug assertion:
      thirteen blocks, nine gaps, three group gaps) and its `Esc` label became `cancel, then lock`.
 
+8. **The five shape tools** (`openspec/changes/shape-tools/`). The program could draw freehand and
+   place text but no shape, so a mind map's boxes and connectors had to be drawn by hand — and the
+   pen's smoothing rounds a hand-drawn right angle on purpose, which is what made a rectangle look
+   wrong. Circle, rectangle, diamond, line and arrow, keyed `O`, `R`, `D`, `L`, `A`.
+   - **A shape is two points and a kind** (`Shape { kind, color, width, from, to }`). One gesture
+     covers all five tools and no direction is lost, a shape costs two points however large it is
+     drawn, and a resize or a rotation of one is the arithmetic the selection work already applies to
+     a pair of points (`Transform::shape`). Nothing derived is stored: no samples, no box.
+   - The gesture is the pen's, and the live shape lives in `Overlay::shape` beside the in-progress
+     stroke, so it inherits the transient rule whole: the frames it is dragged through damage only
+     its box, the release is one document change, and `Esc`, a mode switch, a tool change or a
+     `clear` abandons it with nothing written. `commit_transient_strokes` became
+     `commit_transient_drawing` and commits both kinds.
+   - **Hit by the outline, never by the interior**, so a stroke drawn inside a rectangle keeps its
+     own clicks. The hit test flattens the shape (`Shape::outline`, a 96-gon for an ellipse) because
+     tiny-skia has no distance query, while the frame draws the real curve (`push_oval`,
+     `push_rect`); the two differ by under a pixel against the 8-pixel tolerance, and the marker on
+     `outline` says so.
+   - A drag with no extent — a line whose ends meet, or a box flat in one direction — is dropped
+     rather than written, so a click with a shape tool armed cannot leave an element that is
+     invisible but still erasable.
+   - `Shape::bounds` allows for the arrowhead's spread as well as the pen, because a head that pokes
+     out of its own box would be clipped by the damage region and missed by the eraser.
+   - The file went to **version 2** for the `shapes` list, with `load()` accepting 1 as well; an
+     older build has no `shapes` field and would silently drop every shape on its next save, which is
+     exactly what the version is for.
+   - The rail is eighteen blocks now (about 638 logical pixels). `toolbar_origin` already pinned the
+     top to the margin, so a short output loses the bottom of the rail; `scripts/smoke.sh` runs on an
+     800x600 output, which is now shorter than the rail, and its top-strip check was updated to say
+     that the rail reaches the margin and that nothing to the right of it does.
+
 ## Where things live
 
 - `src/render.rs` — rail constants at the top, `toolbar_blocks`, `toolbar_pill`, `draw_toolbar`,
   `toolbar_hit`, `toolbar_bounds`, `caret_geometry`, `draw_text`, `text_edit_bounds`,
-  `DamageRegion`. The frame path: `render_with_cache(buf, …, damage, &mut FrameCache, skip_text)`
-  fills the damaged region from `FrameCache::base` (a `Pixmap` holding the committed document),
-  then draws the overlays; `draw_document` is both the cache build and the fallback when the
-  pixmap cannot be allocated; `transient_damage(last, now, rail)` is the damage rule.
+  `draw_selection`, `draw_marquee`, `draw_stroke`, `draw_shape`, `sk_rect`, `DamageRegion`. The
+  frame path: `render_with_cache(buf, …, damage, &mut FrameCache, skip: &[ItemId])` fills the damaged
+  region from `FrameCache::base` (a `Pixmap` holding the committed document), draws the elements
+  named in `skip` with the live gesture over it, then draws the overlays; `draw_document` is both the
+  cache build and the fallback when the pixmap cannot be allocated; `transient_damage(last, now,
+  rail)` is the damage rule. `BaseKey::skip` is the set the raster leaves out: the box under edit, and
+  the elements a live selection gesture holds.
 - `src/app.rs` — layer surfaces and mode switching, rail state (`current_toolbar`,
   `refresh_toolbar`, `refresh_toolbar_hover`), the animation (`hover_grow`, `tick`, `next_wait`),
   the document cache's invalidation (`doc_changed`, `doc_changed_at`, `Output::pending`,
   `Output::cache`), the clipboard wayland side (`DataDeviceHandler`, `selection`), cursor shapes
-  (`tool_cursor`, `desired_cursor`, `sync_cursor`).
+  (`tool_cursor`, `handle_cursor`, `desired_cursor`, `sync_cursor`), shapes (`begin_shape`,
+  `commit_transient_drawing`), and the selection's pointer state machine (`select_press`,
+  `drag_selection`, `release_selection`, `write_gesture`, `commit_any_gesture`, `drop_selection`,
+  `finish_marquee`).
 - `src/input.rs` — pointer (press/motion/release, hover, cursor, `pointer_release`), keyboard
-  shortcuts and the local text-key path (`edit_action`), `zwp_text_input_v3` handling,
-  `paste`/`take_pasted`.
-- `src/canvas.rs` — the document model, `TextBuffer` and `Caret`, `Toolbar`/`ToolbarAction`,
-  `PALETTE`, `Tool`, `erase` (returns the box it removed), `Rect`. Pure: no Wayland.
+  shortcuts and the local text-key path (`edit_action`), `Esc`'s stages (`escape`), the handle
+  under the pointer (`update_selection_grab`), `zwp_text_input_v3` handling, `paste`/`take_pasted`.
+- `src/canvas.rs` — the document model (strokes, text boxes, shapes), `TextBuffer` and `Caret`,
+  `Toolbar`/`ToolbarAction`, `PALETTE`, `Tool`, `erase` (returns the box it removed), `Rect`. The
+  shape model and its geometry, pure and tested: `Shape`/`ShapeKind`, `head_len`/`head_half`,
+  `is_empty`, `bounds`, `outline` (the flattened polyline a hit test measures), `distance_squared`,
+  `rect_of`, `item_bounds`. And all of the selection geometry: `Handle`, `Grab`, `Gesture`,
+  `Transform` (with `stroke`, `text` and `shape`), `Selection`, `grab_at`, `selection_frame`,
+  `selection_bounds`, `marquee_select`, `rotate_handle`. Pure: no Wayland.
 - `tests/` — `canvas_hit`, `ipc`, `keys`, `render`, `store`, `text_buffer`.
 - `scripts/smoke.sh` — headless sway, drives the CLI, greps the daemon log, checks screenshots,
   and measures the daemon's processor time over 5 idle seconds (fails above 30 ms).
@@ -223,6 +263,16 @@ no capabilities until a device exists.
   would mirror the selection is clamped instead, because a mirrored text box cannot be drawn.
 - The frame and the marquee are drawn in `TOOLBAR_ACCENT` as hairlines and capsules, with no fill of
   their own, so the interface gained no third shape or colour.
+- A shape is stroked and never filled, and it is hit by its outline and never by its interior. There
+  is no way to change a shape's kind, drag one of its corners or fill it once it has landed: erasing
+  it and drawing it again is the way. An arrow is one segment with one head, drawn at the end the
+  pointer stopped on; no double head, no bend, no snapping to the element it points at.
+- A shape's hit test measures a 96-gon for an ellipse while the frame draws the real curve (`push_oval`),
+  because tiny-skia has no distance query. The flatness is under a pixel at 4K against the 8-pixel
+  eraser tolerance; the `ponytail:` marker on `Shape::outline` is where that ceiling is written down.
+- The rail is eighteen blocks, about 638 logical pixels tall, so an output shorter than roughly 660
+  loses the bottom of it. `toolbar_origin` pins the top to the margin in that case, which is why the
+  smoke test's 800x600 output sees the rail reach its top rows.
 - A selection press starts with a whole-surface frame (`out.dirty`, as every other tool's press
   does); the frames that follow a gesture damage the union of the frame's previous and current box.
   Only a gesture's first movement rebuilds the raster, because that is the frame the held elements
@@ -274,5 +324,9 @@ no capabilities until a device exists.
 7. Shift-click to add one element to a selection, and a delete key for a selection (today the eraser
    removes one element per click). Both are additions to the press rules in `select_press`, not to
    the gesture arithmetic.
-8. Archiving the delivered OpenSpec changes, which stays impossible until the capability specs
+8. Filling a shape, and a second arrowhead style: a fill would need a fill colour per shape in the
+   file and a decision about what a click inside a filled shape does, since the interior is
+   deliberately not a hit today. Editing a shape after it lands (its kind, one corner) is the other
+   half of that, and a `kind` field already in the file makes it additive.
+9. Archiving the delivered OpenSpec changes, which stays impossible until the capability specs
    exist under `openspec/specs/`.

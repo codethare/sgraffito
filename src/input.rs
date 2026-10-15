@@ -21,7 +21,9 @@ use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::{
 use crate::app::{
     App, BTN_LEFT, Mode, PALETTE, Tool, ToolbarAction, log, read_selection, text_mime,
 };
-use crate::canvas::{Caret, OutputAnnotations, Rect, Stroke, TextBuffer, grab_at, selection_frame};
+use crate::canvas::{
+    Caret, OutputAnnotations, Rect, ShapeKind, Stroke, TextBuffer, grab_at, selection_frame,
+};
 
 /// What a local key does while a text box is focused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,12 +91,19 @@ pub fn bytes_to_delete(before_length: u32, preedit_bytes: usize) -> usize {
 }
 
 /// Key mapping while no text box is edited: `P`/`E`/`T` switch tools.
+/// Key mapping while no text box is edited: `P`/`E`/`T`/`S` switch tools, and the five shape tools
+/// take the initials of what they draw.
 pub fn tool_for_keysym(keysym: Keysym) -> Option<Tool> {
     match keysym {
         Keysym::p | Keysym::P => Some(Tool::Pen),
         Keysym::e | Keysym::E => Some(Tool::Eraser),
         Keysym::t | Keysym::T => Some(Tool::Text),
         Keysym::s | Keysym::S => Some(Tool::Selection),
+        Keysym::o | Keysym::O => Some(Tool::Circle),
+        Keysym::r | Keysym::R => Some(Tool::Rect),
+        Keysym::d | Keysym::D => Some(Tool::Diamond),
+        Keysym::l | Keysym::L => Some(Tool::Line),
+        Keysym::a | Keysym::A => Some(Tool::Arrow),
         _ => None,
     }
 }
@@ -447,19 +456,24 @@ impl App {
     }
 
     /// `Esc` undoes the state the daemon is in, one step at a time. A gesture being dragged is
-    /// abandoned rather than written — a keystroke is a request to abort, unlike the interruptions
-    /// that commit — then a text box under edit ends, then a selection is dropped, and only then
-    /// does the daemon lock.
+    /// abandoned rather than written — a stroke, a shape, a marquee or a selection drag, because a
+    /// keystroke is a request to abort, unlike the interruptions that commit — then a text box under
+    /// edit ends, then a selection is dropped, and only then does the daemon lock.
     fn escape(&mut self) {
-        if self.gesture.take().is_some() {
-            for out in self.outputs.values_mut() {
-                if let Some(selection) = out.overlay.selection.as_mut() {
-                    // The elements are the document's again, where the document still holds them.
-                    selection.transform = None;
-                }
-                out.overlay.marquee = None;
-                out.transient_dirty = true;
+        let mut abandoned = self.gesture.take().is_some();
+        for out in self.outputs.values_mut() {
+            if let Some(selection) = out.overlay.selection.as_mut() {
+                // The elements are the document's again, where the document still holds them.
+                selection.transform = None;
             }
+            out.overlay.marquee = None;
+            let dropped = out.overlay.stroke.take().is_some() | out.overlay.shape.take().is_some();
+            if dropped {
+                out.transient_dirty = true;
+                abandoned = true;
+            }
+        }
+        if abandoned {
             self.dirty = true;
             return;
         }
@@ -507,10 +521,10 @@ impl App {
             self.apply_toolbar_action(action);
             return;
         }
-        // A click anywhere else finishes the text edit and any previous stroke first, so typed
+        // A click anywhere else finishes the text edit and any previous gesture first, so typed
         // content is kept and a new gesture starts from a clean transient state.
         self.end_text_edit();
-        self.commit_transient_strokes();
+        self.commit_transient_drawing();
         match self.tool {
             Tool::Pen => {
                 if let Some(out) = self.outputs.get_mut(key) {
@@ -529,6 +543,11 @@ impl App {
             }
             Tool::Text => self.begin_text_edit(key, x, y),
             Tool::Selection => self.select_press(*key, x, y),
+            Tool::Circle => self.begin_shape(key, x, y, ShapeKind::Circle),
+            Tool::Rect => self.begin_shape(key, x, y, ShapeKind::Rect),
+            Tool::Diamond => self.begin_shape(key, x, y, ShapeKind::Diamond),
+            Tool::Line => self.begin_shape(key, x, y, ShapeKind::Line),
+            Tool::Arrow => self.begin_shape(key, x, y, ShapeKind::Arrow),
         }
         if let Some(out) = self.outputs.get_mut(key) {
             // A press starts or ends something: repaint that output whole.
@@ -580,6 +599,13 @@ impl App {
                 stroke.points.push([x, y]);
             }
             Tool::Eraser => out.overlay.eraser = Some([x, y]),
+            // Only a press starts a shape: motion moves the second of its two points.
+            Tool::Circle | Tool::Rect | Tool::Diamond | Tool::Line | Tool::Arrow => {
+                match out.overlay.shape.as_mut() {
+                    Some(shape) => shape.to = [x, y],
+                    None => return,
+                }
+            }
             Tool::Text | Tool::Selection => return,
         }
         // Only the transient overlay moved, so the next frame can damage just its box.
@@ -622,7 +648,7 @@ impl App {
         }
         // Any other control finishes an edit in progress, exactly like a click anywhere else.
         self.end_text_edit();
-        self.commit_transient_strokes();
+        self.commit_transient_drawing();
         match action {
             ToolbarAction::Tool(tool) => self.set_tool(tool),
             ToolbarAction::Color(index) => self.set_color(index),
@@ -687,11 +713,14 @@ impl App {
         // committed stroke, the element the eraser removed, or both.
         let mut changed: Option<Rect> = None;
         if let Some(bucket) = bucket {
-            let transient = self
-                .outputs
-                .get_mut(key)
-                .map(|out| (out.overlay.stroke.take(), out.overlay.eraser.take()));
-            if let Some((stroke, eraser)) = transient {
+            let transient = self.outputs.get_mut(key).map(|out| {
+                (
+                    out.overlay.stroke.take(),
+                    out.overlay.shape.take(),
+                    out.overlay.eraser.take(),
+                )
+            });
+            if let Some((stroke, shape, eraser)) = transient {
                 if let Some(stroke) = stroke
                     && !stroke.points.is_empty()
                 {
@@ -702,6 +731,23 @@ impl App {
                         .or_default()
                         .strokes
                         .push(stroke);
+                }
+                // A shape dragged out to nothing is dropped rather than written, so a click with a
+                // shape tool armed cannot leave an element that is invisible but erasable.
+                if let Some(shape) = shape
+                    && !shape.is_empty()
+                {
+                    let box_ = shape.bounds();
+                    changed = Some(match changed {
+                        Some(changed) => changed.union(box_),
+                        None => box_,
+                    });
+                    self.doc
+                        .outputs
+                        .entry(bucket.clone())
+                        .or_default()
+                        .shapes
+                        .push(shape);
                 }
                 if tool == Tool::Eraser
                     && let Some([x, y]) = eraser

@@ -34,6 +34,7 @@ fn document(stroke_count: usize, width: f32, height: f32) -> OutputAnnotations {
             size: 24.0,
             text: "benchmark note".into(),
         }],
+        shapes: vec![],
     }
 }
 
