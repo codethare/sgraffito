@@ -1,6 +1,6 @@
 use sgraffito::canvas::{
-    Doc, ERASER_THRESHOLD, Note, OutputAnnotations, Overlay, PALETTE, Rect, Shape, ShapeKind,
-    Stroke, TextBuffer, TextItem, TextOverlay, Tool, Toolbar, ToolbarAction, View,
+    Doc, ERASER_THRESHOLD, ItemId, Note, OutputAnnotations, Overlay, PALETTE, Rect, Shape,
+    ShapeKind, Stroke, TextBuffer, TextItem, TextOverlay, Tool, Toolbar, ToolbarAction, View,
 };
 use sgraffito::render::{
     DamageRegion, FrameCache, Renderer, Screen, buffer_format, toolbar_bounds, transient_bounds,
@@ -1941,4 +1941,85 @@ fn the_backdrop_can_be_switched_off_and_on() {
         "the switched frame did not match a fresh one"
     );
     assert_eq!(alpha(&second, w, x, y), 0);
+}
+
+#[test]
+fn a_note_being_typed_in_is_drawn_wrapped_while_the_typing_goes_on() {
+    // The live path, which is the one the user is in front of: the note under edit is drawn by the overlay
+    // with the buffer's text wrapped at its own width, and it is left out of the raster so the text that
+    // was committed before cannot show through it.
+    let (w, h) = (600u32, 500u32);
+    let view = View::default();
+    let screen = Screen { scale: 1.0, view };
+    let long = "buy milk and bread and eggs and coffee and tea and rice and beans";
+    let mut note = Note::new(60.0, 40.0, PALETTE[1], "2026/10/14".into());
+    note.w = 200.0;
+    let mut renderer = Renderer::new();
+    let needed = renderer.wrapped_text_height(long, &note, screen);
+    note.h = note.height_for(needed);
+    let mut empty = note.clone();
+    empty.h = note.h;
+    // The note as the document holds it while the typing is going on: it still has no text, because the
+    // text lives in the overlay's buffer until the edit ends.
+    let doc = |note: &Note| OutputAnnotations {
+        strokes: vec![],
+        texts: vec![],
+        shapes: vec![],
+        notes: vec![note.clone()],
+    };
+    let live = Overlay {
+        text: Some(TextOverlay {
+            item: note.text_item(),
+            buffer: TextBuffer::new(long),
+            index: None,
+            note: Some(0),
+            preedit: String::new(),
+        }),
+        ..Default::default()
+    };
+    let draw = |ann: &OutputAnnotations, overlay: &Overlay| {
+        let mut buf = buffer(w, h);
+        Renderer::new().render(&mut buf, w, h, 1.0, view, ann, overlay, None);
+        buf
+    };
+    let (typed, blank) = (
+        draw(&doc(&empty), &live),
+        draw(&doc(&empty), &Overlay::default()),
+    );
+    // Whatever the live text draws, it is inside the note's square — the same rule as the committed text,
+    // so a note cannot look right only after `Esc`.
+    let square = note.bounds().grown(1.5);
+    let mut outside = 0;
+    for (i, (a, b)) in typed.chunks(4).zip(blank.chunks(4)).enumerate() {
+        if a == b {
+            continue;
+        }
+        let (x, y) = ((i as u32 % w) as f32, (i as u32 / w) as f32);
+        if !square.contains(x, y) {
+            outside += 1;
+        }
+    }
+    assert_eq!(outside, 0, "the live text was drawn outside the note");
+
+    // And the note under edit is not in the raster: a frame drawn from the raster alone has its square
+    // blank, so the overlay's copy is the only one on screen.
+    let mut cache = FrameCache::default();
+    let mut only_raster = buffer(w, h);
+    renderer.render_with_cache(
+        &mut only_raster,
+        w,
+        h,
+        1.0,
+        view,
+        &doc(&empty),
+        &Overlay::default(),
+        None,
+        &mut cache,
+        &[ItemId::Note(0)],
+    );
+    let empty_frame = draw(&OutputAnnotations::default(), &Overlay::default());
+    assert_eq!(
+        only_raster, empty_frame,
+        "the note under edit was left in the raster"
+    );
 }

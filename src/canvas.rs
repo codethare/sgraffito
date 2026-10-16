@@ -200,6 +200,9 @@ pub struct TextItem {
 /// a text box that happens to be square.
 pub const NOTE_PADDING: f32 = 12.0;
 pub const NOTE_MIN_SIZE: f32 = 96.0;
+/// How far the pointer has to move before a press on empty space is a drag that sizes a new note rather
+/// than a click that takes the default size.
+pub const NOTE_DRAG_SLOP: f32 = 6.0;
 pub const NOTE_SIZE: f32 = 180.0;
 pub const NOTE_RADIUS: f32 = 8.0;
 pub const NOTE_TEXT_SIZE: f32 = 18.0;
@@ -1112,7 +1115,10 @@ impl View {
 /// directions, which is a click — and a click keeps the default size rather than creating a sliver.
 pub fn note_drag(origin: [f32; 2], at: [f32; 2]) -> Option<Rect> {
     let swept = Rect::from_corners(origin, at);
-    if swept.w < NOTE_MIN_SIZE && swept.h < NOTE_MIN_SIZE {
+    // What tells a click from a drag is the pointer having moved, not the note reaching its minimum:
+    // measuring it by the minimum threw away every drag smaller than a note may be, so dragging a small
+    // note gave the default size back and the tool looked as if it could not size anything.
+    if swept.w < NOTE_DRAG_SLOP && swept.h < NOTE_DRAG_SLOP {
         return None;
     }
     Some(Rect {

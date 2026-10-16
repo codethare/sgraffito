@@ -1902,10 +1902,19 @@ impl App {
         // gesture is dragging: the overlay draws each of them, in its live position, so a text
         // that has become shorter or an element that has moved cannot leave the old pixels behind.
         let mut skip: Vec<ItemId> = Vec::new();
-        if edit_index_valid
-            && let Some(index) = out.overlay.text.as_ref().and_then(|edit| edit.index)
-        {
-            skip.push(ItemId::Text(index));
+        if let Some(edit) = out.overlay.text.as_ref() {
+            // The item under edit is left out of the raster whichever list it belongs to: a note that
+            // has grown, or a text box that has become shorter, would otherwise leave its committed
+            // pixels behind, painted from the raster under the live one.
+            match edit.note {
+                Some(index) => skip.push(ItemId::Note(index)),
+                None if edit_index_valid => {
+                    if let Some(index) = edit.index {
+                        skip.push(ItemId::Text(index));
+                    }
+                }
+                None => {}
+            }
         }
         if let Some(selection) = &out.overlay.selection {
             skip.extend_from_slice(selection.live());

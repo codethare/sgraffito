@@ -1173,11 +1173,19 @@ fn a_note_moves_and_resizes_as_one_thing() {
 
 #[test]
 fn a_new_note_is_sized_by_the_drag_that_creates_it() {
-    use sgraffito::canvas::{NOTE_MIN_SIZE, note_drag};
+    use sgraffito::canvas::{NOTE_DRAG_SLOP, NOTE_MIN_SIZE, note_drag};
     let origin = [400.0, 300.0];
-    // A click: nothing swept, so the note keeps the default size rather than becoming a sliver.
+    // A click: the pointer barely moved, so the note keeps the default size rather than becoming a sliver.
     assert_eq!(note_drag(origin, origin), None);
-    assert_eq!(note_drag(origin, [405.0, 302.0]), None);
+    assert_eq!(note_drag(origin, [402.0, 301.0]), None);
+    assert_eq!(
+        note_drag(origin, [400.0 + NOTE_DRAG_SLOP - 1.0, 300.0]),
+        None
+    );
+    // A small drag is still a drag: it gives a note at the minimum rather than the default size, which is
+    // what "size it by dragging" has to mean.
+    let small = note_drag(origin, [440.0, 330.0]).expect("a small drag is a drag");
+    assert_eq!((small.w, small.h), (NOTE_MIN_SIZE, NOTE_MIN_SIZE));
     // A drag gives the rectangle it swept, and both directions work: a note dragged up and to the left
     // starts above and left of the press.
     let down_right = note_drag(origin, [700.0, 560.0]).expect("a drag");
