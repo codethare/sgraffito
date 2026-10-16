@@ -819,6 +819,8 @@ impl App {
 
     /// Drop transient drawing state when its surface or the current operation disappears.
     pub(crate) fn cancel_transient(&mut self, key: u32) {
+        self.note_origin = None;
+        self.note_sized = false;
         let Some(out) = self.outputs.get_mut(&key) else {
             return;
         };
@@ -1553,13 +1555,12 @@ impl App {
         // An existing note is entered; a new one is dragged out and only becomes content on the
         // release, so that a drag decides its size the way the shape tools' drags decide theirs.
         let Some(index) = existing else {
-            let note = Note::new(x, y, PALETTE[self.color_idx], date_stamp(SystemTime::now()));
+            // Nothing is placed here: the note does not exist until the pointer has been dragged past
+            // the slop, so a click cannot leave one on the screen — not even for the frame between the
+            // press and the release, which is what a click that only flickered a default-sized square
+            // was showing.
             self.note_origin = Some([x, y]);
-            if let Some(out) = self.outputs.get_mut(key) {
-                out.overlay.note = Some(note);
-                out.transient_dirty = true;
-            }
-            self.dirty = true;
+            self.note_sized = false;
             return;
         };
         log("note edit on an existing note");
@@ -1572,17 +1573,23 @@ impl App {
         let Some(origin) = self.note_origin else {
             return;
         };
-        let Some(out) = self.outputs.get_mut(key) else {
-            return;
-        };
-        let Some(note) = out.overlay.note.as_mut() else {
-            return;
-        };
-        // The rule lives in `canvas::note_drag`, where a test can reach it: a click keeps the default
-        // size, and a drag gives the rectangle it swept.
+        // The rule lives in `canvas::note_drag`, where a test can reach it: a pointer that has not moved
+        // is not a drag, and a drag gives the rectangle it swept.
         let Some(swept) = note_drag(origin, [x, y]) else {
             return;
         };
+        let Some(out) = self.outputs.get_mut(key) else {
+            return;
+        };
+        // The note is created by the first size the drag produces, so an aborted click never had one.
+        let note = out.overlay.note.get_or_insert_with(|| {
+            Note::new(
+                origin[0],
+                origin[1],
+                PALETTE[self.color_idx],
+                date_stamp(SystemTime::now()),
+            )
+        });
         note.x = swept.x;
         note.y = swept.y;
         note.w = swept.w;
@@ -1601,15 +1608,9 @@ impl App {
             return;
         };
         // A click is not a note: the note tool sizes a note the way a shape tool draws a shape, so a press
-        // that never dragged leaves nothing behind instead of dropping a default-sized note on the
-        // wallpaper, where it reads as an accidental note that has to be removed by hand.
-        if !sized {
-            out.overlay.note = None;
-            out.transient_dirty = true;
-            self.dirty = true;
-            return;
-        }
-        let Some(note) = out.overlay.note.take() else {
+        // that never dragged leaves nothing behind. There is nothing to drop either — the note was never
+        // created.
+        let Some(note) = out.overlay.note.take().filter(|_| sized) else {
             return;
         };
         out.transient_dirty = true;

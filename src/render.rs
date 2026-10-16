@@ -1137,29 +1137,18 @@ impl Renderer {
             note.ink(),
             &note.created,
         );
-        // Bottom-right, measured rather than estimated. The date is drawn at the interface's own size
-        // and does not zoom, but where it sits is the note's bottom-right corner in canvas coordinates,
-        // so its measured width has to be brought back into canvas units before the box is laid out:
-        // mixing a screen width with a canvas box walked the date out of the note at any zoom but 1:1.
-        let width = self.text_width(&note.created, NOTE_DATE_SIZE) / screen.len(1.0);
+        // Bottom-right, measured rather than estimated. The date is part of the note, so it is measured
+        // and placed in canvas units and drawn through the view: it is the same size as the square it
+        // sits in at every zoom, and a fixed interface size would have left it the same size in a
+        // square that had grown, and hanging outside one that had shrunk.
+        let width = self.text_width(&note.created, NOTE_DATE_SIZE);
         let box_ = note.date_box();
-        let origin = screen.point([box_.x + box_.w - width, box_.y]);
         let item = TextItem {
-            x: origin[0] / screen.scale,
-            y: origin[1] / screen.scale,
+            x: box_.x + box_.w - width,
+            y: box_.y,
             ..date
         };
-        self.draw_text(
-            pixmap,
-            &item,
-            Screen {
-                scale: screen.scale,
-                view: View::default(),
-            },
-            None,
-            None,
-            None,
-        );
+        self.draw_text(pixmap, &item, screen, None, None, None);
     }
 
     /// The height `text` needs when it wraps at `note`'s inner width, in canvas units. The daemon grows

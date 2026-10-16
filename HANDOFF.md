@@ -573,3 +573,21 @@ feel of the drag is not.
 Still not reproducible here: the drag's "feel". Nothing in the pointer path can be exercised without a
 real device or the virtual-pointer test client listed under next steps, so a drag that is *janky* rather
 than *wrong* is a report I can only act on with the detail of when it stalls.
+
+### Third round of note reports
+
+- **The date did not scale with the zoom.** It was deliberately drawn at a fixed interface size (and
+  placed with `View::default()`), which the user rejected: the date is note content. It is now measured
+  and placed in canvas units and drawn through the view, so it is the size of the square at every zoom.
+  `the_date_stays_inside_the_note_at_every_zoom` also asserts the glyph band scales (2.5x the band of
+  1.0x, and narrower below 1.0x). The earlier drift fix (`/ screen.len(1.0)`) is gone with it: nothing is
+  converted any more, because both the box and the measurement are canvas.
+- **A click still showed a border-only "transparent window".** `begin_note` created the note on the
+  *press* — a default 180x96 square — which the frame between press and release drew, and `commit_note`
+  dropped. So the note flashed on every click. Now nothing is placed on the press: `begin_note` records
+  the origin, and `drag_note` creates the note with the first size the drag produces. The slop (24 pt)
+  is what separates the two. `a_note_being_dragged_out_is_filled_and_not_only_outlined` covers the live
+  note's fill (it was suspected of drawing an outline only; it is filled, and the suspicion was a byte
+  order mistake in the test's own comparison).
+
+Remaining unknown: the note tool's feel on real hardware, which no test here can exercise.

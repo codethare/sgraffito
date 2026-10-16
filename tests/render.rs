@@ -2082,6 +2082,7 @@ fn the_date_stays_inside_the_note_at_every_zoom() {
     // canvas-space bottom-right corner. Its measured width was mixed with that canvas box, so at any zoom
     // but 1:1 it walked out of the note and hung off its edge.
     let (w, h) = (900u32, 700u32);
+    let mut bands: Vec<f32> = Vec::new();
     for zoom in [0.6f32, 1.0, 1.75, 2.5] {
         let view = View {
             zoom,
@@ -2106,6 +2107,7 @@ fn the_date_stays_inside_the_note_at_every_zoom() {
         let (dated, bare) = (draw(&with_date), draw(&without));
         let square = view.screen_rect(note.bounds());
         let mut seen = 0;
+        let mut band = (f32::MAX, 0.0f32);
         for (i, (a, b)) in dated.chunks(4).zip(bare.chunks(4)).enumerate() {
             if a == b {
                 continue;
@@ -2115,8 +2117,48 @@ fn the_date_stays_inside_the_note_at_every_zoom() {
                 square.contains(x, y),
                 "the date at {x},{y} is outside the note at zoom {zoom}"
             );
+            band = (band.0.min(y), band.1.max(y));
             seen += 1;
         }
         assert!(seen > 0, "the date was not drawn at all at zoom {zoom}");
+        bands.push(band.1 - band.0);
     }
+    // And the date is the size of the note it belongs to: twice the zoom, about twice the glyph band.
+    assert!(
+        bands[3] > bands[1] * 2.0 && bands[0] < bands[1],
+        "the date does not follow the zoom: {bands:?}"
+    );
+}
+
+#[test]
+fn a_note_being_dragged_out_is_filled_and_not_only_outlined() {
+    let (w, h) = (600u32, 500u32);
+    let view = View::default();
+    let note = Note::new(80.0, 60.0, PALETTE[1], "2026/10/14".into());
+    let overlay = Overlay {
+        note: Some(note.clone()),
+        ..Default::default()
+    };
+    let mut buf = buffer(w, h);
+    Renderer::new().render(
+        &mut buf,
+        w,
+        h,
+        1.0,
+        view,
+        &OutputAnnotations::default(),
+        &overlay,
+        None,
+    );
+    let px = |x: u32, y: u32| {
+        let p = buf.chunks(4).nth((y * w + x) as usize).unwrap();
+        (p[0], p[1], p[2], p[3])
+    };
+    let fill = sgraffito::canvas::parse_hex(&note.color);
+    assert_eq!(
+        px(170, 120),
+        (fill[0], fill[1], fill[2], fill[3]),
+        "the live note has no fill"
+    );
+    assert_eq!(px(5, 5).3, 0, "the live note painted outside itself");
 }
