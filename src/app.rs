@@ -1343,21 +1343,18 @@ impl App {
                 let Some(mut note) = note else { continue };
                 box_ = box_.union(view.screen_rect(note.bounds()));
                 let text = edit.buffer.text.clone();
+                // An empty note stays: an empty sticky is a sticky, and it is what the user dragged
+                // out. Dropping it made a note the user had just placed vanish the moment they
+                // started the next one, which reads as the note having failed to be created.
                 if let Some(ann) = self.doc.outputs.get_mut(&bucket) {
-                    if text.trim().is_empty() {
-                        if index < ann.notes.len() {
-                            ann.notes.remove(index);
-                        }
-                    } else {
-                        let needed =
-                            self.renderer
-                                .wrapped_text_height(&text, &note, Screen { scale, view });
-                        note.text = text;
-                        note.h = note.height_for(needed);
-                        box_ = box_.union(view.screen_rect(note.bounds()));
-                        if index < ann.notes.len() {
-                            ann.notes[index] = note;
-                        }
+                    let needed =
+                        self.renderer
+                            .wrapped_text_height(&text, &note, Screen { scale, view });
+                    note.text = text;
+                    note = note.grown_for(needed);
+                    box_ = box_.union(view.screen_rect(note.bounds()));
+                    if index < ann.notes.len() {
+                        ann.notes[index] = note;
                     }
                 }
                 out.pending = Some(match out.pending {
@@ -1527,8 +1524,7 @@ impl App {
         let needed = self
             .renderer
             .wrapped_text_height(&text, &note, Screen { scale, view });
-        let mut updated = note;
-        updated.h = updated.height_for(needed);
+        let updated = note.grown_for(needed);
         if let Some(ann) = self.doc.outputs.get_mut(&bucket)
             && let Some(slot) = ann.notes.get_mut(index)
         {

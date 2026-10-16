@@ -1137,8 +1137,11 @@ impl Renderer {
             note.ink(),
             &note.created,
         );
-        // Bottom-right, measured rather than estimated.
-        let width = self.text_width(&note.created, NOTE_DATE_SIZE);
+        // Bottom-right, measured rather than estimated. The date is drawn at the interface's own size
+        // and does not zoom, but where it sits is the note's bottom-right corner in canvas coordinates,
+        // so its measured width has to be brought back into canvas units before the box is laid out:
+        // mixing a screen width with a canvas box walked the date out of the note at any zoom but 1:1.
+        let width = self.text_width(&note.created, NOTE_DATE_SIZE) / screen.len(1.0);
         let box_ = note.date_box();
         let origin = screen.point([box_.x + box_.w - width, box_.y]);
         let item = TextItem {
@@ -1566,22 +1569,29 @@ fn caret_geometry(prepared: &PreparedText, at: usize, preedit_len: usize) -> Car
     // The caret sits after the preedit while one is being composed, which is where the text
     // being composed grows from; the underline covers the preedit itself.
     let caret_at = at + preedit_len;
-    let mut placed = false;
-    // The lines are laid out in order, so their byte offsets accumulate.
+    // A run's glyph offsets are byte offsets into the whole buffer, and `run.text` is that whole text
+    // rather than the line's, so the line a caret byte belongs to is the last line that starts at or
+    // before it. Taking the line from `run.text.len()` instead put every wrapped line after the first
+    // one at the wrong offset, so the caret was found on no line at all and fell back to the far right
+    // of the last line — the caret that stuck to the right edge of a wrapped note.
     let mut line_start = 0;
     for run in prepared.buffer.layout_runs() {
-        let line_end = line_start + run.text.len();
-        if !placed && caret_at >= line_start && caret_at <= line_end {
-            placed = true;
-            geometry.x = run
-                .glyphs
-                .iter()
-                .find(|glyph| glyph.start >= caret_at)
-                .map_or(run.line_w, |glyph| glyph.x);
-            geometry.top = run.line_top;
-            geometry.height = run.line_height;
-            geometry.baseline = run.line_y;
+        if let Some(first) = run.glyphs.first() {
+            line_start = first.start;
         }
+        if line_start > caret_at {
+            break;
+        }
+        // The last line that starts at or before the caret is the caret's line, so every run that
+        // starts before it overwrites the geometry.
+        geometry.x = run
+            .glyphs
+            .iter()
+            .find(|glyph| glyph.start >= caret_at)
+            .map_or(run.line_w, |glyph| glyph.x);
+        geometry.top = run.line_top;
+        geometry.height = run.line_height;
+        geometry.baseline = run.line_y;
         if preedit_len > 0 {
             for glyph in run
                 .glyphs
@@ -1595,7 +1605,6 @@ fn caret_geometry(prepared: &PreparedText, at: usize, preedit_len: usize) -> Car
                 });
             }
         }
-        line_start = line_end + 1;
     }
     geometry
 }
@@ -2139,6 +2148,50 @@ fn fill(pixmap: &mut PixmapMut, x: f32, y: f32, w: f32, h: f32, color: Color) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::canvas::{Note, View};
+
+    /// The caret of a wrapped layout: the offset of each line's own text has to land on that line, or
+    /// the caret sticks at the end of the last one.
+    #[test]
+    fn the_caret_follows_the_line_a_wrapped_offset_is_on() {
+        let mut renderer = Renderer::new();
+        let screen = Screen {
+            scale: 1.0,
+            view: View::default(),
+        };
+        let mut note = Note::new(0.0, 0.0, "#f6d32d", "2026/10/14".into());
+        note.w = 200.0;
+        let text = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda";
+        let prepared =
+            renderer.prepare_text(text, &note.text_item(), screen, Some(note.text_box().w));
+        let lines: Vec<(usize, f32, f32)> = prepared
+            .buffer
+            .layout_runs()
+            .map(|run| {
+                (
+                    run.glyphs.last().map_or(0, |glyph| glyph.end),
+                    run.line_top,
+                    run.line_w,
+                )
+            })
+            .collect();
+        assert!(lines.len() > 2, "the fixture did not wrap: {}", lines.len());
+        let mut tops: Vec<f32> = lines.iter().map(|(_, top, _)| *top).collect();
+        tops.dedup();
+        assert_eq!(tops.len(), lines.len(), "the fixture's lines share a top");
+        for (end, top, width) in lines {
+            let caret = caret_geometry(&prepared, end, 0);
+            assert_eq!(
+                caret.top, top,
+                "the caret at byte {end} was drawn on another line"
+            );
+            assert!(
+                caret.x <= width + 0.5 && caret.x <= note.text_box().w + 0.5,
+                "the caret at byte {end} went past its line: {} > {width}",
+                caret.x
+            );
+        }
+    }
 
     /// The identity view at a given output scale, for the tests that only care about the document.
     fn screen(scale: f32) -> Screen {

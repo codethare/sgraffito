@@ -545,3 +545,31 @@ Three reports from real use, all in the note tool.
 Still unverified: real input devices. Nothing below the pointer translation layer is covered by a test,
 which is where the last three user reports all landed. (1) and (3) are covered by pure tests now; the
 feel of the drag is not.
+
+### Second round of note reports (same session)
+
+- **Caret stuck at the right edge of a wrapped note.** `caret_geometry` located the caret's line from
+  `run.text.len()`, but in this cosmic-text version `LayoutRun::text` is the *whole* buffer text and
+  `line_i` is not the line index — the glyph offsets are what carry the position. The accumulated line
+  starts were therefore wrong past the first line, no line matched, and the caret kept its fallback
+  `x = prepared.line_w`. The line is now the last run whose first glyph starts at or before the caret.
+  `the_caret_follows_the_line_a_wrapped_offset_is_on` (inline in `render.rs`, the function is private).
+- **The date left the note's corner when zoomed.** `draw_note` measured the date in screen units and
+  subtracted it from a canvas-space box, so it drifted by `(zoom - 1) * width`. The measured width is now
+  converted back into canvas units. `the_date_stays_inside_the_note_at_every_zoom` diffs a frame with the
+  date against one with `created` emptied, at four zooms.
+- **A click still made a note.** `NOTE_DRAG_SLOP` was 6 pt, which a *click* that drifts a few pixels
+  exceeds; the sweep was then clamped up to `NOTE_MIN_SIZE` and committed. 24 pt now, well above hand
+  jitter. What the user described as "creation fails, leaving only border fragments" is the note created
+  by that jittered click and then removed by the next one, leaving the frame to be repainted.
+- **A note placed before another vanished.** `end_text_edit` deleted a note whose text was empty. An
+  empty sticky is what the user dragged out, and dropping it made the note look as if it had failed to be
+  created, so empty notes are kept now.
+- **A note changed shape as soon as text was typed.** `grow_note` and `end_text_edit` assigned
+  `note.h = height_for(text)`, which shrank a note dragged out tall back to the height of its text.
+  `Note::grown_for` takes the maximum instead: the dragged or resized height is the floor and typing only
+  adds to it. `a_note_is_never_shrunk_by_the_text_that_is_typed_into_it`.
+
+Still not reproducible here: the drag's "feel". Nothing in the pointer path can be exercised without a
+real device or the virtual-pointer test client listed under next steps, so a drag that is *janky* rather
+than *wrong* is a report I can only act on with the detail of when it stalls.

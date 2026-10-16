@@ -1197,3 +1197,25 @@ fn a_new_note_is_sized_by_the_drag_that_creates_it() {
     assert_eq!(thin.w, 300.0);
     assert_eq!(thin.h, NOTE_MIN_SIZE, "a thin drag is not a thin note");
 }
+
+#[test]
+fn a_note_is_never_shrunk_by_the_text_that_is_typed_into_it() {
+    // What the drag or the resize decided is the floor: typing only ever adds height, or a note dragged
+    // out tall snapped back to the height of its first character.
+    let mut note = Note::new(60.0, 40.0, "#f6d32d", "2026/10/14".into());
+    note.w = 200.0;
+    note.h = 400.0;
+    let tall = note.grown_for(20.0);
+    assert_eq!(tall.h, 400.0, "an empty note was shrunk");
+    assert_eq!(tall.text, note.text);
+    let grown = note.grown_for(500.0);
+    assert!(
+        grown.h > 400.0,
+        "a note did not grow for text that needs it"
+    );
+    assert_eq!(grown.h, note.height_for(500.0));
+    // And it takes the minimum when the box is smaller than a note may be.
+    let mut small = note.clone();
+    small.h = 10.0;
+    assert_eq!(small.grown_for(0.0).h, sgraffito::canvas::NOTE_MIN_SIZE);
+}

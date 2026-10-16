@@ -202,7 +202,7 @@ pub const NOTE_PADDING: f32 = 12.0;
 pub const NOTE_MIN_SIZE: f32 = 96.0;
 /// How far the pointer has to move before a press on empty space is a drag that sizes a new note rather
 /// than a click that takes the default size.
-pub const NOTE_DRAG_SLOP: f32 = 6.0;
+pub const NOTE_DRAG_SLOP: f32 = 24.0;
 pub const NOTE_SIZE: f32 = 180.0;
 pub const NOTE_RADIUS: f32 = 8.0;
 pub const NOTE_TEXT_SIZE: f32 = 18.0;
@@ -293,6 +293,16 @@ impl Note {
     /// The height a note needs to hold `text_height` of text, never less than its minimum.
     pub fn height_for(&self, text_height: f32) -> f32 {
         (2.0 * NOTE_PADDING + text_height + NOTE_DATE_LINE).max(NOTE_MIN_SIZE)
+    }
+
+    /// The note grown to hold text that needs `text_height`, never shrunk: the height a note was
+    /// dragged or resized to is what the user asked for, and the text that has been typed only ever
+    /// wins when it needs more room than that. Assigning `height_for` directly instead snapped a tall
+    /// note back to the height of its text on the first keystroke.
+    pub fn grown_for(&self, text_height: f32) -> Self {
+        let mut grown = self.clone();
+        grown.h = grown.h.max(grown.height_for(text_height));
+        grown
     }
 }
 

@@ -2075,3 +2075,48 @@ fn a_note_is_drawn_over_the_ink_that_crosses_it() {
     }
     assert!(seen > 0, "the stroke was not drawn at all");
 }
+
+#[test]
+fn the_date_stays_inside_the_note_at_every_zoom() {
+    // The date is drawn at the interface's own size and does not zoom, but it is placed at the note's
+    // canvas-space bottom-right corner. Its measured width was mixed with that canvas box, so at any zoom
+    // but 1:1 it walked out of the note and hung off its edge.
+    let (w, h) = (900u32, 700u32);
+    for zoom in [0.6f32, 1.0, 1.75, 2.5] {
+        let view = View {
+            zoom,
+            offset: [0.0, 0.0],
+        };
+        let note = Note::new(80.0, 60.0, PALETTE[1], "2026/10/14".into());
+        let mut dateless = note.clone();
+        dateless.created = String::new();
+        let with_date = OutputAnnotations {
+            strokes: vec![],
+            texts: vec![],
+            shapes: vec![],
+            notes: vec![note.clone()],
+        };
+        let mut without = with_date.clone();
+        without.notes = vec![dateless];
+        let draw = |ann: &OutputAnnotations| {
+            let mut buf = buffer(w, h);
+            Renderer::new().render(&mut buf, w, h, 1.0, view, ann, &Overlay::default(), None);
+            buf
+        };
+        let (dated, bare) = (draw(&with_date), draw(&without));
+        let square = view.screen_rect(note.bounds());
+        let mut seen = 0;
+        for (i, (a, b)) in dated.chunks(4).zip(bare.chunks(4)).enumerate() {
+            if a == b {
+                continue;
+            }
+            let (x, y) = ((i as u32 % w) as f32, (i as u32 / w) as f32);
+            assert!(
+                square.contains(x, y),
+                "the date at {x},{y} is outside the note at zoom {zoom}"
+            );
+            seen += 1;
+        }
+        assert!(seen > 0, "the date was not drawn at all at zoom {zoom}");
+    }
+}
