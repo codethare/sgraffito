@@ -3,8 +3,8 @@ use sgraffito::canvas::{
     ShapeKind, Stroke, TextBuffer, TextItem, TextOverlay, Tool, Toolbar, ToolbarAction, View,
 };
 use sgraffito::render::{
-    DamageRegion, FrameCache, Renderer, Screen, buffer_format, toolbar_bounds, transient_bounds,
-    transient_damage,
+    DAMAGE_SLACK, DamageRegion, FrameCache, Renderer, Screen, buffer_format, toolbar_bounds,
+    transient_bounds, transient_damage,
 };
 use wayland_client::protocol::wl_shm::Format;
 
@@ -721,7 +721,7 @@ fn damage_region_clears_and_swaps_only_its_rectangle() {
     let mut buf = vec![9u8; (w * h * 4) as usize];
     let region = DamageRegion::from_logical(
         Rect {
-            x: 1.0,
+            x: 2.0,
             y: 0.0,
             w: 1.0,
             h: 2.0,
@@ -731,10 +731,14 @@ fn damage_region_clears_and_swaps_only_its_rectangle() {
         h,
     );
     region.clear(&mut buf, w, h);
+    // The box, plus `DAMAGE_SLACK` on each side: the hairline an element is drawn with is centred on its
+    // own edge, so half of it is outside the box the change reports.
+    let (x0, x1) = ((2.0 - DAMAGE_SLACK) as u32, (3.0 + DAMAGE_SLACK) as u32);
     for y in 0..h {
         for x in 0..w {
             let v = buf[((y * w + x) * 4) as usize];
-            assert_eq!(v, if x == 1 { 0 } else { 9 }, "pixel {x},{y}");
+            let inside = x >= x0 && x < x1;
+            assert_eq!(v, if inside { 0 } else { 9 }, "pixel {x},{y}");
         }
     }
     // A rectangle that runs off the surface is clipped to it.
@@ -2161,4 +2165,73 @@ fn a_note_being_dragged_out_is_filled_and_not_only_outlined() {
         "the live note has no fill"
     );
     assert_eq!(px(5, 5).3, 0, "the live note painted outside itself");
+}
+
+#[test]
+fn a_note_dragged_left_leaves_no_trail_in_its_damage_box() {
+    // The frame that follows a note's move repaints the union of the two boxes the note occupied, and the
+    // rest of the surface keeps the previous frame's pixels. If that union misses any of the old note, the
+    // old pixels survive as a trail — which is what dragging a note leftwards showed.
+    let (w, h) = (900u32, 700u32);
+    for zoom in [1.0f32, 2.0] {
+        let view = View {
+            zoom,
+            offset: [0.0, 0.0],
+        };
+        let at = |x: f32| Overlay {
+            note: Some(Note::new(x, 60.0, PALETTE[1], "2026/10/14".into())),
+            ..Default::default()
+        };
+        let (far, near) = (at(500.0), at(120.0));
+        let box_ = |overlay: &Overlay| transient_bounds(overlay).map(|b| view.screen_rect(b));
+        let damage = transient_damage(box_(&far), box_(&near), None);
+        let mut cache = FrameCache::default();
+        let mut renderer = Renderer::new();
+        let mut buf = buffer(w, h);
+        renderer.render_with_cache(
+            &mut buf,
+            w,
+            h,
+            1.0,
+            view,
+            &OutputAnnotations::default(),
+            &far,
+            None,
+            &mut cache,
+            &[],
+        );
+        renderer.render_with_cache(
+            &mut buf,
+            w,
+            h,
+            1.0,
+            view,
+            &OutputAnnotations::default(),
+            &near,
+            Some(damage),
+            &mut cache,
+            &[],
+        );
+        let mut full = buffer(w, h);
+        Renderer::new().render(
+            &mut full,
+            w,
+            h,
+            1.0,
+            view,
+            &OutputAnnotations::default(),
+            &near,
+            None,
+        );
+        let mut spots: Vec<(u32, u32)> = Vec::new();
+        for (i, (a, b)) in buf.chunks(4).zip(full.chunks(4)).enumerate() {
+            if a != b {
+                spots.push(((i as u32) % w, (i as u32) / w));
+            }
+        }
+        assert!(
+            spots.is_empty(),
+            "the note left a trail at zoom {zoom}: {spots:?}"
+        );
+    }
 }

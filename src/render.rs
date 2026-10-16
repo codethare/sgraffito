@@ -1267,6 +1267,10 @@ impl Renderer {
     }
 }
 
+/// How far a damage region is grown past the box it was reported for, in logical pixels: enough to hold
+/// the half of a hairline that is drawn outside the box it belongs to.
+pub const DAMAGE_SLACK: f32 = 1.0;
+
 /// Region of a frame that has to be touched. Anything outside a `Rect` already holds
 /// the pixels of the frame before it, which is only true for the buffer the previous
 /// frame was drawn into.
@@ -1281,6 +1285,11 @@ pub enum DamageRegion {
 impl DamageRegion {
     /// The device region a logical damage rectangle covers, clipped to the surface.
     pub fn from_logical(damage: Rect, scale: f32, w: u32, h: u32) -> Self {
+        // An element reports the box it occupies, and the hairline it is drawn with is centred on that
+        // box's edge, so half of the stroke falls outside it. A region that stopped at the box left that
+        // ring of the previous frame behind wherever the element had moved away from: dragging a note
+        // leftwards trailed the old note's outline, one pixel of it, at the edge the box excluded.
+        let damage = damage.grown(DAMAGE_SLACK);
         let clamp = |v: f32, max: u32| v.max(0.0).min(max as f32) as u32;
         DamageRegion::Rect {
             x0: clamp(damage.x * scale, w),

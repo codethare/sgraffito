@@ -591,3 +591,18 @@ than *wrong* is a report I can only act on with the detail of when it stalls.
   order mistake in the test's own comparison).
 
 Remaining unknown: the note tool's feel on real hardware, which no test here can exercise.
+
+### The note's trail (fourth round)
+
+Dragging a note leftwards left a faint outline behind. Reproduced in a test that runs two frames into one
+buffer — the far note, then the near note with the damage box the app would use — and compares them with a
+full repaint: 426 pixels differed, all of them on the old note's rounded outline, at the edge of the box.
+An element reports the box it occupies and its hairline is centred on that edge, so half the stroke lands
+outside the box and is never repainted. `DamageRegion::from_logical` now grows the reported box by
+`DAMAGE_SLACK` (1 logical pixel), which fixes it for every element and every damage path at once.
+`a_note_dragged_left_leaves_no_trail_in_its_damage_box` (zoom 1 and 2).
+
+Related, not touched: `Stroke::bounds` measures the polyline and not the ink, so a *thick* pen stroke has
+the same overhang of `width / 2`. `Shape::bounds` grows by `width / 2 + 1 + head` already. Fixing
+`Stroke::bounds` would also change the marquee's wholly-inside rule, which is a behaviour change, so the
+1-pixel slack is what covers the thin case and the pen's overhang stays as it was.
