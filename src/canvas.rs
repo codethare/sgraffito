@@ -145,6 +145,10 @@ pub enum ToolbarAction {
     SizeStep(f32),
     /// The `Esc` control: finish the text box being edited first, lock on the next click.
     Lock,
+    /// Open or close the drawer of controls that are not used often.
+    More,
+    /// Switch the edit-mode backdrop off and on.
+    Scrim,
 }
 
 impl Tool {
@@ -1267,6 +1271,12 @@ pub struct Toolbar {
     /// How far that stretch has opened, 0 to 1. It moves only the capsule's trailing edge and
     /// the text the edge uncovers, so a frame of the transition is a localized repaint.
     pub grow: f32,
+    /// Whether the drawer of rarely used controls is open. It changes which controls exist, not the
+    /// rail's own height, so it is rail state like the tool and the colour.
+    pub more: bool,
+    /// Whether the edit-mode backdrop is painted. A preference rather than content: it decides how the
+    /// surface reads, and the raster is keyed by it so a frame cannot hold the other state.
+    pub scrim: bool,
 }
 
 #[derive(Debug, Clone)]

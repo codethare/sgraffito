@@ -167,6 +167,16 @@ pub fn tool_for_keysym(keysym: Keysym) -> Option<Tool> {
     }
 }
 
+/// `M` opens and closes the drawer, `B` switches the backdrop. Mapped like the other keys, so a control
+/// in the drawer teaches its key exactly as a rail block does.
+pub fn panel_action_for_keysym(keysym: Keysym) -> Option<ToolbarAction> {
+    match keysym {
+        Keysym::m | Keysym::M => Some(ToolbarAction::More),
+        Keysym::b | Keysym::B => Some(ToolbarAction::Scrim),
+        _ => None,
+    }
+}
+
 /// `1`-`5` pick a colour; returns the palette index.
 pub fn color_for_keysym(keysym: Keysym) -> Option<usize> {
     match keysym {
@@ -293,6 +303,8 @@ impl KeyboardHandler for App {
             self.set_color(idx);
         } else if let Some(dir) = size_step_for_keysym(event.keysym) {
             self.nudge_size(dir);
+        } else if let Some(action) = panel_action_for_keysym(event.keysym) {
+            self.apply_toolbar_action(action);
         }
     }
 
@@ -788,6 +800,8 @@ impl App {
             ToolbarAction::Tool(tool) => self.set_tool(tool),
             ToolbarAction::Color(index) => self.set_color(index),
             ToolbarAction::SizeStep(dir) => self.nudge_size(dir),
+            ToolbarAction::More => self.toggle_more(),
+            ToolbarAction::Scrim => self.toggle_scrim(),
             ToolbarAction::Lock => {}
         }
     }

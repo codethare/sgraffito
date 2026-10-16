@@ -247,6 +247,11 @@ pub struct App {
     pub(crate) gesture: Option<Gesture>,
     /// The frame handle under the pointer, which is what the pointer shape says it would grab.
     pub(crate) selection_grab: Option<Grab>,
+    /// Whether the drawer of rarely used controls is open. Transient, like the selection.
+    pub(crate) more: bool,
+    /// Whether edit mode paints the backdrop. A preference about reading, so it is not persisted and a
+    /// new session starts with it on.
+    pub(crate) scrim: bool,
     /// The pan gesture in flight: where the pointer was, so a motion event pans by its own delta. A pan
     /// is not a document change, so nothing about it is in the document, in the file, or something
     /// `Esc` has to commit or abandon.
@@ -343,6 +348,8 @@ impl App {
             toolbar_hover_since: None,
             gesture: None,
             selection_grab: None,
+            more: false,
+            scrim: true,
             pan: None,
             gestures: None,
             pinch: None,
@@ -512,6 +519,8 @@ impl App {
                 size: self.active_size(),
                 hover: self.toolbar_hover,
                 grow: self.toolbar_grow(Instant::now()),
+                more: self.more,
+                scrim: self.scrim,
             }),
         }
     }
@@ -548,6 +557,25 @@ impl App {
             );
         }
         self.refresh_toolbar();
+    }
+
+    /// Open or close the drawer. It changes which controls exist, not the rail's height, so the rail's
+    /// own box is what the next frame damages.
+    pub(crate) fn toggle_more(&mut self) {
+        self.more = !self.more;
+        // A block that no longer exists cannot still own the pointer.
+        self.toolbar_hover = None;
+        self.toolbar_hover_since = None;
+        self.refresh_toolbar();
+    }
+
+    /// Switch the edit-mode backdrop. It is a preference about reading, not content: the document and the
+    /// file are untouched, and every output's raster is dropped because the backdrop is what the raster
+    /// is painted on — a frame must never carry the state that was switched away from.
+    pub(crate) fn toggle_scrim(&mut self) {
+        self.scrim = !self.scrim;
+        self.invalidate_text_caches();
+        self.mark_all_dirty();
     }
 
     /// Push the current toolbar into every output's transient overlay. The rail lives in the

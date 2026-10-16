@@ -247,3 +247,31 @@ fn one_wheel_notch_is_exactly_one_zoom_step() {
     };
     assert!((zoom_factor(steps, none) - ZOOM_STEP.powi(-3)).abs() < 0.0001);
 }
+
+#[test]
+fn the_drawer_and_the_backdrop_have_their_own_keys() {
+    use sgraffito::canvas::ToolbarAction;
+    use sgraffito::input::panel_action_for_keysym;
+    assert_eq!(
+        panel_action_for_keysym(Keysym::m),
+        Some(ToolbarAction::More)
+    );
+    assert_eq!(
+        panel_action_for_keysym(Keysym::M),
+        Some(ToolbarAction::More)
+    );
+    assert_eq!(
+        panel_action_for_keysym(Keysym::b),
+        Some(ToolbarAction::Scrim)
+    );
+    assert_eq!(
+        panel_action_for_keysym(Keysym::B),
+        Some(ToolbarAction::Scrim)
+    );
+    // They collide with nothing: no tool, colour or size key is either of them.
+    for keysym in [Keysym::m, Keysym::b] {
+        assert_eq!(tool_for_keysym(keysym), None);
+        assert_eq!(color_for_keysym(keysym), None);
+        assert_eq!(size_step_for_keysym(keysym), None);
+    }
+}

@@ -54,11 +54,13 @@ const ICON_INSET: f32 = 7.0;
 /// of the drawn rail. The strip is damaged whenever the rail changes, and joins a transient
 /// damage box that reaches it.
 const TOOLBAR_RESERVE: f32 = 224.0;
-/// Height of the whole column: twenty blocks, sixteen gaps inside the groups and three between them,
-/// all fixed, so the column's height never depends on the font, unlike the width a stretched block
-/// takes.
+/// Height of the whole column: twenty-one blocks, seventeen gaps inside the groups and three between
+/// them, all fixed, so the column's height never depends on the font, unlike the width a stretched block
+/// takes. The drawer is a second column and adds nothing to this.
 const TOOLBAR_COLUMN: f32 =
-    2.0 * TOOLBAR_PAD + 20.0 * TOOLBAR_BLOCK + 16.0 * TOOLBAR_GAP + 3.0 * TOOLBAR_GROUP_GAP;
+    2.0 * TOOLBAR_PAD + 21.0 * TOOLBAR_BLOCK + 17.0 * TOOLBAR_GAP + 3.0 * TOOLBAR_GROUP_GAP;
+/// How far the drawer's column starts from the rail's.
+const TOOLBAR_DRAWER_X: f32 = TOOLBAR_BLOCK + TOOLBAR_GAP;
 const TOOLBAR_CACHE_CAP: usize = 16;
 /// `#rrggbbaa`. The block fill stands in for a HUD material: a `wl_shm` layer surface cannot be
 /// blurred, so there is translucency but no real vibrancy. The alpha is the opacity that keeps
@@ -117,6 +119,8 @@ enum Icon {
     Lock,
     Hand,
     Note,
+    More,
+    Scrim,
 }
 
 /// What a canvas coordinate has to be multiplied by to become a device pixel: the output's scale, and
@@ -174,6 +178,9 @@ impl Screen {
 #[derive(Clone)]
 struct Block {
     mark: Mark,
+    /// 0 for the rail, 1 for the drawer beside it. The drawer is a second column, so a control in it
+    /// needs no layout machinery of its own.
+    column: u8,
     /// What the stretched block says: what the control does, and the key that does the same thing.
     /// Built by [`labelled`], so an action cannot be added without its text naming its key.
     label: String,
@@ -190,6 +197,8 @@ struct Block {
 fn key_of(action: ToolbarAction) -> &'static str {
     match action {
         ToolbarAction::Tool(tool) => tool.key(),
+        ToolbarAction::More => "M",
+        ToolbarAction::Scrim => "B",
         ToolbarAction::Color(index) => ["1", "2", "3", "4", "5"].get(index).copied().unwrap_or("?"),
         ToolbarAction::SizeStep(dir) => {
             if dir < 0.0 {
@@ -219,6 +228,7 @@ fn toolbar_blocks(toolbar: &Toolbar) -> Vec<Block> {
         .enumerate()
         .map(|(index, color)| Block {
             mark: Mark::Swatch(index),
+            column: 0,
             label: labelled(
                 ToolbarAction::Color(index),
                 &format!("colour {}", index + 1),
@@ -244,6 +254,7 @@ fn toolbar_blocks(toolbar: &Toolbar) -> Vec<Block> {
     ] {
         blocks.push(Block {
             mark: Mark::Icon(icon),
+            column: 0,
             label: labelled(ToolbarAction::Tool(tool), label),
             action: Some(ToolbarAction::Tool(tool)),
             active: toolbar.tool == tool,
@@ -254,6 +265,7 @@ fn toolbar_blocks(toolbar: &Toolbar) -> Vec<Block> {
     blocks[last].gap = TOOLBAR_GROUP_GAP;
     blocks.push(Block {
         mark: Mark::Icon(Icon::Smaller),
+        column: 0,
         label: labelled(ToolbarAction::SizeStep(-1.0), &format!("smaller {axis}")),
         action: Some(ToolbarAction::SizeStep(-1.0)),
         active: false,
@@ -261,6 +273,7 @@ fn toolbar_blocks(toolbar: &Toolbar) -> Vec<Block> {
     });
     blocks.push(Block {
         mark: Mark::Value(format!("{:.0}", toolbar.size)),
+        column: 0,
         // Drawn, but no action owns it, so it never stretches to say anything.
         label: String::new(),
         action: None,
@@ -269,18 +282,49 @@ fn toolbar_blocks(toolbar: &Toolbar) -> Vec<Block> {
     });
     blocks.push(Block {
         mark: Mark::Icon(Icon::Larger),
+        column: 0,
         label: labelled(ToolbarAction::SizeStep(1.0), &format!("larger {axis}")),
         action: Some(ToolbarAction::SizeStep(1.0)),
         active: false,
         gap: TOOLBAR_GROUP_GAP,
     });
+    // The block that opens the drawer sits at the foot of the rail and before `Esc`, so the rail's
+    // order and its "Esc is last" property are unchanged.
+    blocks.push(Block {
+        mark: Mark::Icon(Icon::More),
+        column: 0,
+        label: labelled(ToolbarAction::More, "more tools"),
+        action: Some(ToolbarAction::More),
+        active: toolbar.more,
+        gap: TOOLBAR_GAP,
+    });
     blocks.push(Block {
         mark: Mark::Icon(Icon::Lock),
+        column: 0,
         label: labelled(ToolbarAction::Lock, "cancel, then lock"),
         action: Some(ToolbarAction::Lock),
         active: false,
         gap: 0.0,
     });
+    // The drawer: a second column for the controls that are not used often. Its own height is whatever
+    // its residents need, so the rail's height is the same whether it is open or closed.
+    if toolbar.more {
+        blocks.push(Block {
+            mark: Mark::Icon(Icon::Scrim),
+            column: 1,
+            label: labelled(
+                ToolbarAction::Scrim,
+                if toolbar.scrim {
+                    "backdrop: on"
+                } else {
+                    "backdrop: off"
+                },
+            ),
+            action: Some(ToolbarAction::Scrim),
+            active: toolbar.scrim,
+            gap: 0.0,
+        });
+    }
     blocks
 }
 
@@ -535,11 +579,14 @@ impl Renderer {
             None => DamageRegion::All,
             Some(d) => DamageRegion::from_logical(d, scale, width, height),
         };
-        // The scrim an edit-mode frame is painted on, and nothing at all while locked. The overlay's
-        // rail is `Some` exactly in edit mode — `App::current_toolbar` is what decides that — so the
-        // rail's presence is the mode signal the frame already has, and this is the one place it is
-        // read for anything but the rail itself.
-        let scrim = overlay.toolbar.is_some().then(|| parse_hex(SCRIM_FILL));
+        // The scrim an edit-mode frame is painted on, and nothing at all while locked or while it has
+        // been switched off. The overlay's rail is `Some` exactly in edit mode — `App::current_toolbar`
+        // decides that — and it carries whether the backdrop is on, so the two are one read.
+        let scrim = overlay
+            .toolbar
+            .as_ref()
+            .is_some_and(|toolbar| toolbar.scrim)
+            .then(|| parse_hex(SCRIM_FILL));
         // The committed document comes from the raster. Only a frame whose raster cannot be
         // allocated draws it into the buffer itself.
         let key = BaseKey {
@@ -746,8 +793,10 @@ impl Renderer {
             } else {
                 control.width
             };
+            // A block of the drawer is offset a column to the right of the rail's.
+            let column_x = control.block.column as f32 * TOOLBAR_DRAWER_X;
             let block = Rect {
-                x: ox * scale,
+                x: (ox + column_x) * scale,
                 y: (oy + control.y) * scale,
                 w: width * scale,
                 h: TOOLBAR_BLOCK * scale,
@@ -922,8 +971,12 @@ impl Renderer {
         let ceiling = (surface - 2.0 * TOOLBAR_MARGIN).min(TOOLBAR_RESERVE);
         let mut controls = Vec::new();
         let mut hits = Vec::new();
-        let mut y = TOOLBAR_PAD;
+        // One row counter per column: the drawer is a second column, so a block in it starts at the
+        // top of its own column and leaves the rail's height alone.
+        let mut y = [TOOLBAR_PAD; 2];
         for block in toolbar_blocks(toolbar) {
+            let column = block.column as usize;
+            let x = block.column as f32 * TOOLBAR_DRAWER_X;
             let gap = block.gap;
             let hovered = block.action.is_some() && block.action == toolbar.hover;
             // The capsule is [block][gap][label][padding], so the text never touches its edge.
@@ -939,8 +992,8 @@ impl Renderer {
             if let Some(action) = block.action {
                 hits.push((
                     Rect {
-                        x: 0.0,
-                        y,
+                        x,
+                        y: y[column],
                         w: width,
                         h: TOOLBAR_BLOCK,
                     },
@@ -949,25 +1002,28 @@ impl Renderer {
             }
             controls.push(Control {
                 block,
-                y,
+                y: y[column],
                 width,
                 stretched: width > TOOLBAR_BLOCK,
             });
-            y += TOOLBAR_BLOCK + gap;
+            y[column] += TOOLBAR_BLOCK + gap;
         }
-        debug_assert_eq!(y + TOOLBAR_PAD, TOOLBAR_COLUMN);
-        // The rail consumes every press on a block, and the rows between blocks belong to a
-        // neighbour as well: a press on the size readout or in a gap has to step something
-        // rather than start a stroke under the rail.
+        debug_assert_eq!(y[0] + TOOLBAR_PAD, TOOLBAR_COLUMN);
+        // The rail consumes every press on a block, and the rows between its own blocks belong to a
+        // neighbour as well: a press on the size readout or in a gap has to step something rather than
+        // start a stroke under the rail. The drawer's column is not filled that way: it is only as tall
+        // as its controls, so a press beside one is the canvas's. The rail's controls are built before
+        // the drawer's, so they are the leading rows of `hits`.
+        let rail_rows = hits.iter().take_while(|(r, _)| r.x == 0.0).count();
         if let Some((first, _)) = hits.first_mut() {
             first.h += first.y;
             first.y = 0.0;
         }
-        for index in 0..hits.len().saturating_sub(1) {
+        for index in 0..rail_rows.saturating_sub(1) {
             hits[index].0.h = hits[index + 1].0.y - hits[index].0.y;
         }
-        if let Some((last, _)) = hits.last_mut() {
-            last.h = TOOLBAR_COLUMN - last.y;
+        if rail_rows > 0 {
+            hits[rail_rows - 1].0.h = TOOLBAR_COLUMN - hits[rail_rows - 1].0.y;
         }
         ToolbarPill { controls, hits }
     }
@@ -1407,7 +1463,16 @@ fn draw_marquee(pixmap: &mut PixmapMut, marquee: Rect, screen: Screen) {
 /// layout: a block's final width is settled before the pop-out opens, so its frames reuse the
 /// measured layout instead of measuring the label again.
 fn same_layout(a: &Toolbar, b: &Toolbar) -> bool {
-    a.tool == b.tool && a.color == b.color && a.size == b.size && a.hover == b.hover
+    // Everything that decides what blocks exist and how wide they are. `grow` is deliberately not here:
+    // the transition progress does not change the layout, only what the edge has uncovered. `more` and
+    // `scrim` are: one adds a block and the other changes a label, so leaving either out would reuse the
+    // previous layout and make the drawer's control unreachable.
+    a.tool == b.tool
+        && a.color == b.color
+        && a.size == b.size
+        && a.hover == b.hover
+        && a.more == b.more
+        && a.scrim == b.scrim
 }
 
 /// One block of the rail as laid out: where it sits in the column, how wide it is drawn, and
@@ -1415,7 +1480,7 @@ fn same_layout(a: &Toolbar, b: &Toolbar) -> bool {
 #[derive(Clone)]
 struct Control {
     block: Block,
-    /// Top of the block, in column coordinates.
+    /// Top of the block, in its column's coordinates.
     y: f32,
     width: f32,
     stretched: bool,
@@ -1657,6 +1722,51 @@ fn draw_icon(pixmap: &mut PixmapMut, icon: Icon, square: Rect, scale: f32, color
         );
         return;
     }
+    if icon == Icon::More {
+        // Three dots: the macOS way of saying "there is more here".
+        for at in [0.3, 0.5, 0.7] {
+            let mut dot = PathBuilder::new();
+            dot.push_circle(x + w * at, y + h / 2.0, ICON_STROKE * 0.9 * scale);
+            if let Some(path) = dot.finish() {
+                pixmap.fill_path(
+                    &path,
+                    &paint,
+                    tiny_skia::FillRule::Winding,
+                    Transform::identity(),
+                    None,
+                );
+            }
+        }
+        return;
+    }
+    if icon == Icon::Scrim {
+        // A square, half of it solid: what the backdrop does, in one glyph.
+        if let Some(square) = rounded_rect_path(box_, 2.0 * scale) {
+            pixmap.stroke_path(&square, &paint, &stroke, Transform::identity(), None);
+            let mut half = PathBuilder::new();
+            half.move_to(x, y + h * 0.5);
+            half.line_to(x + w, y + h * 0.5);
+            if let Some(path) = half.finish() {
+                pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+            }
+            let mut solid = PathBuilder::new();
+            solid.move_to(x + w * 0.25, y + h * 0.25);
+            solid.line_to(x + w * 0.75, y + h * 0.25);
+            solid.line_to(x + w * 0.75, y + h * 0.75);
+            solid.line_to(x + w * 0.25, y + h * 0.75);
+            solid.close();
+            if let Some(path) = solid.finish() {
+                pixmap.fill_path(
+                    &path,
+                    &paint,
+                    tiny_skia::FillRule::Winding,
+                    Transform::identity(),
+                    None,
+                );
+            }
+        }
+        return;
+    }
     if icon == Icon::Note {
         // A note: a rounded square with two lines of text on it. `fraction` is where the line sits
         // down the icon: naming it `y` would shadow the box's own top and draw at the pixmap's corner.
@@ -1775,6 +1885,8 @@ fn draw_icon(pixmap: &mut PixmapMut, icon: Icon, square: Rect, scale: f32, color
         }
         // Drawn by the branches above.
         Icon::Pen
+        | Icon::More
+        | Icon::Scrim
         | Icon::Note
         | Icon::Hand
         | Icon::Circle
@@ -2211,6 +2323,8 @@ mod tests {
                 size: 3.0,
                 hover: None,
                 grow: 1.0,
+                more: false,
+                scrim: true,
             }),
             ..Default::default()
         };
@@ -2512,6 +2626,8 @@ mod tests {
             size: 3.0,
             hover: None,
             grow: 1.0,
+            more: false,
+            scrim: true,
         }
     }
 
@@ -2564,7 +2680,7 @@ mod tests {
                 assert!(ink > 0, "{icon:?} drew nothing at scale {scale}");
             }
             assert_eq!(
-                icons, 14,
+                icons, 15,
                 "every function has an icon, and only functions do"
             );
         }
@@ -2574,7 +2690,9 @@ mod tests {
     fn every_block_states_the_key_that_applies_it() {
         // A block's face carries no key letter any more, so the key is what its stretched text
         // ends with — and that key has to be one this daemon actually handles.
-        use crate::input::{color_for_keysym, size_step_for_keysym, tool_for_keysym};
+        use crate::input::{
+            color_for_keysym, panel_action_for_keysym, size_step_for_keysym, tool_for_keysym,
+        };
         use smithay_client_toolkit::seat::keyboard::Keysym;
         let keysym_of = |key: &str| match key {
             "[" => Some(Keysym::bracketleft),
@@ -2596,10 +2714,11 @@ mod tests {
             "A" => Some(Keysym::A),
             "H" => Some(Keysym::H),
             "N" => Some(Keysym::N),
+            "M" => Some(Keysym::M),
             _ => None,
         };
         let blocks = toolbar_blocks(&rail_state());
-        assert_eq!(blocks.len(), 20);
+        assert_eq!(blocks.len(), 21);
         let mut stated = 0;
         for block in &blocks {
             let Some(action) = block.action else {
@@ -2623,10 +2742,15 @@ mod tests {
                     size_step_for_keysym(keysym).is_some_and(|step| step == dir)
                 }
                 ToolbarAction::Lock => keysym == Keysym::Escape,
+                ToolbarAction::More => panel_action_for_keysym(keysym) == Some(ToolbarAction::More),
+                ToolbarAction::Scrim => {
+                    panel_action_for_keysym(keysym) == Some(ToolbarAction::Scrim)
+                }
             };
             assert!(applies, "'{}' names a key that does not do it", block.label);
         }
-        // Nineteen blocks apply something: five colours, eleven tools, two size steps and lock.
-        assert_eq!(stated, 19);
+        // Twenty blocks apply something: five colours, eleven tools, two size steps, the drawer's
+        // control and lock. The backdrop's switch is in the drawer, which is closed in this rail.
+        assert_eq!(stated, 20);
     }
 }

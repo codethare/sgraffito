@@ -164,6 +164,8 @@ fn render_frame(
 /// The rail with the pen armed and no block under the pointer, fully open.
 fn rail_state() -> Toolbar {
     Toolbar {
+        more: false,
+        scrim: true,
         tool: Tool::Pen,
         color: "#e01b24",
         size: 3.0,

@@ -379,6 +379,8 @@ fn toolbar(tool: Tool, color: &'static str, size: f32, hover: Option<ToolbarActi
         size,
         hover,
         grow: 1.0,
+        more: false,
+        scrim: true,
     }
 }
 
@@ -576,9 +578,9 @@ fn every_block_of_the_rail_is_reachable_and_no_row_is_a_gap() {
         ToolbarAction::Lock,
         "Esc is not last"
     );
-    // Nineteen clickable blocks: five colours, eleven tools, `[`, `]` and `Esc`. The size readout is
-    // drawn between the two size keys but owned by `[`, so it is not one of them.
-    assert_eq!(actions.len(), 19, "a drawn block cannot be hit");
+    // Twenty clickable blocks: five colours, eleven tools, `[`, `]`, the drawer's block and `Esc`. The
+    // size readout is drawn between the two size keys but owned by `[`, so it is not one of them.
+    assert_eq!(actions.len(), 20, "a drawn block cannot be hit");
     // Outside the rail the toolbar takes nothing: those presses are drawing gestures.
     let band = toolbar_bounds(w, h);
     assert_eq!(
@@ -1790,4 +1792,153 @@ fn a_note_draws_its_text_inside_its_square_and_nowhere_else() {
         "the note's fill is missing: {:?}",
         &with[i..i + 4]
     );
+}
+
+#[test]
+fn the_drawer_opens_beside_the_rail_without_moving_it() {
+    // The point of a drawer: a control can live somewhere other than the rail, and the rail does not
+    // grow to hold it. Its height, its order and its own box are the same either way.
+    let (w, h) = (1920u32, 1080u32);
+    let (fw, fh) = (w as f32, h as f32);
+    let mut renderer = Renderer::new();
+    let closed = rail();
+    let open = Toolbar {
+        more: true,
+        ..closed
+    };
+    // The rail's height and its declared box are unchanged by the drawer.
+    let (a, b) = (toolbar_bounds(fw, fh), toolbar_bounds(fw, fh));
+    assert_eq!(a.h, b.h);
+    // The rail's own blocks are where they were: the block that opens the drawer is at the foot of the
+    // rail, and `Esc` is still last.
+    let sweep = sweep_rail(&mut renderer, &closed, fw, fh, 20.0);
+    let mut actions: Vec<ToolbarAction> = Vec::new();
+    for action in sweep.iter().flatten() {
+        if actions.last() != Some(action) {
+            actions.push(*action);
+        }
+    }
+    assert_eq!(
+        *actions.last().unwrap(),
+        ToolbarAction::Lock,
+        "Esc is still last"
+    );
+    assert!(
+        actions.contains(&ToolbarAction::More),
+        "the drawer's own block is on the rail"
+    );
+    assert!(
+        !actions.contains(&ToolbarAction::Scrim),
+        "the backdrop's switch is not on the rail while the drawer is closed"
+    );
+
+    // Open, the switch is in the second column: one block and one gap to the right of the rail, and a
+    // press there applies it and reaches nothing else.
+    let band = toolbar_bounds(fw, fh);
+    let column_x = band.x + 1.0 + 30.0 + 4.0 + 15.0;
+    assert_eq!(
+        renderer.toolbar_hit(&open, fw, fh, column_x, band.y + 1.0 + 15.0),
+        Some(ToolbarAction::Scrim)
+    );
+    // A press in the same row of the rail is the rail's own first block, not the drawer's.
+    assert_eq!(
+        renderer.toolbar_hit(&open, fw, fh, band.x + 1.0 + 15.0, band.y + 1.0 + 15.0),
+        Some(ToolbarAction::Color(0))
+    );
+    // And a row below the drawer's only control is canvas, not a control: the drawer's column is only
+    // as tall as what it holds.
+    assert_eq!(
+        renderer.toolbar_hit(&open, fw, fh, column_x, band.y + 1.0 + 200.0),
+        None
+    );
+}
+
+#[test]
+fn the_backdrop_can_be_switched_off_and_on() {
+    // A preference about reading, not content: switching it changes every pixel of the surface and
+    // nothing in the document, and the raster cannot hold the state it was switched away from.
+    let (w, h) = (400u32, 300u32);
+    let mut renderer = Renderer::new();
+    let on = Overlay {
+        toolbar: Some(rail()),
+        ..Default::default()
+    };
+    let off = Overlay {
+        toolbar: Some(Toolbar {
+            scrim: false,
+            ..rail()
+        }),
+        ..Default::default()
+    };
+    let render = |overlay: &Overlay| {
+        let mut buf = buffer(w, h);
+        Renderer::new().render(
+            &mut buf,
+            w,
+            h,
+            1.0,
+            View::default(),
+            &OutputAnnotations::default(),
+            overlay,
+            None,
+        );
+        buf
+    };
+    let (with, without) = (render(&on), render(&off));
+    // Away from the rail, the frame with it is the scrim and the frame without it is transparent.
+    let (x, y) = (w - 20, h - 20);
+    assert_eq!(alpha(&with, w, x, y), SCRIM, "the backdrop is not painted");
+    assert_eq!(
+        alpha(&without, w, x, y),
+        0,
+        "the backdrop was painted anyway"
+    );
+    // The rail itself is drawn either way, so it is not the backdrop that makes it visible.
+    let band = toolbar_bounds(w as f32, h as f32);
+    assert!(content(
+        &with,
+        w,
+        (band.x + 20.0) as u32,
+        (band.y + 20.0) as u32
+    ));
+    assert!(content(
+        &without,
+        w,
+        (band.x + 20.0) as u32,
+        (band.y + 20.0) as u32
+    ));
+
+    // The raster is keyed by the backdrop, so a frame that switches it cannot reuse the other state.
+    let mut cache = FrameCache::default();
+    let mut first = buffer(w, h);
+    renderer.render_with_cache(
+        &mut first,
+        w,
+        h,
+        1.0,
+        View::default(),
+        &OutputAnnotations::default(),
+        &on,
+        None,
+        &mut cache,
+        &[],
+    );
+    let mut second = buffer(w, h);
+    renderer.render_with_cache(
+        &mut second,
+        w,
+        h,
+        1.0,
+        View::default(),
+        &OutputAnnotations::default(),
+        &off,
+        None,
+        &mut cache,
+        &[],
+    );
+    assert_eq!(
+        second, without,
+        "the switched frame did not match a fresh one"
+    );
+    assert_eq!(alpha(&second, w, x, y), 0);
 }
