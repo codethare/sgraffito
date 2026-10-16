@@ -722,14 +722,6 @@ impl Renderer {
             Some(c) => SkColor::from_rgba8(c[0], c[1], c[2], c[3]),
             None => SkColor::TRANSPARENT,
         });
-        // Notes first: they are backgrounds, so the strokes, shapes and text drawn over them are
-        // visible on top and are what the pointer hits.
-        for (index, note) in ann.notes.iter().enumerate() {
-            if skip.contains(&ItemId::Note(index)) {
-                continue;
-            }
-            self.draw_note(pixmap, note, screen, None);
-        }
         for (index, s) in ann.strokes.iter().enumerate() {
             if skip.contains(&ItemId::Stroke(index)) {
                 continue;
@@ -758,6 +750,14 @@ impl Renderer {
             if let Some(layout) = text.get_mut(index) {
                 self.draw_prepared_text(pixmap, item, screen, layout, None);
             }
+        }
+        // Notes last: a note is what the user reads the drawing against, so nothing a later tool draws
+        // can bury it, and the pointer hits what it can see.
+        for (index, note) in ann.notes.iter().enumerate() {
+            if skip.contains(&ItemId::Note(index)) {
+                continue;
+            }
+            self.draw_note(pixmap, note, screen, None);
         }
     }
 
@@ -1225,8 +1225,8 @@ impl Renderer {
             ),
             None => (item.text.as_str(), "", None),
         };
-        // Text uses explicit newlines only. The output clips long lines instead of wrapping
-        // them behind the damage calculator's back.
+        // A text box has no width to wrap at, so its text uses explicit newlines only and a long line
+        // runs on. A note passes its inner width, and then the layout wraps.
         // The preedit renders where the caret is, so the text after the caret stays after it.
         let display = match caret.filter(|_| !preedit.is_empty()) {
             Some(at) => Cow::Owned(format!(

@@ -517,3 +517,31 @@ no capabilities until a device exists.
    an interface whose colour already means the active pen.
 11. Archiving the delivered OpenSpec changes, which stays impossible until the capability specs
     exist under `openspec/specs/`.
+
+## Sticky-note interaction fixes (this session)
+
+Three reports from real use, all in the note tool.
+
+1. **English did not wrap while typing and the note grew only after `Esc`; Chinese looked fine.** The
+   layout was never wrong — `Renderer::wrapped_text_height` wraps English into four lines at a 176 pt
+   inner width, and always did. The bug was the **damage box**: `render_output` classified a note's
+   keystroke as `local_text`, so the frame copied only the *text box*. A note is not a text box — its
+   square is document geometry that grows with the text, and it is left out of the raster — so the grown
+   part of the square, and every wrapped line that fell below the old text box, were drawn into the
+   canvas and never copied out. A script that arrives through an IME has a preedit, which sets
+   `out.dirty` and forces a whole-surface frame, which is why only English (no preedit) showed the bug.
+   Fix: a note's edit is never a local text damage. It repaints whole, which is the cost a preedit
+   keystroke already paid.
+2. **A fast click left an unwanted default-sized note.** The note tool now behaves like a shape tool: a
+   drag sweeps out the square, and a press that never moved creates nothing at all (`note_sized` in
+   `App`, `canvas::note_drag` for the rule, `NOTE_DRAG_SLOP` 6 pt to tell a click from a drag — measuring
+   that by `NOTE_MIN_SIZE` threw away every drag smaller than a note may be).
+3. **A note was buried by the drawing.** Notes are now painted **last**, over strokes, shapes and text,
+   and the hit test asks for the note first. This reverses the earlier choice (ink on top of a note, so a
+   line stuck to a note could be erased on its own) — the element on top is the element the pointer sees,
+   so the hit test follows the z-order. `a_note_is_hit_by_its_body_and_the_note_is_what_is_on_top` and
+   `a_note_is_drawn_over_the_ink_that_crosses_it` hold both halves.
+
+Still unverified: real input devices. Nothing below the pointer translation layer is covered by a test,
+which is where the last three user reports all landed. (1) and (3) are covered by pure tests now; the
+feel of the drag is not.

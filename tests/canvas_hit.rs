@@ -1074,7 +1074,7 @@ fn every_palette_colour_can_be_read_on_a_note() {
 }
 
 #[test]
-fn a_note_is_hit_by_its_body_but_ink_on_it_wins() {
+fn a_note_is_hit_by_its_body_and_the_note_is_what_is_on_top() {
     let mut a = OutputAnnotations {
         strokes: vec![],
         texts: vec![],
@@ -1088,12 +1088,10 @@ fn a_note_is_hit_by_its_body_but_ink_on_it_wins() {
         Some(ItemId::Note(0)),
         "the note has no outline to aim at, unlike a shape"
     );
-    // A stroke drawn across it wins the press, so a line stuck to a note can be erased on its own.
+    // A note is drawn over the ink, so the press goes to the note the pointer can see. Ink stuck to a
+    // note is reached from outside the square the note covers.
     a.strokes.push(stroke_at(150.0, 150.0));
-    assert_eq!(
-        a.hit(150.0, 150.0, ERASER_THRESHOLD),
-        Some(ItemId::Stroke(0))
-    );
+    assert_eq!(a.hit(150.0, 150.0, ERASER_THRESHOLD), Some(ItemId::Note(0)));
     // And erasing the note takes it whole.
     assert!(a.erase(250.0, 150.0, ERASER_THRESHOLD).is_some());
     assert!(a.notes.is_empty() && a.strokes.len() == 1);

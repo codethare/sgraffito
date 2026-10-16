@@ -353,6 +353,12 @@ impl OutputAnnotations {
             return Some(ItemId::Text(i));
         }
         let limit = tolerance * tolerance;
+        // Notes are drawn over everything else, so the note under the pointer is the element the pointer
+        // is on: a hit test that preferred the ink would hand back an element that is not visible where
+        // the click landed.
+        if let Some(i) = self.notes.iter().position(|n| n.bounds().contains(x, y)) {
+            return Some(ItemId::Note(i));
+        }
         let mut best: Option<(ItemId, f32)> = None;
         let mut consider = |id: ItemId, d: f32| {
             if d <= limit && best.is_none_or(|(_, nearest)| d < nearest) {
@@ -365,15 +371,7 @@ impl OutputAnnotations {
         for (i, s) in self.shapes.iter().enumerate() {
             consider(ItemId::Shape(i), s.distance_squared(x, y));
         }
-        if let Some((id, _)) = best {
-            return Some(id);
-        }
-        // A note is opaque and has no outline to aim at, so its body is the target — but only after
-        // the ink above it has had its turn, so a line stuck across a note can be erased on its own.
-        self.notes
-            .iter()
-            .position(|n| n.bounds().contains(x, y))
-            .map(ItemId::Note)
+        best.map(|(id, _)| id)
     }
 
     /// Remove the element under `(x, y)`, returning the box it occupied, so the frame that

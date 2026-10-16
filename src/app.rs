@@ -250,6 +250,9 @@ pub struct App {
     /// The canvas point a new note is being dragged from, while its size is being decided. The note
     /// itself lives in the overlay, so this is the one thing the drag needs that the note cannot hold.
     pub(crate) note_origin: Option<[f32; 2]>,
+    /// Whether the note being dragged out has been sized by its drag, which is what tells it from a
+    /// click when the pointer is released.
+    pub(crate) note_sized: bool,
     /// Whether the drawer of rarely used controls is open. Transient, like the selection.
     pub(crate) more: bool,
     /// Whether edit mode paints the backdrop. A preference about reading, so it is not persisted and a
@@ -352,6 +355,7 @@ impl App {
             gesture: None,
             selection_grab: None,
             note_origin: None,
+            note_sized: false,
             more: false,
             scrim: true,
             pan: None,
@@ -1587,6 +1591,7 @@ impl App {
         note.y = swept.y;
         note.w = swept.w;
         note.h = swept.h;
+        self.note_sized = true;
         out.transient_dirty = true;
         self.dirty = true;
     }
@@ -1595,9 +1600,19 @@ impl App {
     /// text" the note tool promises.
     pub(crate) fn commit_note(&mut self, key: &u32) {
         self.note_origin = None;
+        let sized = std::mem::take(&mut self.note_sized);
         let Some(out) = self.outputs.get_mut(key) else {
             return;
         };
+        // A click is not a note: the note tool sizes a note the way a shape tool draws a shape, so a press
+        // that never dragged leaves nothing behind instead of dropping a default-sized note on the
+        // wallpaper, where it reads as an accidental note that has to be removed by hand.
+        if !sized {
+            out.overlay.note = None;
+            out.transient_dirty = true;
+            self.dirty = true;
+            return;
+        }
         let Some(note) = out.overlay.note.take() else {
             return;
         };
@@ -1883,7 +1898,19 @@ impl App {
             .as_ref()
             .and_then(|edit| edit.index)
             .is_none_or(|index| index < ann.texts.len());
+        // A text box is a fixed box whose glyphs are all the frame has to repaint, so a keystroke in it
+        // damages the box. A note is not: its square is document geometry that the text wraps into and
+        // grows with, and it is left out of the raster, so a keystroke there has to repaint the square.
+        // A box damage would leave the grown part of the square, and every line the text wrapped onto
+        // below it, unpainted until something else caused a whole-surface frame — which is what typing
+        // English, with no preedit to force one, looked like: no wrapping and no growth until the edit
+        // ended.
         let local_text = out.text_dirty
+            && out
+                .overlay
+                .text
+                .as_ref()
+                .is_none_or(|edit| edit.note.is_none())
             && !out.dirty
             && out.last_buffer == Some(idx)
             && out.last_text_bounds.is_some()

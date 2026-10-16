@@ -2023,3 +2023,55 @@ fn a_note_being_typed_in_is_drawn_wrapped_while_the_typing_goes_on() {
         "the note under edit was left in the raster"
     );
 }
+
+#[test]
+fn a_note_is_drawn_over_the_ink_that_crosses_it() {
+    // A note is what the drawing is read against, so no tool can bury it: a stroke across a note is
+    // under it in the frame, which is also why the note is what the pointer hits there.
+    let (w, h) = (600u32, 500u32);
+    let view = View::default();
+    let note = Note::new(80.0, 60.0, PALETTE[1], "2026/10/14".into());
+    let stroke = Stroke {
+        color: PALETTE[0].to_string(),
+        width: 6.0,
+        points: vec![[40.0, 110.0], [300.0, 110.0]],
+    };
+    let with_ink = OutputAnnotations {
+        strokes: vec![stroke],
+        texts: vec![],
+        shapes: vec![],
+        notes: vec![note.clone()],
+    };
+    let mut inkless = with_ink.clone();
+    inkless.strokes.clear();
+    let draw = |ann: &OutputAnnotations| {
+        let mut buf = buffer(w, h);
+        Renderer::new().render(&mut buf, w, h, 1.0, view, ann, &Overlay::default(), None);
+        buf
+    };
+    let (ink, bare) = (draw(&with_ink), draw(&inkless));
+    // The stroke reaches out of the note on both sides and that is the only place it may be seen: inside
+    // the square the two frames agree, so the note is over the ink rather than the ink over the note.
+    let mut seen = 0;
+    // Inset by a pixel: the note's own edge is anti-aliased, so its outermost pixels may hold some of the
+    // ink under them. Deeper inside, the note covers.
+    let b = note.bounds();
+    let square = Rect {
+        x: b.x + 2.5,
+        y: b.y + 2.5,
+        w: b.w - 5.0,
+        h: b.h - 5.0,
+    };
+    for (i, (a, b)) in ink.chunks(4).zip(bare.chunks(4)).enumerate() {
+        if a == b {
+            continue;
+        }
+        let (x, y) = ((i as u32 % w) as f32, (i as u32 / w) as f32);
+        assert!(
+            !square.contains(x, y),
+            "the ink was drawn over the note at {x},{y}"
+        );
+        seen += 1;
+    }
+    assert!(seen > 0, "the stroke was not drawn at all");
+}
