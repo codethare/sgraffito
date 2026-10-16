@@ -624,6 +624,9 @@ impl Renderer {
         if let Some(s) = &overlay.shape {
             draw_shape(&mut pixmap, s, screen);
         }
+        if let Some(note) = &overlay.note {
+            self.draw_note(&mut pixmap, note, screen, None);
+        }
         if let Some(t) = &overlay.text {
             match t.note.and_then(|i| ann.notes.get(i)) {
                 // A note being typed in: its square and its date are content, so the whole note is
@@ -1385,6 +1388,7 @@ pub fn transient_damage(last: Option<Rect>, now: Option<Rect>, rail: Option<Rect
 pub fn transient_bounds(overlay: &Overlay) -> Option<Rect> {
     let stroke = overlay.stroke.as_ref().and_then(Stroke::bounds);
     let shape = overlay.shape.as_ref().map(Shape::bounds);
+    let note = overlay.note.as_ref().map(Note::bounds);
     let eraser = overlay.eraser.map(|[x, y]| {
         Rect {
             x,
@@ -1395,7 +1399,7 @@ pub fn transient_bounds(overlay: &Overlay) -> Option<Rect> {
         .grown(ERASER_MARKER_RADIUS + 2.0)
     });
     let marquee = overlay.marquee.map(|m| m.grown(SELECT_HANDLE));
-    [stroke, shape, eraser, marquee]
+    [stroke, shape, note, eraser, marquee]
         .into_iter()
         .flatten()
         .reduce(Rect::union)

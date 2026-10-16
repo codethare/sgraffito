@@ -44,7 +44,7 @@ use wayland_client::{
 use crate::canvas::{
     Doc, ERASER_THRESHOLD, Gesture, Grab, Handle, ItemId, Note, OutputAnnotations, Overlay, Press,
     Rect, Selection, Shape, ShapeKind, TEXT_SIZE_MAX, TEXT_SIZE_MIN, TextBuffer, TextItem,
-    TextOverlay, Toolbar, Transform, View, date_stamp, marquee_select, selection_bounds,
+    TextOverlay, Toolbar, Transform, View, date_stamp, marquee_select, note_drag, selection_bounds,
     selection_frame, selection_press,
 };
 
@@ -247,6 +247,9 @@ pub struct App {
     pub(crate) gesture: Option<Gesture>,
     /// The frame handle under the pointer, which is what the pointer shape says it would grab.
     pub(crate) selection_grab: Option<Grab>,
+    /// The canvas point a new note is being dragged from, while its size is being decided. The note
+    /// itself lives in the overlay, so this is the one thing the drag needs that the note cannot hold.
+    pub(crate) note_origin: Option<[f32; 2]>,
     /// Whether the drawer of rarely used controls is open. Transient, like the selection.
     pub(crate) more: bool,
     /// Whether edit mode paints the backdrop. A preference about reading, so it is not persisted and a
@@ -348,6 +351,7 @@ impl App {
             toolbar_hover_since: None,
             gesture: None,
             selection_grab: None,
+            note_origin: None,
             more: false,
             scrim: true,
             pan: None,
@@ -817,6 +821,7 @@ impl App {
         let changed = out.overlay.stroke.take().is_some()
             || out.overlay.shape.take().is_some()
             || out.overlay.eraser.take().is_some()
+            || out.overlay.note.take().is_some()
             || out.overlay.selection.take().is_some()
             || out.overlay.marquee.take().is_some();
         if changed {
@@ -1215,6 +1220,12 @@ impl App {
                         ann.texts[i] = moved;
                         Some(changed)
                     }
+                    ItemId::Note(i) if i < ann.notes.len() => {
+                        let moved = transform.note(&ann.notes[i]);
+                        let changed = ann.notes[i].bounds().union(moved.bounds());
+                        ann.notes[i] = moved;
+                        Some(changed)
+                    }
                     ItemId::Shape(i) if i < ann.shapes.len() => {
                         let moved = transform.shape(&ann.shapes[i]);
                         let changed = ann.shapes[i].bounds().union(moved.bounds());
@@ -1238,6 +1249,43 @@ impl App {
         }
         if let Some(box_) = box_ {
             self.doc_changed_at(key, box_);
+        }
+        // A resized note re-wraps, and the text wins where it needs more room than the resize left: the
+        // height a gesture gives a note is a minimum, re-measured here the way typing re-measures it.
+        let screen = self.outputs.get(&key).map(|out| Screen {
+            scale: out.scale,
+            view: out.view,
+        });
+        if let Some(screen) = screen {
+            let notes: Vec<Note> = self
+                .doc
+                .outputs
+                .get(&bucket)
+                .map(|ann| {
+                    items
+                        .iter()
+                        .filter_map(|id| match id {
+                            ItemId::Note(i) => ann.notes.get(*i).cloned(),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            for note in notes {
+                let needed = self.renderer.wrapped_text_height(&note.text, &note, screen);
+                let h = note.height_for(needed);
+                if h <= note.h {
+                    continue;
+                }
+                if let Some(slot) = self
+                    .doc
+                    .outputs
+                    .get_mut(&bucket)
+                    .and_then(|ann| ann.notes.iter_mut().find(|n| n.bounds() == note.bounds()))
+                {
+                    slot.h = h;
+                }
+            }
         }
     }
 
@@ -1502,23 +1550,64 @@ impl App {
             .outputs
             .get(&bucket)
             .and_then(|ann| ann.notes.iter().position(|n| n.bounds().contains(x, y)));
-        let index = match existing {
-            Some(index) => index,
-            None => {
-                let note = Note::new(x, y, PALETTE[self.color_idx], date_stamp(SystemTime::now()));
-                let ann = self.doc.outputs.entry(bucket).or_default();
-                ann.notes.push(note);
-                ann.notes.len() - 1
+        // An existing note is entered; a new one is dragged out and only becomes content on the
+        // release, so that a drag decides its size the way the shape tools' drags decide theirs.
+        let Some(index) = existing else {
+            let note = Note::new(x, y, PALETTE[self.color_idx], date_stamp(SystemTime::now()));
+            self.note_origin = Some([x, y]);
+            if let Some(out) = self.outputs.get_mut(key) {
+                out.overlay.note = Some(note);
+                out.transient_dirty = true;
             }
+            self.dirty = true;
+            return;
         };
-        log(&format!(
-            "note edit on {}",
-            if existing.is_some() {
-                "an existing note"
-            } else {
-                "a new note"
-            }
-        ));
+        log("note edit on an existing note");
+        self.enter_note(key, index);
+    }
+
+    /// Size the note being dragged out. A drag that never leaves the minimum is a click, which gives the
+    /// default size; a real drag gives the rectangle it swept, in any direction.
+    pub(crate) fn drag_note(&mut self, key: &u32, x: f32, y: f32) {
+        let Some(origin) = self.note_origin else {
+            return;
+        };
+        let Some(out) = self.outputs.get_mut(key) else {
+            return;
+        };
+        let Some(note) = out.overlay.note.as_mut() else {
+            return;
+        };
+        // The rule lives in `canvas::note_drag`, where a test can reach it: a click keeps the default
+        // size, and a drag gives the rectangle it swept.
+        let Some(swept) = note_drag(origin, [x, y]) else {
+            return;
+        };
+        note.x = swept.x;
+        note.y = swept.y;
+        note.w = swept.w;
+        note.h = swept.h;
+        out.transient_dirty = true;
+        self.dirty = true;
+    }
+
+    /// The release of a note's drag: it becomes content and the caret goes in it, which is the "waits for
+    /// text" the note tool promises.
+    pub(crate) fn commit_note(&mut self, key: &u32) {
+        self.note_origin = None;
+        let Some(out) = self.outputs.get_mut(key) else {
+            return;
+        };
+        let Some(note) = out.overlay.note.take() else {
+            return;
+        };
+        out.transient_dirty = true;
+        let bucket = out.bucket(*key).into_owned();
+        let index = {
+            let ann = self.doc.outputs.entry(bucket).or_default();
+            ann.notes.push(note);
+            ann.notes.len() - 1
+        };
         self.enter_note(key, index);
     }
 

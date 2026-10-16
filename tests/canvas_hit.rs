@@ -1170,3 +1170,24 @@ fn a_note_moves_and_resizes_as_one_thing() {
         .is_empty()
     );
 }
+
+#[test]
+fn a_new_note_is_sized_by_the_drag_that_creates_it() {
+    use sgraffito::canvas::{NOTE_MIN_SIZE, note_drag};
+    let origin = [400.0, 300.0];
+    // A click: nothing swept, so the note keeps the default size rather than becoming a sliver.
+    assert_eq!(note_drag(origin, origin), None);
+    assert_eq!(note_drag(origin, [405.0, 302.0]), None);
+    // A drag gives the rectangle it swept, and both directions work: a note dragged up and to the left
+    // starts above and left of the press.
+    let down_right = note_drag(origin, [700.0, 560.0]).expect("a drag");
+    assert_eq!((down_right.x, down_right.y), (400.0, 300.0));
+    assert_eq!((down_right.w, down_right.h), (300.0, 260.0));
+    let up_left = note_drag(origin, [150.0, 120.0]).expect("a drag");
+    assert_eq!((up_left.x, up_left.y), (150.0, 120.0));
+    assert_eq!((up_left.w, up_left.h), (250.0, 180.0));
+    // Each side is clamped on its own: a drag that is long and thin still gives a usable note.
+    let thin = note_drag(origin, [700.0, 302.0]).expect("a drag");
+    assert_eq!(thin.w, 300.0);
+    assert_eq!(thin.h, NOTE_MIN_SIZE, "a thin drag is not a thin note");
+}

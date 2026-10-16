@@ -753,7 +753,12 @@ impl App {
                     None => return,
                 }
             }
-            Tool::Text | Tool::Selection | Tool::Hand | Tool::Note => return,
+            // A note is dragged out to the size it is created with, exactly as a shape is.
+            Tool::Note => {
+                self.drag_note(key, canvas[0], canvas[1]);
+                return;
+            }
+            Tool::Text | Tool::Selection | Tool::Hand => return,
         }
         // Only the transient overlay moved, so the next frame can damage just its box.
         out.transient_dirty = true;
@@ -925,6 +930,11 @@ impl App {
         // The transient overlay is empty again, so this output is repainted from its own box.
         if let Some(out) = self.outputs.get_mut(key) {
             out.transient_dirty = true;
+        }
+        // A note being dragged out becomes content here, and its caret goes in: the note tool's promise
+        // is that the next thing typed is its text.
+        if self.tool == Tool::Note {
+            self.commit_note(key);
         }
         // A gesture the pointer was dragging ends here, and is written into the document.
         self.release_selection(id);

@@ -1107,6 +1107,21 @@ impl View {
     }
 }
 
+/// The size a note being dragged out gets: the rectangle the drag swept, in whichever direction it went,
+/// with each side no smaller than a note may be. `None` while the drag is smaller than that in both
+/// directions, which is a click — and a click keeps the default size rather than creating a sliver.
+pub fn note_drag(origin: [f32; 2], at: [f32; 2]) -> Option<Rect> {
+    let swept = Rect::from_corners(origin, at);
+    if swept.w < NOTE_MIN_SIZE && swept.h < NOTE_MIN_SIZE {
+        return None;
+    }
+    Some(Rect {
+        w: swept.w.max(NOTE_MIN_SIZE),
+        h: swept.h.max(NOTE_MIN_SIZE),
+        ..swept
+    })
+}
+
 /// The box an element occupies, which is what the frame and the marquee measure. A text box
 /// contributes its conservative estimate rather than its ink, so a frame errs outside the drawn
 /// glyphs instead of cutting through them.
@@ -1244,6 +1259,9 @@ pub struct Overlay {
     pub stroke: Option<Stroke>,
     /// Shape still being dragged out, not yet committed.
     pub shape: Option<Shape>,
+    /// Note still being dragged out, not yet committed. A note is created by a press and its size is
+    /// what the drag gave it, so it exists in the overlay until the release rather than in the document.
+    pub note: Option<Note>,
     /// Eraser cursor position.
     pub eraser: Option<[f32; 2]>,
     /// Text box being edited, preedit included.
