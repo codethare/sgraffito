@@ -1129,10 +1129,24 @@ pub fn note_drag(origin: [f32; 2], at: [f32; 2]) -> Option<Rect> {
     if swept.w < NOTE_DRAG_SLOP && swept.h < NOTE_DRAG_SLOP {
         return None;
     }
+    let (w, h) = (swept.w.max(NOTE_MIN_SIZE), swept.h.max(NOTE_MIN_SIZE));
+    // The press is the corner the note grows out of, and it stays put. Keeping the sweep's own corner
+    // instead meant a side clamped up to the minimum reached back through the pointer: pulling a note
+    // back in left its far edge jumping out and back, so both sides of the note flickered, and the note
+    // grew away from the pointer rather than with it.
     Some(Rect {
-        w: swept.w.max(NOTE_MIN_SIZE),
-        h: swept.h.max(NOTE_MIN_SIZE),
-        ..swept
+        x: if at[0] < origin[0] {
+            origin[0] - w
+        } else {
+            origin[0]
+        },
+        y: if at[1] < origin[1] {
+            origin[1] - h
+        } else {
+            origin[1]
+        },
+        w,
+        h,
     })
 }
 

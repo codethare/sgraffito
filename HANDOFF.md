@@ -606,3 +606,13 @@ Related, not touched: `Stroke::bounds` measures the polyline and not the ink, so
 the same overhang of `width / 2`. `Shape::bounds` grows by `width / 2 + 1 + head` already. Fixing
 `Stroke::bounds` would also change the marquee's wholly-inside rule, which is a behaviour change, so the
 1-pixel slack is what covers the thin case and the pen's overhang stays as it was.
+
+### The flicker when a note is pulled back in
+
+The damage machinery was not at fault: a two-frame test and a whole-gesture test (nine positions into one
+buffer, each frame damaging `transient_damage(last, now)`) both compared clean against a full repaint.
+The fault was `canvas::note_drag`: it clamped `w`/`h` up to `NOTE_MIN_SIZE` but kept the *sweep's* corner,
+so a clamped side reached back through the pointer. Pulling a note back in therefore made its far edge jump
+out past the pointer and back on consecutive frames — a flicker on both sides, while every frame's damage
+box was correct. The press is now a corner of the note at every moment and each side is the distance the
+pointer moved from it. `a_note_keeps_the_press_point_as_a_corner_however_the_drag_turns`.

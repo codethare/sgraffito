@@ -1219,3 +1219,52 @@ fn a_note_is_never_shrunk_by_the_text_that_is_typed_into_it() {
     small.h = 10.0;
     assert_eq!(small.grown_for(0.0).h, sgraffito::canvas::NOTE_MIN_SIZE);
 }
+
+#[test]
+fn a_note_keeps_the_press_point_as_a_corner_however_the_drag_turns() {
+    // The press is a corner of the note at every point of the gesture, and each side is the distance the
+    // pointer has gone from it. Without that, a side clamped up to the minimum reached back through the
+    // pointer when a note was pulled back in, so the note flickered on both sides as it shrank.
+    use sgraffito::canvas::{NOTE_MIN_SIZE, Rect, note_drag};
+    let origin = [500.0, 400.0];
+    let mut seen = 0;
+    for at in [
+        [700.0, 600.0],
+        [760.0, 640.0],
+        [700.0, 600.0],
+        [560.0, 500.0],
+        [500.0, 440.0],
+        [470.0, 400.0],
+        [430.0, 380.0],
+        [380.0, 350.0],
+        [470.0, 390.0],
+        [620.0, 560.0],
+    ] {
+        let r = note_drag(origin, at).expect("a drag past the slop");
+        assert_eq!(r.w, (at[0] - origin[0]).abs().max(NOTE_MIN_SIZE));
+        assert_eq!(r.h, (at[1] - origin[1]).abs().max(NOTE_MIN_SIZE));
+        let (right, bottom) = (r.x + r.w, r.y + r.h);
+        assert!(
+            (r.x == origin[0] || right == origin[0]) && (r.y == origin[1] || bottom == origin[1]),
+            "{r:?} does not keep the press {origin:?} as a corner at {at:?}"
+        );
+        seen += 1;
+    }
+    assert_eq!(seen, 10);
+    // And a drag too short to be one is still nothing at all.
+    assert_eq!(note_drag(origin, [505.0, 402.0]), None);
+    // The rectangle a drag out and back in sweeps is a rectangle: the two corners are the press and the
+    // pointer, in either direction, with each side at least the minimum.
+    let expected = Rect {
+        x: origin[0] - 380.0f32.max(NOTE_MIN_SIZE),
+        y: origin[1] - 350.0f32.max(NOTE_MIN_SIZE),
+        w: 380.0,
+        h: 350.0,
+    };
+    let up_left = note_drag(origin, [120.0, 50.0]).unwrap();
+    assert_eq!((up_left.w, up_left.h), (expected.w, expected.h));
+    assert_eq!(
+        (up_left.x + up_left.w, up_left.y + up_left.h),
+        (origin[0], origin[1])
+    );
+}

@@ -2235,3 +2235,85 @@ fn a_note_dragged_left_leaves_no_trail_in_its_damage_box() {
         );
     }
 }
+
+#[test]
+fn a_note_dragged_out_and_back_leaves_no_trail() {
+    // The whole gesture, frame by frame into one buffer, each frame damaging the union of the box the note
+    // was in and the box it is in now — the app's rule. Dragging out and then pulling back in (so the note
+    // shrinks, and the corner the sweep turns about changes when the pointer crosses the press) showed a
+    // trail on both sides.
+    let (w, h) = (900u32, 700u32);
+    let view = View::default();
+    let origin = [500.0f32, 400.0f32];
+    let path: [[f32; 2]; 9] = [
+        [700.0, 600.0],
+        [760.0, 640.0],
+        [700.0, 600.0],
+        [560.0, 500.0],
+        [500.0, 420.0],
+        [430.0, 380.0],
+        [380.0, 350.0],
+        [470.0, 390.0],
+        [620.0, 560.0],
+    ];
+    let mut last: Option<Rect> = None;
+    let mut cache = FrameCache::default();
+    let mut renderer = Renderer::new();
+    let mut buf = buffer(w, h);
+    let mut last_overlay = Overlay::default();
+    for at in path {
+        let Some(swept) = sgraffito::canvas::note_drag(origin, at) else {
+            continue;
+        };
+        let mut note = Note::new(0.0, 0.0, PALETTE[1], "2026/10/14".into());
+        note.x = swept.x;
+        note.y = swept.y;
+        note.w = swept.w;
+        note.h = swept.h;
+        let overlay = Overlay {
+            note: Some(note.clone()),
+            ..Default::default()
+        };
+        let now = transient_bounds(&overlay).map(|b| view.screen_rect(b));
+        let damage = transient_damage(last, now, None);
+        renderer.render_with_cache(
+            &mut buf,
+            w,
+            h,
+            1.0,
+            view,
+            &OutputAnnotations::default(),
+            &overlay,
+            Some(damage),
+            &mut cache,
+            &[],
+        );
+        last = now;
+        last_overlay = overlay;
+    }
+    let mut full = buffer(w, h);
+    Renderer::new().render(
+        &mut full,
+        w,
+        h,
+        1.0,
+        view,
+        &OutputAnnotations::default(),
+        &last_overlay,
+        None,
+    );
+    let spots: Vec<(u32, u32)> = buf
+        .chunks(4)
+        .zip(full.chunks(4))
+        .enumerate()
+        .filter(|(_, (a, b))| a != b)
+        .map(|(i, _)| ((i as u32) % w, (i as u32) / w))
+        .collect();
+    assert!(
+        spots.is_empty(),
+        "the note trailed {} pixels, first {:?} last {:?}",
+        spots.len(),
+        spots.first(),
+        spots.last()
+    );
+}
