@@ -417,6 +417,42 @@ impl OutputAnnotations {
     /// an earlier element shifts every later one: without that, a selection holding two strokes would
     /// remove the second twice and leave the first drawn. An index that is no longer there is skipped,
     /// which is what lets a `clear` arriving mid-gesture leave nothing to resurrect.
+    /// Recolour every element `items` names, returning the box they occupy, which is what the frame that
+    /// repaints them damages. `None` means nothing was named. Unlike a removal this walks the ids as they
+    /// come and leaves every index alone, so an element the selection does not hold cannot be reached.
+    pub fn recolour(&mut self, items: &[ItemId], color: &str) -> Option<Rect> {
+        let mut box_: Option<Rect> = None;
+        for id in items {
+            match *id {
+                ItemId::Stroke(i) => {
+                    if let Some(s) = self.strokes.get_mut(i) {
+                        s.color = color.to_string();
+                        union_into(&mut box_, s.bounds());
+                    }
+                }
+                ItemId::Text(i) => {
+                    if let Some(t) = self.texts.get_mut(i) {
+                        t.color = color.to_string();
+                        union_into(&mut box_, Some(t.paint_bounds()));
+                    }
+                }
+                ItemId::Shape(i) => {
+                    if let Some(s) = self.shapes.get_mut(i) {
+                        s.color = color.to_string();
+                        union_into(&mut box_, Some(s.bounds()));
+                    }
+                }
+                ItemId::Note(i) => {
+                    if let Some(n) = self.notes.get_mut(i) {
+                        n.color = color.to_string();
+                        union_into(&mut box_, Some(n.bounds()));
+                    }
+                }
+            }
+        }
+        box_
+    }
+
     pub fn remove(&mut self, items: &[ItemId]) -> Option<Rect> {
         let (mut strokes, mut texts, mut shapes, mut notes) =
             (Vec::new(), Vec::new(), Vec::new(), Vec::new());

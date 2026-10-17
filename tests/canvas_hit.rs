@@ -1268,3 +1268,51 @@ fn a_note_keeps_the_press_point_as_a_corner_however_the_drag_turns() {
         (origin[0], origin[1])
     );
 }
+
+#[test]
+fn a_colour_applies_to_every_element_the_selection_holds() {
+    use sgraffito::canvas::{Note, ShapeKind};
+    let mut a = OutputAnnotations {
+        strokes: vec![line(40.0, 20.0, 60.0)],
+        texts: vec![text(20.0, 80.0, "hello")],
+        shapes: vec![shape(ShapeKind::Rect, [10.0, 120.0], [60.0, 160.0])],
+        notes: vec![Note::new(100.0, 20.0, PALETTE[1], "2026/10/14".into())],
+    };
+    let kept = (a.texts[0].color.clone(), a.shapes[0].color.clone());
+    // A selection of a stroke and a note: both take the colour, and the box is the union of the two, which
+    // is what the frame that repaints them damages.
+    let box_ = a
+        .recolour(&[ItemId::Stroke(0), ItemId::Note(0)], PALETTE[3])
+        .expect("a selection was recoloured");
+    assert_eq!(a.strokes[0].color, PALETTE[3]);
+    assert_eq!(a.notes[0].color, PALETTE[3]);
+    assert_eq!(
+        a.texts[0].color, kept.0,
+        "an element the selection did not hold"
+    );
+    assert_eq!(
+        a.shapes[0].color, kept.1,
+        "an element the selection did not hold"
+    );
+    assert_eq!(
+        box_,
+        a.strokes[0].bounds().unwrap().union(a.notes[0].bounds())
+    );
+    // The other two kinds are reached the same way, and their indices are left alone.
+    let more = a
+        .recolour(&[ItemId::Text(0), ItemId::Shape(0)], PALETTE[2])
+        .expect("the other two kinds");
+    assert_eq!(a.texts[0].color, PALETTE[2]);
+    assert_eq!(a.shapes[0].color, PALETTE[2]);
+    assert_eq!(more, a.texts[0].paint_bounds().union(a.shapes[0].bounds()));
+    // Nothing held, or an id that names no element, changes nothing at all.
+    assert_eq!(a.recolour(&[], PALETTE[0]), None);
+    assert_eq!(
+        a.recolour(&[ItemId::Note(7), ItemId::Text(3)], PALETTE[0]),
+        None
+    );
+    assert_eq!(
+        a.notes[0].color, PALETTE[3],
+        "a stale id reached an element"
+    );
+}

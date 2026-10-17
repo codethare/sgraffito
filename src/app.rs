@@ -1306,6 +1306,38 @@ impl App {
         if idx < PALETTE.len() {
             self.color_idx = idx;
             self.refresh_toolbar();
+            self.recolour_selection(PALETTE[idx]);
+        }
+    }
+
+    /// The other half of a colour chip: what the selection holds takes the colour the chip shows, as one
+    /// document change reported at the union of the boxes those elements occupy. The selection is left
+    /// held, so a second chip recolours the same elements, and the frame stays where it was, which is what
+    /// shows the user what they just changed.
+    fn recolour_selection(&mut self, color: &str) {
+        let held: Vec<(u32, String, Vec<ItemId>)> = self
+            .outputs
+            .iter()
+            .filter_map(|(key, out)| {
+                out.overlay
+                    .selection
+                    .as_ref()
+                    .map(|s| (*key, out.bucket(*key).into_owned(), s.items.clone()))
+            })
+            .collect();
+        let mut changed = Vec::new();
+        for (key, bucket, items) in held {
+            if let Some(box_) = self
+                .doc
+                .outputs
+                .get_mut(&bucket)
+                .and_then(|ann| ann.recolour(&items, color))
+            {
+                changed.push((key, box_));
+            }
+        }
+        for (key, box_) in changed {
+            self.doc_changed_at(key, box_);
         }
     }
 

@@ -602,10 +602,9 @@ outside the box and is never repainted. `DamageRegion::from_logical` now grows t
 `DAMAGE_SLACK` (1 logical pixel), which fixes it for every element and every damage path at once.
 `a_note_dragged_left_leaves_no_trail_in_its_damage_box` (zoom 1 and 2).
 
-Related, not touched: `Stroke::bounds` measures the polyline and not the ink, so a *thick* pen stroke has
-the same overhang of `width / 2`. `Shape::bounds` grows by `width / 2 + 1 + head` already. Fixing
-`Stroke::bounds` would also change the marquee's wholly-inside rule, which is a behaviour change, so the
-1-pixel slack is what covers the thin case and the pen's overhang stays as it was.
+Correction to an earlier note here: `Stroke::bounds` does cover the stroke's width and its anti-aliasing
+edge (see `stroke_bounds_cover_the_width_and_handle_the_empty_and_single_case`), so the pen has no overhang
+of its own; only the hairline drawn on an element's edge needed the slack.
 
 ### The flicker when a note is pulled back in
 
@@ -616,3 +615,12 @@ so a clamped side reached back through the pointer. Pulling a note back in there
 out past the pointer and back on consecutive frames — a flicker on both sides, while every frame's damage
 box was correct. The press is now a corner of the note at every moment and each side is the distance the
 pointer moved from it. `a_note_keeps_the_press_point_as_a_corner_however_the_drag_turns`.
+
+### A colour chip recolours the selection (feature)
+
+`openspec/changes/selection-recolour/`. `OutputAnnotations::recolour` is the pure rule — per-kind, in
+place, indices untouched, returning the union of the boxes it changed — and `App::set_color` is the one
+entry point for a chip (the keys and a click both go through `apply_toolbar_action`), so the click arms the
+colour *and* applies it to whatever the selection holds, as one document change per bucket. All four kinds
+take the colour, notes included: a note's ink is derived from its background's brightness, so it follows on
+its own. The selection stays held.
