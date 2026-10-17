@@ -33,7 +33,7 @@ use crate::app::{
 };
 use crate::canvas::{
     Caret, ERASER_THRESHOLD, OutputAnnotations, Rect, SELECT_HANDLE_HIT, ShapeKind, Stroke,
-    TextBuffer, ZOOM_STEP, grab_at, selection_frame,
+    TextBuffer, ZOOM_STEP, constrained_drag, grab_at, selection_frame,
 };
 
 /// What a local key does while a text box is focused.
@@ -338,8 +338,11 @@ impl KeyboardHandler for App {
         _: RawModifiers,
         _: u32,
     ) {
-        // `Ctrl`+`V` pastes; the rest of the modifier state is not used yet.
+        // `Ctrl`+`V` pastes, and `Shift` and `Alt` constrain and copy a drag. The rest of the modifier
+        // state is not used.
         self.ctrl = modifiers.ctrl;
+        self.shift = modifiers.shift;
+        self.alt = modifiers.alt;
     }
 }
 
@@ -555,6 +558,11 @@ impl App {
     /// edit ends, then a selection is dropped, and only then does the daemon lock.
     fn escape(&mut self) {
         let mut abandoned = self.gesture.take().is_some();
+        // A drag that copied what it held made a document change, and aborting the gesture has to take it
+        // back: nothing a gesture does reaches the document until it is released.
+        if abandoned {
+            self.drop_duplicate();
+        }
         for out in self.outputs.values_mut() {
             if let Some(selection) = out.overlay.selection.as_mut() {
                 // The elements are the document's again, where the document still holds them.
@@ -728,6 +736,8 @@ impl App {
             }
             return;
         }
+        // Read before the output is borrowed: whether `Shift` is down is what constrains the drag.
+        let shift = self.shift;
         let Some(out) = self.outputs.get_mut(key) else {
             return;
         };
@@ -746,10 +756,13 @@ impl App {
                 stroke.points.push(canvas);
             }
             Tool::Eraser => out.overlay.eraser = Some(canvas),
-            // Only a press starts a shape: motion moves the second of its two points.
+            // Only a press starts a shape: motion moves the second of its two points, and `Shift`
+            // constrains where that point goes.
             Tool::Circle | Tool::Rect | Tool::Diamond | Tool::Line | Tool::Arrow => {
                 match out.overlay.shape.as_mut() {
-                    Some(shape) => shape.to = canvas,
+                    Some(shape) => {
+                        shape.to = constrained_drag(shape.kind, shape.from, canvas, shift)
+                    }
                     None => return,
                 }
             }

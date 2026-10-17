@@ -45,7 +45,7 @@ use crate::canvas::{
     Doc, ERASER_THRESHOLD, Gesture, Grab, Handle, ItemId, Note, OutputAnnotations, Overlay, Press,
     Rect, Selection, Shape, ShapeKind, TEXT_SIZE_MAX, TEXT_SIZE_MIN, TextBuffer, TextItem,
     TextOverlay, Toolbar, Transform, View, date_stamp, marquee_select, note_drag, selection_bounds,
-    selection_frame, selection_press,
+    selection_frame, selection_press, snap_square,
 };
 
 pub use crate::canvas::{PALETTE, Tool, ToolbarAction};
@@ -253,6 +253,12 @@ pub struct App {
     /// Whether the note being dragged out has been sized by its drag, which is what tells it from a
     /// click when the pointer is released.
     pub(crate) note_sized: bool,
+    /// What `Shift` and `Alt` are doing, tracked from the keyboard: a pointer event carries no modifier
+    /// state of its own on Wayland, so a drag has to read it here.
+    pub(crate) shift: bool,
+    pub(crate) alt: bool,
+    /// The copy the gesture in flight made, while it is still part of that gesture.
+    pending_duplicate: Option<Duplicate>,
     /// Whether the drawer of rarely used controls is open. Transient, like the selection.
     pub(crate) more: bool,
     /// Whether edit mode paints the backdrop. A preference about reading, so it is not persisted and a
@@ -287,6 +293,14 @@ pub(crate) struct PinchState {
     /// The cumulative scale of the last update: the protocol reports scale relative to the start, so
     /// consecutive updates need a ratio rather than a product.
     pub(crate) scale: f32,
+}
+
+/// The copy an `Alt` drag made: what was added to the document and what it was copied from, so `Esc` can
+/// put the document and the selection back where the press found them.
+struct Duplicate {
+    key: u32,
+    copies: Vec<ItemId>,
+    originals: Vec<ItemId>,
 }
 
 impl App {
@@ -356,6 +370,9 @@ impl App {
             selection_grab: None,
             note_origin: None,
             note_sized: false,
+            shift: false,
+            alt: false,
+            pending_duplicate: None,
             more: false,
             scrim: true,
             pan: None,
@@ -863,6 +880,7 @@ impl App {
             let frame = selection_frame(ann, &held, None);
             (press, frame, view.to_canvas([x, y]))
         };
+        let alt = self.alt;
         match press {
             // A gesture works in the document's own coordinates, because that is what the transform it
             // produces is applied to.
@@ -872,6 +890,7 @@ impl App {
                     frame.unwrap_or_default(),
                     at[0],
                     at[1],
+                    alt,
                 ));
                 self.sync_cursor();
             }
@@ -881,11 +900,12 @@ impl App {
                     frame.unwrap_or_default(),
                     at[0],
                     at[1],
+                    alt,
                 ));
             }
             Press::Element(id) => {
                 self.set_selection(key, vec![id], None);
-                self.gesture = Some(Gesture::start(None, Rect::default(), at[0], at[1]));
+                self.gesture = Some(Gesture::start(None, Rect::default(), at[0], at[1], alt));
             }
             Press::Marquee { canvas } => {
                 // The marquee is a canvas rectangle: the frame it is drawn in and the elements it
@@ -902,15 +922,17 @@ impl App {
         let Some(gesture) = self.gesture else {
             return;
         };
-        let Some(out) = self.outputs.get_mut(&key) else {
-            return;
-        };
         // The pointer reports screen coordinates and a gesture moves the document, so the pointer is
         // converted once here: without it the marquee and the drag drift away from the cursor as soon
         // as the view is panned or zoomed.
-        let at = out.view.to_canvas([x, y]);
+        let Some(at) = self.outputs.get(&key).map(|out| out.view.to_canvas([x, y])) else {
+            return;
+        };
         if let Gesture::Marquee { origin } = gesture {
             let marquee = Rect::from_corners(origin, at);
+            let Some(out) = self.outputs.get_mut(&key) else {
+                return;
+            };
             if out.overlay.marquee != Some(marquee) {
                 out.overlay.marquee = Some(marquee);
                 out.transient_dirty = true;
@@ -918,10 +940,27 @@ impl App {
             }
             return;
         }
-        let Some(transform) = gesture.transform(at) else {
+        let Some(transform) = gesture.transform(at, self.shift) else {
             return;
         };
+        // An `Alt` drag copies what it holds and then drags the copy, leaving the original where it was.
+        // The copy is made at the first movement, because a press that never moves still writes nothing,
+        // and the first movement is where the transform stops being the identity.
+        if matches!(
+            gesture,
+            Gesture::Move {
+                duplicate: true,
+                ..
+            }
+        ) && self.pending_duplicate.is_none()
+            && !transform.is_identity()
+        {
+            self.duplicate_selection(key);
+        }
         let next = (!transform.is_identity()).then_some(transform);
+        let Some(out) = self.outputs.get_mut(&key) else {
+            return;
+        };
         let Some(selection) = out.overlay.selection.as_mut() else {
             return;
         };
@@ -930,6 +969,64 @@ impl App {
             out.transient_dirty = true;
             self.dirty = true;
         }
+    }
+
+    /// Copy what the selection holds and hand the selection to the copies, so the gesture that is running
+    /// drags the copy while the original stays where it was. The copy is recorded until the gesture is
+    /// over, because `Esc` has to be able to take it back.
+    fn duplicate_selection(&mut self, key: u32) {
+        let Some(out) = self.outputs.get(&key) else {
+            return;
+        };
+        let Some(selection) = out.overlay.selection.as_ref() else {
+            return;
+        };
+        let originals = selection.items.clone();
+        let transform = selection.transform;
+        let bucket = out.bucket(key).into_owned();
+        let Some((copies, box_)) = self
+            .doc
+            .outputs
+            .get_mut(&bucket)
+            .map(|ann| ann.duplicate(&originals))
+        else {
+            return;
+        };
+        if copies.is_empty() {
+            return;
+        }
+        self.pending_duplicate = Some(Duplicate {
+            key,
+            copies: copies.clone(),
+            originals,
+        });
+        // The gesture names the copies from here on, so the transform the drag is carrying lands on them.
+        self.set_selection(key, copies, transform);
+        if let Some(box_) = box_ {
+            self.doc_changed_at(key, box_);
+        }
+    }
+
+    /// Take the copy of the gesture in flight back out of the document and give the selection back to the
+    /// elements it was made from: `Esc` on an `Alt` drag leaves the press's world exactly as it was.
+    pub(crate) fn drop_duplicate(&mut self) -> bool {
+        let Some(dup) = self.pending_duplicate.take() else {
+            return false;
+        };
+        let Some(out) = self.outputs.get(&dup.key) else {
+            return false;
+        };
+        let bucket = out.bucket(dup.key).into_owned();
+        let removed = self
+            .doc
+            .outputs
+            .get_mut(&bucket)
+            .and_then(|ann| ann.remove(&dup.copies));
+        self.set_selection(dup.key, dup.originals, None);
+        if let Some(box_) = removed {
+            self.doc_changed_at(dup.key, box_);
+        }
+        true
     }
 
     /// Let go of the pointer: a marquee becomes the selection, and a dragged gesture is written
@@ -1076,6 +1173,9 @@ impl App {
 
     /// Drop the selection everywhere, and the marquee with it. Returns whether anything was held.
     pub(crate) fn drop_selection(&mut self) -> bool {
+        // The record names indices, and a selection that has gone is not a gesture that can still be
+        // taken back: keeping it would let a later `Esc` remove whatever the indices point at then.
+        self.pending_duplicate = None;
         let mut dropped = false;
         for out in self.outputs.values_mut() {
             let had = out.overlay.selection.take().is_some() | out.overlay.marquee.take().is_some();
@@ -1246,6 +1346,9 @@ impl App {
                 };
             }
         }
+        // A copy the gesture made is ordinary content from here on: it has been dragged, and the gesture
+        // that owned it is over.
+        self.pending_duplicate = None;
         // The held elements are the document's again, so the raster has to hold them where they
         // now are: dropping the transform is what puts them back into it.
         if let Some(out) = self.outputs.get_mut(&key)
@@ -1605,9 +1708,15 @@ impl App {
         let Some(origin) = self.note_origin else {
             return;
         };
+        // `Shift` makes the note square, the way it makes a closed shape square.
+        let at = if self.shift {
+            snap_square(origin, [x, y])
+        } else {
+            [x, y]
+        };
         // The rule lives in `canvas::note_drag`, where a test can reach it: a pointer that has not moved
         // is not a drag, and a drag gives the rectangle it swept.
-        let Some(swept) = note_drag(origin, [x, y]) else {
+        let Some(swept) = note_drag(origin, at) else {
             return;
         };
         let Some(out) = self.outputs.get_mut(key) else {

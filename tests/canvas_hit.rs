@@ -371,8 +371,8 @@ fn a_corner_resize_keeps_the_opposite_corner_still() {
         h: 100.0,
     };
     // Press on the south-east corner and drag it to twice the distance from the north-west one.
-    let gesture = Gesture::start(Some(Grab::Handle(Handle::Se)), frame, 300.0, 200.0);
-    let t = gesture.transform([500.0, 300.0]).unwrap();
+    let gesture = Gesture::start(Some(Grab::Handle(Handle::Se)), frame, 300.0, 200.0, false);
+    let t = gesture.transform([500.0, 300.0], false).unwrap();
     let s = Stroke {
         color: "#ffffff".into(),
         width: 2.0,
@@ -396,8 +396,8 @@ fn an_edge_resize_scales_one_axis_and_grows_the_text() {
         w: 200.0,
         h: 100.0,
     };
-    let t = Gesture::start(Some(Grab::Handle(Handle::E)), frame, 300.0, 150.0)
-        .transform([500.0, 150.0])
+    let t = Gesture::start(Some(Grab::Handle(Handle::E)), frame, 300.0, 150.0, false)
+        .transform([500.0, 150.0], false)
         .unwrap();
     let s = stroke_at(100.0, 120.0);
     let scaled = t.stroke(&s);
@@ -410,12 +410,12 @@ fn an_edge_resize_scales_one_axis_and_grows_the_text() {
     );
 
     // A vertical resize is what grows a text box, and it stays within the size bounds.
-    let up = Gesture::start(Some(Grab::Handle(Handle::S)), frame, 200.0, 200.0)
-        .transform([200.0, 300.0])
+    let up = Gesture::start(Some(Grab::Handle(Handle::S)), frame, 200.0, 200.0, false)
+        .transform([200.0, 300.0], false)
         .unwrap();
     assert_eq!(up.text(&text(100.0, 100.0, "note")).size, 36.0);
-    let huge = Gesture::start(Some(Grab::Handle(Handle::S)), frame, 200.0, 200.0)
-        .transform([200.0, 20_000.0])
+    let huge = Gesture::start(Some(Grab::Handle(Handle::S)), frame, 200.0, 200.0, false)
+        .transform([200.0, 20_000.0], false)
         .unwrap();
     assert_eq!(huge.text(&text(100.0, 100.0, "note")).size, 72.0);
 }
@@ -430,8 +430,8 @@ fn a_frame_cannot_be_collapsed_or_mirrored() {
     };
     // Dragged far past the anchor: the factor stays positive and above the floor, so the elements
     // are still recoverable and nothing is mirrored.
-    let t = Gesture::start(Some(Grab::Handle(Handle::Se)), frame, 300.0, 200.0)
-        .transform([-9_000.0, -9_000.0])
+    let t = Gesture::start(Some(Grab::Handle(Handle::Se)), frame, 300.0, 200.0, false)
+        .transform([-9_000.0, -9_000.0], false)
         .unwrap();
     let scaled = t.stroke(&stroke_at(110.0, 110.0));
     assert!(scaled.points[0][0] < 110.0 && scaled.points[0][1] < 110.0);
@@ -450,8 +450,8 @@ fn a_rotation_turns_the_points_about_the_frames_centre_and_moves_the_text_uprigh
         h: 100.0,
     };
     // A quarter turn: the press is above the centre, the pointer to its right.
-    let t = Gesture::start(Some(Grab::Rotate), frame, 50.0, 0.0)
-        .transform([100.0, 50.0])
+    let t = Gesture::start(Some(Grab::Rotate), frame, 50.0, 0.0, false)
+        .transform([100.0, 50.0], false)
         .unwrap();
     let turned = t.stroke(&Stroke {
         color: "#ffffff".into(),
@@ -478,14 +478,24 @@ fn a_gesture_that_ends_where_it_started_changes_nothing() {
         h: 100.0,
     };
     for grab in [None, Some(Grab::Handle(Handle::Nw)), Some(Grab::Rotate)] {
-        let gesture = Gesture::start(grab, frame, 10.0, 10.0);
-        assert!(gesture.transform([10.0, 10.0]).unwrap().is_identity());
-        assert!(!gesture.transform([11.0, 10.0]).unwrap().is_identity());
+        let gesture = Gesture::start(grab, frame, 10.0, 10.0, false);
+        assert!(
+            gesture
+                .transform([10.0, 10.0], false)
+                .unwrap()
+                .is_identity()
+        );
+        assert!(
+            !gesture
+                .transform([11.0, 10.0], false)
+                .unwrap()
+                .is_identity()
+        );
     }
     // A marquee transforms nothing at all.
     assert!(
-        Gesture::start(None, frame, 10.0, 10.0)
-            .transform([90.0, 90.0])
+        Gesture::start(None, frame, 10.0, 10.0, false)
+            .transform([90.0, 90.0], false)
             .is_some()
     );
 }
@@ -506,7 +516,7 @@ fn a_marquee_gesture_transforms_nothing() {
     };
     assert_eq!(dragged.live(), &[ItemId::Stroke(0)]);
     let marquee = Gesture::Marquee { origin: [0.0, 0.0] };
-    assert!(marquee.transform([50.0, 50.0]).is_none());
+    assert!(marquee.transform([50.0, 50.0], false).is_none());
 }
 
 #[test]
@@ -1315,4 +1325,107 @@ fn a_colour_applies_to_every_element_the_selection_holds() {
         a.notes[0].color, PALETTE[3],
         "a stale id reached an element"
     );
+}
+
+#[test]
+fn a_copy_leaves_the_original_in_place_and_keeps_every_index() {
+    use sgraffito::canvas::{Note, ShapeKind};
+    let mut a = OutputAnnotations {
+        strokes: vec![line(10.0, 0.0, 40.0), line(60.0, 0.0, 90.0)],
+        texts: vec![text(0.0, 100.0, "one")],
+        shapes: vec![shape(ShapeKind::Rect, [0.0, 200.0], [40.0, 240.0])],
+        notes: vec![Note::new(100.0, 300.0, PALETTE[1], "2026/10/14".into())],
+    };
+    let originals = [ItemId::Stroke(0), ItemId::Shape(0), ItemId::Note(0)];
+    let (copies, box_) = a.duplicate(&originals);
+    // Appended, one per kind: the originals keep the indices they had.
+    assert_eq!(
+        copies,
+        vec![ItemId::Stroke(2), ItemId::Shape(1), ItemId::Note(1)]
+    );
+    assert_eq!(a.strokes[0].points, a.strokes[2].points);
+    assert_eq!(a.strokes[1].points, line(60.0, 0.0, 90.0).points);
+    assert_eq!(
+        box_.unwrap(),
+        a.strokes[2]
+            .bounds()
+            .unwrap()
+            .union(a.shapes[1].bounds())
+            .union(a.notes[1].bounds())
+    );
+    // Removing the copies by id puts the document back exactly as it was.
+    assert!(a.remove(&copies).is_some());
+    assert_eq!(
+        (
+            a.strokes.len(),
+            a.texts.len(),
+            a.shapes.len(),
+            a.notes.len()
+        ),
+        (2, 1, 1, 1)
+    );
+    assert_eq!(a.strokes[0].points, line(10.0, 0.0, 40.0).points);
+    // An id that names nothing copies nothing.
+    assert_eq!(a.duplicate(&[ItemId::Stroke(9)]).0.len(), 0);
+}
+
+#[test]
+fn shift_constrains_the_point_a_drag_draws_to() {
+    use sgraffito::canvas::{SHAPE_ANGLE_STEP, ShapeKind, constrained_drag, snap_square};
+    let origin = [100.0, 100.0];
+    // A line takes the nearest 15°, at the length the pointer asked for: 5.7° is far nearer flat than 15°.
+    let flat = constrained_drag(ShapeKind::Line, origin, [200.0, 110.0], true);
+    assert_eq!(flat[1], origin[1]);
+    assert!(flat[0] - origin[0] > 100.0, "the length was not kept");
+    // And a diagonal is reachable, not only the axes.
+    let diagonal = constrained_drag(ShapeKind::Arrow, origin, [200.0, 200.0], true);
+    let angle = (diagonal[1] - origin[1]).atan2(diagonal[0] - origin[0]);
+    assert!((angle - 3.0 * SHAPE_ANGLE_STEP).abs() < 1e-4, "{angle}");
+    // A closed kind is squared on the longer side of its box.
+    let square = constrained_drag(ShapeKind::Rect, origin, [300.0, 150.0], true);
+    assert_eq!(
+        (square[0] - origin[0], square[1] - origin[1]),
+        (200.0, 200.0)
+    );
+    // Switched off, the point is the pointer's own.
+    for kind in [ShapeKind::Line, ShapeKind::Circle] {
+        assert_eq!(
+            constrained_drag(kind, origin, [300.0, 150.0], false),
+            [300.0, 150.0]
+        );
+    }
+    // A square swept up and to the left goes that way, and a drag that did not move stays put.
+    assert_eq!(snap_square(origin, [40.0, 20.0]), [20.0, 20.0]);
+    assert_eq!(snap_square(origin, origin), origin);
+    let still = constrained_drag(ShapeKind::Line, origin, origin, true);
+    assert_eq!(still, origin);
+}
+
+#[test]
+fn shift_scales_both_axes_by_one_factor() {
+    use sgraffito::canvas::{Grab, Handle, Transform};
+    let frame = Rect {
+        x: 100.0,
+        y: 100.0,
+        w: 200.0,
+        h: 100.0,
+    };
+    let factors = |t: Transform| match t {
+        Transform::Scale { sx, sy, .. } => (sx, sy),
+        other => panic!("not a scale: {other:?}"),
+    };
+    // A corner handle: the pointer moved further along x, so both axes take the x factor.
+    let corner = Gesture::start(Some(Grab::Handle(Handle::Se)), frame, 300.0, 200.0, false);
+    let free = factors(corner.transform([500.0, 260.0], false).unwrap());
+    let uniform = factors(corner.transform([500.0, 260.0], true).unwrap());
+    assert!(free.0 > free.1, "the fixture is not lopsided: {free:?}");
+    assert_eq!(uniform, (free.0, free.0));
+    // An edge handle has only its own axis, so shrinking that edge shrinks both.
+    let edge = Gesture::start(Some(Grab::Handle(Handle::E)), frame, 300.0, 150.0, false);
+    let (sx, sy) = factors(edge.transform([200.0, 150.0], true).unwrap());
+    assert!(sx < 1.0, "the edge did not shrink: {sx}");
+    assert!((sx - sy).abs() < 1e-6, "{sx} != {sy}");
+    // And with `Shift` off, the two axes are independent again.
+    let (fx, fy) = factors(corner.transform([500.0, 260.0], false).unwrap());
+    assert!(fx > 1.0 && fy > 1.0 && (fx - fy).abs() > 1e-6, "{fx} {fy}");
 }

@@ -624,3 +624,29 @@ entry point for a chip (the keys and a click both go through `apply_toolbar_acti
 colour *and* applies it to whatever the selection holds, as one document change per bucket. All four kinds
 take the colour, notes included: a note's ink is derived from its background's brightness, so it follows on
 its own. The selection stays held.
+
+### Shift and Alt (feature)
+
+`openspec/changes/modifier-drags/`. Modifiers reach a drag from the **keyboard**, not the pointer:
+`update_modifiers` already kept `ctrl` for paste, and now keeps `shift` and `alt` beside it.
+
+- **`Alt` + a selection drag copies it.** The decision is read **at the press** and carried in the gesture
+  (`Gesture::Move { duplicate }`), because Excalidraw's own issue tracker treats reading it later as a bug
+  (issue #9750) — a copy appearing under an element that was only being moved is a copy nobody asked for.
+  The copy is made at the first movement (`OutputAnnotations::duplicate` **appends** per kind, so the
+  originals keep their indices), the selection is handed to the copies, and the drag's transform lands on
+  them, leaving the original in place (Excalidraw's PR #9403 fixed the opposite). `pending_duplicate`
+  records the copies and the originals so `Esc` can put both the document and the selection back — a
+  gesture still writes nothing until it is released. The record is cleared when a selection is dropped, so
+  a stale list of indices can never be applied to a document that moved on underneath it.
+- **`Shift` constrains**, read live so it can be added or dropped mid-drag: 15° for a line and an arrow
+  (`SHAPE_ANGLE_STEP`, the Excalidraw rule; the user chose it over axes only), equal sides for a closed
+  shape (`constrained_drag`) and for a note (`snap_square`), and one factor for both axes in
+  `Gesture::transform` — the factor of the axis the pointer moved further along, measured against 1.0 so a
+  shrink is not mistaken for standing still. An edge handle has one axis, so the edge the pointer is on
+  still follows the pointer exactly.
+
+Ceiling worth knowing: the copy is a document change made *during* a gesture, which is the one place the
+"gestures never touch the document" rule is relaxed — `Esc` is what makes it safe, and any new path that
+ends a gesture without going through `write_gesture` or `escape` would have to clear `pending_duplicate`
+too (`drop_selection` and `cancel_transient` do).

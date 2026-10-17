@@ -417,6 +417,48 @@ impl OutputAnnotations {
     /// an earlier element shifts every later one: without that, a selection holding two strokes would
     /// remove the second twice and leave the first drawn. An index that is no longer there is skipped,
     /// which is what lets a `clear` arriving mid-gesture leave nothing to resurrect.
+    /// A copy of every element `items` names, appended to its own list, one per kind, in the order it was
+    /// given: the ids of the copies, and the box they occupy. Appending is what keeps the originals at the
+    /// indices they had, so an element that is named elsewhere cannot be reached by a copy landing in the
+    /// middle of the list.
+    pub fn duplicate(&mut self, items: &[ItemId]) -> (Vec<ItemId>, Option<Rect>) {
+        let mut copies = Vec::with_capacity(items.len());
+        let mut box_: Option<Rect> = None;
+        for id in items {
+            match *id {
+                ItemId::Stroke(i) => {
+                    if let Some(s) = self.strokes.get(i).cloned() {
+                        copies.push(ItemId::Stroke(self.strokes.len()));
+                        union_into(&mut box_, s.bounds());
+                        self.strokes.push(s);
+                    }
+                }
+                ItemId::Text(i) => {
+                    if let Some(t) = self.texts.get(i).cloned() {
+                        copies.push(ItemId::Text(self.texts.len()));
+                        union_into(&mut box_, Some(t.paint_bounds()));
+                        self.texts.push(t);
+                    }
+                }
+                ItemId::Shape(i) => {
+                    if let Some(s) = self.shapes.get(i).cloned() {
+                        copies.push(ItemId::Shape(self.shapes.len()));
+                        union_into(&mut box_, Some(s.bounds()));
+                        self.shapes.push(s);
+                    }
+                }
+                ItemId::Note(i) => {
+                    if let Some(n) = self.notes.get(i).cloned() {
+                        copies.push(ItemId::Note(self.notes.len()));
+                        union_into(&mut box_, Some(n.bounds()));
+                        self.notes.push(n);
+                    }
+                }
+            }
+        }
+        (copies, box_)
+    }
+
     /// Recolour every element `items` names, returning the box they occupy, which is what the frame that
     /// repaints them damages. `None` means nothing was named. Unlike a removal this walks the ids as they
     /// come and leaves every index alone, so an element the selection does not hold cannot be reached.
@@ -837,6 +879,9 @@ pub enum Gesture {
     },
     Move {
         origin: [f32; 2],
+        /// Whether this drag copies what it holds, which is `Alt` read at the press: a copy that appeared
+        /// because a key was pressed while dragging would be a copy nobody asked for.
+        duplicate: bool,
     },
     Resize {
         handle: Handle,
@@ -851,8 +896,9 @@ pub enum Gesture {
 
 impl Gesture {
     /// The gesture a press at `(x, y)` starts: what it grabbed on the frame, or a move of the
-    /// elements already held when it grabbed nothing.
-    pub fn start(grab: Option<Grab>, frame: Rect, x: f32, y: f32) -> Gesture {
+    /// elements already held when it grabbed nothing. `alt` is read here and nowhere else, so whether a
+    /// drag copies is decided by the press.
+    pub fn start(grab: Option<Grab>, frame: Rect, x: f32, y: f32, alt: bool) -> Gesture {
         let origin = [x, y];
         match grab {
             Some(Grab::Handle(handle)) => Gesture::Resize {
@@ -864,17 +910,20 @@ impl Gesture {
                 pivot: frame.centre(),
                 origin,
             },
-            None => Gesture::Move { origin },
+            None => Gesture::Move {
+                origin,
+                duplicate: alt,
+            },
         }
     }
 
     /// The transform this gesture implies for a pointer now at `(x, y)`. A resize scales by the
     /// pointer's own displacement from where it went down, so a press that landed beside a handle
     /// does not make the frame jump. `None` for a marquee, which transforms nothing.
-    pub fn transform(self, at: [f32; 2]) -> Option<Transform> {
+    pub fn transform(self, at: [f32; 2], uniform: bool) -> Option<Transform> {
         Some(match self {
             Gesture::Marquee { .. } => return None,
-            Gesture::Move { origin } => Transform::Translate {
+            Gesture::Move { origin, .. } => Transform::Translate {
                 dx: at[0] - origin[0],
                 dy: at[1] - origin[1],
             },
@@ -893,19 +942,34 @@ impl Gesture {
                         ((now - a) / (o - a)).max(MIN_SCALE)
                     }
                 };
-                Transform::Scale {
-                    anchor,
-                    sx: if handle.moves_x() {
-                        factor(moving[0], anchor[0], origin[0], at[0])
+                let sx = if handle.moves_x() {
+                    factor(moving[0], anchor[0], origin[0], at[0])
+                } else {
+                    1.0
+                };
+                let sy = if handle.moves_y() {
+                    factor(moving[1], anchor[1], origin[1], at[1])
+                } else {
+                    1.0
+                };
+                // `Shift` keeps the shape of what is held: one factor for both axes. A corner handle has
+                // two to choose from and takes the one the pointer moved further along — measured against
+                // 1.0, so that a shrink is chosen over standing still — and an edge handle has only its
+                // own axis, so the edge the pointer is on still follows the pointer.
+                let (sx, sy) = if uniform {
+                    let s = if handle.moves_x()
+                        && handle.moves_y()
+                        && (sy - 1.0).abs() > (sx - 1.0).abs()
+                    {
+                        sy
                     } else {
-                        1.0
-                    },
-                    sy: if handle.moves_y() {
-                        factor(moving[1], anchor[1], origin[1], at[1])
-                    } else {
-                        1.0
-                    },
-                }
+                        sx
+                    };
+                    (s, s)
+                } else {
+                    (sx, sy)
+                };
+                Transform::Scale { anchor, sx, sy }
             }
             Gesture::Rotate { pivot, origin } => Transform::Turn {
                 pivot,
@@ -1157,6 +1221,52 @@ impl View {
 /// The size a note being dragged out gets: the rectangle the drag swept, in whichever direction it went,
 /// with each side no smaller than a note may be. `None` while the drag is smaller than that in both
 /// directions, which is a click — and a click keeps the default size rather than creating a sliver.
+/// The direction a constrained line or arrow snaps to, in radians: 15°, so horizontal, vertical and the
+/// diagonals are all reachable, which is the rule Excalidraw uses.
+pub const SHAPE_ANGLE_STEP: f32 = std::f32::consts::PI / 12.0;
+
+/// The second point of a shape's drag, constrained by `Shift`: a line or an arrow takes the nearest
+/// `SHAPE_ANGLE_STEP` direction at the length the pointer asked for, and a closed figure is measured on the
+/// longer side of its box so that both sides come out equal. The constraint is applied here, to the point
+/// every other part of the drag reads, so the live shape, its box and the element that is written agree.
+pub fn constrained_drag(
+    kind: ShapeKind,
+    origin: [f32; 2],
+    at: [f32; 2],
+    constrain: bool,
+) -> [f32; 2] {
+    if !constrain {
+        return at;
+    }
+    match kind {
+        ShapeKind::Line | ShapeKind::Arrow => {
+            let (dx, dy) = (at[0] - origin[0], at[1] - origin[1]);
+            let length = (dx * dx + dy * dy).sqrt();
+            if length <= f32::EPSILON {
+                return at;
+            }
+            let step = (dy.atan2(dx) / SHAPE_ANGLE_STEP).round() * SHAPE_ANGLE_STEP;
+            [
+                origin[0] + length * step.cos(),
+                origin[1] + length * step.sin(),
+            ]
+        }
+        ShapeKind::Circle | ShapeKind::Rect | ShapeKind::Diamond => snap_square(origin, at),
+    }
+}
+
+/// `at` moved onto the square that reaches as far as it does: the longer of the two sides, in the
+/// direction the pointer went. A rectangle's two points are its opposite corners, so this is what makes a
+/// dragged figure square — and what keeps a note's press a corner of it.
+pub fn snap_square(origin: [f32; 2], at: [f32; 2]) -> [f32; 2] {
+    let side = (at[0] - origin[0]).abs().max((at[1] - origin[1]).abs());
+    [
+        origin[0] + if at[0] < origin[0] { -side } else { side },
+        origin[1] + if at[1] < origin[1] { -side } else { side },
+    ]
+}
+
+/// Where the second point of a note's drag is, with `Shift`'s square applied first.
 pub fn note_drag(origin: [f32; 2], at: [f32; 2]) -> Option<Rect> {
     let swept = Rect::from_corners(origin, at);
     // What tells a click from a drag is the pointer having moved, not the note reaching its minimum:
