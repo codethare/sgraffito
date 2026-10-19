@@ -587,8 +587,17 @@ impl App {
     /// Open or close the drawer. It changes which controls exist, not the rail's height, so the rail's
     /// own box is what the next frame damages.
     pub(crate) fn toggle_more(&mut self) {
-        self.more = !self.more;
-        // A block that no longer exists cannot still own the pointer.
+        self.set_more(!self.more);
+    }
+
+    /// Open or close the drawer, the one place either happens: the list is a menu, so picking from it and
+    /// leaving it close it too, and all three paths have to leave the same state behind. A block that no
+    /// longer exists cannot still own the pointer, so the hover goes with the layout.
+    pub(crate) fn set_more(&mut self, open: bool) {
+        if self.more == open {
+            return;
+        }
+        self.more = open;
         self.toolbar_hover = None;
         self.toolbar_hover_since = None;
         self.refresh_toolbar();

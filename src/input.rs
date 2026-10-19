@@ -35,6 +35,7 @@ use crate::canvas::{
     Caret, ERASER_THRESHOLD, OutputAnnotations, Rect, SELECT_HANDLE_HIT, ShapeKind, Stroke,
     TextBuffer, ZOOM_STEP, constrained_drag, grab_at, selection_frame,
 };
+use crate::render::{drawer_stays_open, picks_from_drawer};
 
 /// What a local key does while a text box is focused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -785,6 +786,13 @@ impl App {
         // The hit test uses the layout the frame drew, so a block that has already stretched
         // keeps the pointer on itself out to the end of its capsule.
         let hover = self.toolbar_hit(key, x, y);
+        // The drawer is a menu: it closes as soon as the pointer is off the `more` block and off its own
+        // controls, so it never sits open beside the rail while the pointer is somewhere else. The hover is
+        // worked out against the layout the frame drew, which is the open one, so the rail's own blocks are
+        // still where the pointer saw them.
+        if self.more && !drawer_stays_open(hover) {
+            self.set_more(false);
+        }
         if hover != self.toolbar_hover {
             self.toolbar_hover = hover;
             // A fresh block opens from nothing; leaving the rail closes immediately.
@@ -821,6 +829,12 @@ impl App {
             ToolbarAction::More => self.toggle_more(),
             ToolbarAction::Scrim => self.toggle_scrim(),
             ToolbarAction::Lock => {}
+        }
+        // One click on something in the drawer both does the thing and puts the list away, the way a menu
+        // closes after its item is chosen. A rail block needs no rule here: the pointer reached it, so the
+        // drawer had already closed on the way.
+        if picks_from_drawer(action) {
+            self.set_more(false);
         }
     }
 

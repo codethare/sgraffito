@@ -314,25 +314,49 @@ fn toolbar_blocks(toolbar: &Toolbar) -> Vec<Block> {
     blocks
 }
 
+/// The controls the drawer holds: the rail has no room for them, so they live in the list the `more`
+/// block opens. This is the one list of who they are — `drawer_blocks` is what they look like — so the
+/// rules that open and close the drawer cannot disagree with what it shows.
+pub const DRAWER: [ToolbarAction; 1] = [ToolbarAction::Scrim];
+
+/// Whether applying `action` is picking something out of the drawer, which closes it: a list is opened to
+/// pick from, not to look at.
+pub fn picks_from_drawer(action: ToolbarAction) -> bool {
+    DRAWER.contains(&action)
+}
+
+/// Whether the drawer stays open with the pointer on `hover`: on the block that opened it, or on one of
+/// its own controls. Anywhere else — including off the rail entirely — closes it, so the list never sits
+/// open beside the rail while the pointer is somewhere else.
+pub fn drawer_stays_open(hover: Option<ToolbarAction>) -> bool {
+    hover == Some(ToolbarAction::More) || hover.is_some_and(picks_from_drawer)
+}
+
 /// The drawer's residents: the controls the rail has no room for. Their own height is what the drawer's
-/// column is, and this one list is what the drawer shows and what the `more` block says is in there, so a
-/// control cannot be in the drawer and missing from the list.
+/// column is, and this one list is what the drawer shows, what the `more` block says is in there, and what
+/// the rules that open and close it are built from.
 fn drawer_blocks(toolbar: &Toolbar) -> Vec<Block> {
-    vec![Block {
-        mark: Mark::Icon(Icon::Scrim),
-        column: 1,
-        label: labelled(
-            ToolbarAction::Scrim,
-            if toolbar.scrim {
-                "backdrop: on"
-            } else {
-                "backdrop: off"
-            },
-        ),
-        action: Some(ToolbarAction::Scrim),
-        active: toolbar.scrim,
-        gap: 0.0,
-    }]
+    DRAWER
+        .iter()
+        .filter_map(|action| match action {
+            ToolbarAction::Scrim => Some(Block {
+                mark: Mark::Icon(Icon::Scrim),
+                column: 1,
+                label: labelled(
+                    *action,
+                    if toolbar.scrim {
+                        "backdrop: on"
+                    } else {
+                        "backdrop: off"
+                    },
+                ),
+                action: Some(*action),
+                active: toolbar.scrim,
+                gap: 0.0,
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 /// What the `more` block reports while the pointer is on it: what is in the drawer, or `None` while the
@@ -2214,6 +2238,34 @@ fn fill(pixmap: &mut PixmapMut, x: f32, y: f32, w: f32, h: f32, color: Color) {
 mod tests {
     use super::*;
     use crate::canvas::{Note, View};
+
+    /// Who is in the drawer is one list, and both of the rules that close it are built from that list.
+    #[test]
+    fn the_drawer_and_its_closing_rules_name_the_same_controls() {
+        let rail = crate::render::tests::rail_for_legend();
+        let blocks = drawer_blocks(&rail);
+        assert_eq!(
+            blocks.len(),
+            DRAWER.len(),
+            "a control in the drawer has no block, or the other way round"
+        );
+        for block in &blocks {
+            let action = block.action.expect("a drawer control is an action");
+            assert!(DRAWER.contains(&action), "{action:?} is not in DRAWER");
+        }
+        // Picking one of them closes the drawer; picking anything else leaves the rule out of it.
+        for action in DRAWER {
+            assert!(picks_from_drawer(action));
+        }
+        assert!(!picks_from_drawer(ToolbarAction::More));
+        assert!(!picks_from_drawer(ToolbarAction::Tool(Tool::Pen)));
+        // And it stays open only while the pointer is on the block or on its own controls.
+        assert!(drawer_stays_open(Some(ToolbarAction::More)));
+        assert!(drawer_stays_open(Some(DRAWER[0])));
+        assert!(!drawer_stays_open(None));
+        assert!(!drawer_stays_open(Some(ToolbarAction::Tool(Tool::Pen))));
+        assert!(!drawer_stays_open(Some(ToolbarAction::Color(0))));
+    }
 
     /// The drawer hangs off the block that opens it: its controls start on the `more` block's row, and a
     /// list too tall for the rows below grows upwards instead of leaving the column.

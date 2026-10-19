@@ -675,3 +675,17 @@ and height are untouched (`TOOLBAR_COLUMN`'s debug assertion still holds), and t
 `toolbar_bounds`. The hover legend from `drawer-hover-list` still sits where the list's first item will be,
 so the closed and open states read as the same thing. `the_drawer_hangs_off_the_more_block` checks the row,
 the column's bounds and that the rail does not move.
+
+### The drawer is a menu now (feature)
+
+`openspec/changes/drawer-closes-itself/`. The user asked for "选完即关、光标移开即关". `DRAWER` is the one list of
+what the drawer holds; `picks_from_drawer` and `drawer_stays_open` are the two rules, both pure and both
+built from that list, so the layout, the hover legend and the closing rules cannot drift apart.
+`App::set_more(open)` is the single place the drawer is opened or closed (it clears the hover too, because a
+block that no longer exists cannot own the pointer); `toggle_more` is a call to it, the pick rule is applied
+where a toolbar action is applied, and the leave rule where the pointer's hover is updated — the first motion
+onto anything other than `more` or a drawer control closes it, with no timer and no polling.
+
+The click on a rail block needs no rule of its own: the pointer had to reach that block, so the drawer was
+already closed on the way (`update_toolbar_hover`). That is also why the spec's scenario for it says "already
+closed" rather than adding a second mechanism.
