@@ -2361,3 +2361,53 @@ fn switching_the_backdrop_repaints_the_whole_surface() {
         );
     }
 }
+
+#[test]
+fn hovering_the_more_block_paints_the_drawer_list_inside_the_rails_box() {
+    // Tall enough for the whole rail: the `more` block is near its bottom.
+    let (w, h) = (600u32, 820u32);
+    let view = View::default();
+    let rail = |hover: Option<ToolbarAction>| toolbar(Tool::Pen, PALETTE[0], 3.0, hover);
+    let draw = |t: Toolbar| {
+        let mut buf = buffer(w, h);
+        Renderer::new().render(
+            &mut buf,
+            w,
+            h,
+            1.0,
+            view,
+            &OutputAnnotations::default(),
+            &Overlay {
+                toolbar: Some(t),
+                ..Default::default()
+            },
+            None,
+        );
+        buf
+    };
+    let (hovered, bare) = (draw(rail(Some(ToolbarAction::More))), draw(rail(None)));
+    // Everything the legend adds is inside the box the rail declares, which is what a rail-only frame
+    // repaints: a line outside it would be left behind the moment the pointer moved on.
+    let box_ = toolbar_bounds(w as f32, h as f32);
+    let mut painted = 0;
+    let mut rows = (f32::MAX, 0.0f32);
+    for (i, (a, b)) in hovered.chunks(4).zip(bare.chunks(4)).enumerate() {
+        if a == b {
+            continue;
+        }
+        let (x, y) = ((i as u32 % w) as f32, (i as u32 / w) as f32);
+        assert!(
+            box_.contains(x, y),
+            "the drawer list painted at {x},{y}, outside the rail's box"
+        );
+        rows = (rows.0.min(y), rows.1.max(y));
+        painted += 1;
+    }
+    assert!(painted > 0, "nothing was drawn for the drawer list");
+    // The capsule and its own label are one block tall (30), so anything taller than that is the second
+    // line the legend adds under them.
+    assert!(
+        rows.1 - rows.0 > 40.0,
+        "nothing was drawn under the capsule: {rows:?}"
+    );
+}

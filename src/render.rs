@@ -309,23 +309,42 @@ fn toolbar_blocks(toolbar: &Toolbar) -> Vec<Block> {
     // The drawer: a second column for the controls that are not used often. Its own height is whatever
     // its residents need, so the rail's height is the same whether it is open or closed.
     if toolbar.more {
-        blocks.push(Block {
-            mark: Mark::Icon(Icon::Scrim),
-            column: 1,
-            label: labelled(
-                ToolbarAction::Scrim,
-                if toolbar.scrim {
-                    "backdrop: on"
-                } else {
-                    "backdrop: off"
-                },
-            ),
-            action: Some(ToolbarAction::Scrim),
-            active: toolbar.scrim,
-            gap: 0.0,
-        });
+        blocks.extend(drawer_blocks(toolbar));
     }
     blocks
+}
+
+/// The drawer's residents: the controls the rail has no room for. Their own height is what the drawer's
+/// column is, and this one list is what the drawer shows and what the `more` block says is in there, so a
+/// control cannot be in the drawer and missing from the list.
+fn drawer_blocks(toolbar: &Toolbar) -> Vec<Block> {
+    vec![Block {
+        mark: Mark::Icon(Icon::Scrim),
+        column: 1,
+        label: labelled(
+            ToolbarAction::Scrim,
+            if toolbar.scrim {
+                "backdrop: on"
+            } else {
+                "backdrop: off"
+            },
+        ),
+        action: Some(ToolbarAction::Scrim),
+        active: toolbar.scrim,
+        gap: 0.0,
+    }]
+}
+
+/// What the `more` block reports while the pointer is on it: what is in the drawer, or `None` while the
+/// drawer is open, because then its controls are on screen and each is named by its own block.
+fn drawer_legend(toolbar: &Toolbar) -> Option<String> {
+    (!toolbar.more).then(|| {
+        drawer_blocks(toolbar)
+            .iter()
+            .map(|block| block.label.clone())
+            .collect::<Vec<_>>()
+            .join("   ")
+    })
 }
 
 pub struct Renderer {
@@ -913,6 +932,34 @@ impl Renderer {
                     },
                     None,
                     Some(ox + width),
+                    None,
+                );
+            }
+            // The `more` block states what the drawer holds, on a line under its own label: a control
+            // nobody can find is a control nobody uses. It goes in the drawer's own column, which is
+            // empty while the drawer is closed, and it is not drawn while the drawer is open — then the
+            // controls are on screen, each named by its own block.
+            if control.stretched
+                && control.block.action == Some(ToolbarAction::More)
+                && let Some(legend) = drawer_legend(toolbar)
+            {
+                let item = toolbar_text(
+                    ox + TOOLBAR_DRAWER_X,
+                    oy + control.y + TOOLBAR_BLOCK + TOOLBAR_LABEL_GAP,
+                    TOOLBAR_BLOCK,
+                    TOOLBAR_TEXT_SIZE,
+                    TOOLBAR_LABEL_TEXT,
+                    &legend,
+                );
+                self.draw_text(
+                    pixmap,
+                    &item,
+                    Screen {
+                        scale,
+                        view: View::default(),
+                    },
+                    None,
+                    None,
                     None,
                 );
             }
@@ -2148,7 +2195,45 @@ mod tests {
     use super::*;
     use crate::canvas::{Note, View};
 
-    /// The raster is keyed by the backing it was painted on, so a switch of the backdrop cannot reuse it.
+    /// The `more` block reports the drawer's own controls, and only while the drawer is shut: its one
+    /// list is the drawer's, so the two cannot disagree.
+    #[test]
+    fn the_more_block_lists_what_is_in_the_drawer() {
+        let rail = |more: bool| Toolbar {
+            more,
+            ..crate::render::tests::rail_for_legend()
+        };
+        let closed = drawer_legend(&rail(false)).expect("a list while the drawer is shut");
+        let residents: Vec<String> = drawer_blocks(&rail(false))
+            .iter()
+            .map(|block| block.label.clone())
+            .collect();
+        assert!(!residents.is_empty(), "the drawer has no residents");
+        for name in residents {
+            assert!(closed.contains(&name), "{closed} does not name {name}");
+        }
+        assert!(closed.contains("(B)"), "the key is not stated: {closed}");
+        assert_eq!(
+            drawer_legend(&rail(true)),
+            None,
+            "the list repeated the drawer"
+        );
+    }
+
+    /// The rail with the pen armed, for the tests that only need a toolbar to look at.
+    fn rail_for_legend() -> Toolbar {
+        Toolbar {
+            tool: Tool::Pen,
+            color: crate::canvas::PALETTE[0],
+            size: 3.0,
+            hover: None,
+            grow: 0.0,
+            more: false,
+            scrim: true,
+        }
+    }
+
+    /// The identity view at a given output scale, for the tests that only care about the document., so a switch of the backdrop cannot reuse it.
     #[test]
     fn the_raster_is_rebuilt_when_the_backdrop_changes() {
         let key = |scrim| BaseKey {

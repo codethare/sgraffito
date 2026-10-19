@@ -650,3 +650,17 @@ Ceiling worth knowing: the copy is a document change made *during* a gesture, wh
 "gestures never touch the document" rule is relaxed — `Esc` is what makes it safe, and any new path that
 ends a gesture without going through `write_gesture` or `escape` would have to clear `pending_duplicate`
 too (`drop_selection` and `cancel_transient` do).
+
+### The backdrop switch, and the `more` block's list (this round)
+
+- **`toggle_scrim` never told the outputs.** The frame reads the scrim from the toolbar each *output* holds
+  (`overlay.toolbar.scrim`), and `toggle_scrim` flipped only `App::scrim` — no `refresh_toolbar`, unlike
+  `toggle_more`, which does refresh. So the frame went on painting the backing it had, and the switch only
+  showed after a mode switch rebuilt the surfaces. One line fixes it, and `mark_all_dirty` (which was
+  already there) is what makes the frame whole-surface. Tests:
+  `switching_the_backdrop_repaints_the_whole_surface` (pixels well away from the rail lose the scrim) and
+  an inline `the_raster_is_rebuilt_when_the_backdrop_changes` (`BaseKey` carries the backing).
+- **The `more` block lists the drawer.** `drawer_blocks` is now the one place the drawer's residents are
+  described; `drawer_legend` is the same list as a string, drawn under the `more` capsule in the drawer's
+  own column while that block is hovered and only while the drawer is shut (an open drawer names its own
+  controls, and its column is then occupied). `openspec/changes/drawer-hover-list/`.
