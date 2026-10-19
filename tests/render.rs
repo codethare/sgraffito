@@ -1836,8 +1836,8 @@ fn the_drawer_opens_beside_the_rail_without_moving_it() {
         "the backdrop's switch is not on the rail while the drawer is closed"
     );
 
-    // Open, the switch is in the second column, on the row of the block that opened it — the drawer is
-    // that block's own list, so it starts there and not at the top of the rail.
+    // Open, the switch is a row of the panel in the second column, above the row of the block that opened
+    // it: the panel never shares that block's band, which the block's own hover capsule uses.
     let band = toolbar_bounds(fw, fh);
     let column_x = band.x + 1.0 + 30.0 + 4.0 + 15.0;
     let mut more_row = None;
@@ -1850,9 +1850,24 @@ fn the_drawer_opens_beside_the_rail_without_moving_it() {
         }
     }
     let more_row = more_row.expect("the more block is on the rail");
+    let panel_row = (1..band.h as u32)
+        .map(|step| band.y + step as f32)
+        .find(|y| renderer.toolbar_hit(&open, fw, fh, column_x, *y) == Some(ToolbarAction::Scrim))
+        .expect("the panel's row is not reachable at all");
+    assert!(
+        panel_row < more_row,
+        "the panel's row {panel_row} is not above the block's {more_row}"
+    );
+    // The corridor reaches exactly to the panel's edge: one step left of the panel's first column is still
+    // the block, so the pointer can travel from the block into the panel without crossing a gap that owns
+    // nothing and would close it. Both ends come from the same layout.
+    let panel_left = (1..band.w as u32)
+        .map(|step| band.x + step as f32)
+        .find(|x| renderer.toolbar_hit(&open, fw, fh, *x, panel_row) == Some(ToolbarAction::Scrim))
+        .expect("the panel's left edge");
     assert_eq!(
-        renderer.toolbar_hit(&open, fw, fh, column_x, more_row),
-        Some(ToolbarAction::Scrim)
+        renderer.toolbar_hit(&open, fw, fh, panel_left - 1.0, more_row),
+        Some(ToolbarAction::More)
     );
     // Nothing of the drawer is at the top of its column: the list hangs off the block, not the rail.
     assert_eq!(
@@ -2424,5 +2439,52 @@ fn hovering_the_more_block_paints_the_drawer_list_inside_the_rails_box() {
     assert!(
         rows.1 - rows.0 > 40.0,
         "nothing was drawn under the capsule: {rows:?}"
+    );
+}
+
+#[test]
+fn a_row_of_the_panel_can_be_clicked_with_the_pointer_on_the_block_that_opened_it() {
+    // The regression the panel exists to fix: in the shipped build every press along the panel's row was
+    // read as a press on `more`, because that block's hover capsule is up to 200 pt wide and the rail's hit
+    // boxes are the ones tested first — so the panel's only control could not be clicked at all, and
+    // clicking it closed the menu instead.
+    let (w, h) = (900u32, 820u32);
+    let toolbar = Toolbar {
+        tool: Tool::Pen,
+        color: PALETTE[0],
+        size: 3.0,
+        hover: Some(ToolbarAction::More),
+        grow: 1.0,
+        more: true,
+        scrim: true,
+    };
+    let mut renderer = Renderer::new();
+    let band = toolbar_bounds(w as f32, h as f32);
+    let hit = |renderer: &mut Renderer, x: f32, y: f32| {
+        renderer.toolbar_hit(&toolbar, w as f32, h as f32, band.x + x, band.y + y)
+    };
+    let more_row = (1..band.h as u32)
+        .map(|step| step as f32)
+        .find(|y| hit(&mut renderer, 15.0, *y) == Some(ToolbarAction::More))
+        .expect("the more block is on the rail");
+    // The panel's row, found by looking above the block: this is the assertion. Before the fix there was no
+    // y at which the panel's control answered at all.
+    let row = (1..400)
+        .map(|step| more_row - step as f32)
+        .find(|y| *y > 0.0 && hit(&mut renderer, 60.0, *y) == Some(ToolbarAction::Scrim));
+    assert!(
+        row.is_some(),
+        "the panel's control is not reachable with the pointer on the block"
+    );
+    // The corridor is still the block: the row band of the block, out to the panel's left edge.
+    assert_eq!(
+        hit(&mut renderer, 40.0, more_row),
+        Some(ToolbarAction::More)
+    );
+    // And the block's own row is clear of the panel, so the two never answer for the same point.
+    assert_ne!(
+        hit(&mut renderer, 60.0, more_row),
+        Some(ToolbarAction::Scrim),
+        "a panel row shares the block's band"
     );
 }

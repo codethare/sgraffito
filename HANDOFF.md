@@ -689,3 +689,35 @@ onto anything other than `more` or a drawer control closes it, with no timer and
 The click on a rail block needs no rule of its own: the pointer had to reach that block, so the drawer was
 already closed on the way (`update_toolbar_hover`). That is also why the spec's scenario for it says "already
 closed" rather than adding a second mechanism.
+
+### The drawer is a menu panel (feature)
+
+`openspec/changes/drawer-menu-panel/`, the design being the user's approved proposal with one correction they
+raised themselves: **the `more` block takes no state mark while its panel is open.** The accent on the rail
+means "the item that is on in the list it belongs to" (the armed tool, the active colour), so accenting a block
+that merely opened a menu would put two accented blocks on the screen at once, one of them not a tool. The panel
+hanging off it is the state.
+
+What the panel is: a plate (rail's fill, radius and inset), one row per control stating its icon, its name and
+its key **at rest** — the one deliberate departure from "a control shows one thing at rest", because a menu row
+is read and compared rather than aimed at — and the row of a control that is on takes the accent. Its rows start
+`TOOLBAR_GAP` above the `more` block's own row and grow upwards, so the block's band holds only the block and its
+hover capsule, which is kept.
+
+Measured before the change (`more: true, hover: Some(More)`, hit test along the panel's row): every x from 40 to
+120 returned `More`, so the panel's control was unclickable — the capsule is up to 200pt wide and the rail's hit
+boxes are tested first. Fixed by the corridor (the `more` row's box reaches exactly to the panel's left edge,
+`TOOLBAR_DRAWER_X`) and by moving the rows clear of that row; `a_row_of_the_panel_can_be_clicked_with_the_pointer_on_the_block_that_opens_it`
+is the regression test, and it asserts the case that used to be impossible.
+
+Geometry is computed once in `toolbar_pill` (`panel_top`, and the plate box on `ToolbarPill::panel`), and both the
+painting and the hit boxes read it — the user asked for exactly that, having seen the anchor and the corridor
+drift apart once already. Drawer rows also get their own width ceiling (`ceiling - TOOLBAR_DRAWER_X`), because a
+row that starts a column to the right would otherwise reach past the reserve and out of `toolbar_bounds`.
+
+Note for that regression test: the corridor's width is `TOOLBAR_DRAWER_X` (34 pt), *not* the 54 pt I had
+assumed when first writing it — the test now finds the panel's left edge by probing for the row's action and
+asserts that one step left of it is still the block, so the corridor and the row are checked against each
+other rather than against a number I typed.
+
+Not testable here: `Esc` closing the panel first (App-level, needs a session).

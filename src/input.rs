@@ -558,6 +558,12 @@ impl App {
     /// keystroke is a request to abort, unlike the interruptions that commit — then a text box under
     /// edit ends, then a selection is dropped, and only then does the daemon lock.
     fn escape(&mut self) {
+        // An open menu is the most transient thing on the screen, so it closes first: a second `Esc` then
+        // does whatever it did before the menu was opened.
+        if self.more {
+            self.set_more(false);
+            return;
+        }
         let mut abandoned = self.gesture.take().is_some();
         // A drag that copied what it held made a document change, and aborting the gesture has to take it
         // back: nothing a gesture does reaches the document until it is released.
