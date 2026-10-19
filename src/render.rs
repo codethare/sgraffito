@@ -2435,6 +2435,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn zz_dump_rail_rows() {
+        let mut renderer = Renderer::new();
+        let pill = renderer.toolbar_pill(&crate::render::tests::rail_for_legend(), 900.0);
+        for control in &pill.controls {
+            if control.block.column == 0
+                && let Some(action) = control.block.action
+            {
+                eprintln!("ROW {:?} y={} width={}", action, control.y, control.width);
+            }
+        }
+        eprintln!("COLUMN {}", TOOLBAR_COLUMN);
+    }
+
     /// The `more` block reports the drawer's own controls, and only while the drawer is shut: its one
     /// list is the drawer's, so the two cannot disagree.
     #[test]

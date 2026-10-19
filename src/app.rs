@@ -1771,11 +1771,17 @@ impl App {
         };
         out.transient_dirty = true;
         let bucket = out.bucket(*key).into_owned();
+        let box_ = note.bounds();
         let index = {
             let ann = self.doc.outputs.entry(bucket).or_default();
             ann.notes.push(note);
             ann.notes.len() - 1
         };
+        // A note's own creation is a document change like any other, and it is the change the debounced save
+        // hangs off: without this the note was on the screen and in memory but not in the store's dirty flag,
+        // so a session that ended before the edit did — a crash, a `SIGKILL` — lost a note that had just been
+        // dragged out. Every other commit path reports its box here; this one did not.
+        self.doc_changed_at(*key, box_);
         self.enter_note(key, index);
     }
 

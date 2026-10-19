@@ -217,11 +217,110 @@ assert ink == 0, f"the screen still has content after clear (ink={ink})"
 print("  screen empty after clear ok")
 PY
 
-# 5. a second daemon is rejected
+# 5. injected pointer input. A headless seat has no pointer at all, so the paths only a pointer reaches —
+# the hover, a click on a block, a drag that draws, the eraser's hit test, a note's own drag, a selection
+# drag — are given one through `zwlr_virtual_pointer_manager_v1`, which sway advertises. Coordinates are the
+# layout's: a point on HEADLESS-1 is its own x plus the 400 the other output takes, and a rail block is at
+# the y the rail lays it out at, its centre 15 below that row's top (the rows `toolbar_pill` computes, which
+# `the_panel_clears_the_block_that_opens_it` and the debug assertion on `TOOLBAR_COLUMN` keep honest).
+# The locked surface is click-through — the input region is empty — so the pointer has to have a mode to
+# act in: enter edit mode and let the surfaces that replace it be mapped.
+"$bin" edit > /dev/null || fail "edit before the pointer stage failed"
+sleep 0.8
+cargo build --example vinject >/dev/null 2>&1 || fail "the pointer injector did not build"
+vinject=target/debug/examples/vinject
+layout=1200x600
+h1=400
+rail=$((h1 + 23))
+annotations="$XDG_DATA_HOME/sgraffito/annotations.json"
+kinds() {
+    python3 -c "
+import json
+ann = json.load(open('$annotations'))['outputs'].get('HEADLESS-1', {})
+print(' '.join(f'{kind}={len(ann.get(kind, []))}' for kind in ('strokes', 'texts', 'shapes', 'notes')))
+"
+}
+
+# 5a. the blue chip arms the colour, the pen's block arms the pen, and the drag draws a stroke that reaches
+# both the file and the surface.
+"$vinject" "$layout" seq <<VINJECT
+click $rail 131
+click $rail 205
+drag $((h1 + 50)) 300 $((h1 + 250)) 420 8
+sleep 1500
+VINJECT
+[ "$(kinds)" = "strokes=1 texts=0 shapes=0 notes=0" ] || fail "the injected drag left $(kinds)"
+python3 - "$annotations" <<PY || exit 1
+import json, sys
+stroke = json.load(open(sys.argv[1]))["outputs"]["HEADLESS-1"]["strokes"][0]
+assert stroke["color"] == "#3584e4", f"the colour chip did not arm: {stroke['color']}"
+first, last = stroke["points"][0], stroke["points"][-1]
+assert abs(first[0] - 50) < 8 and abs(last[1] - 420) < 8, stroke["points"]
+print(f"  injected stroke ok: {stroke['color']} {first} -> {last}")
+PY
+grim -o HEADLESS-1 -t ppm "$work/pointer.ppm" 2>/dev/null || fail "grim after the injected drag failed"
+python3 - "$work/pointer.ppm" <<PY || exit 1
+import sys
+d = open(sys.argv[1], 'rb').read()
+hdr = d[:d.index(b'255\n') + 4].split()
+w, h = int(hdr[1]), int(hdr[2])
+px = d[d.index(b'255\n') + 4:]
+# The blue chip's stroke over the 90% scrim: its blue dominates its red, which the scrim's grey does not.
+ink = sum(1 for y in range(290, 440) for x in range(40, 270)
+          if px[(y * w + x) * 3 + 2] > px[(y * w + x) * 3] + 40)
+assert ink > 50, f"the stroke was not painted on the surface (ink={ink})"
+print(f"  injected stroke painted: ink={ink}")
+PY
+
+# 5b. the eraser's hit test, through a pointer: arm it by its block and click the stroke away.
+"$vinject" "$layout" seq <<VINJECT
+click $rail 239
+click $((h1 + 150)) 360
+sleep 1500
+VINJECT
+grep -q "tool switched to Eraser" "$work/daemon.log" || fail "the eraser's block was not clicked"
+[ "$(kinds)" = "strokes=0 texts=0 shapes=0 notes=0" ] || fail "the eraser left $(kinds)"
+
+# 5c. a note is created by the drag that sizes it. This is the path that silently wrote nothing until the
+# gesture was wired to the document, and the drag's own size — not the note's default — is what proves it.
+"$vinject" "$layout" seq <<VINJECT
+click $rail 545
+drag $((h1 + 120)) 120 $((h1 + 300)) 260 8
+sleep 1500
+VINJECT
+grep -q "tool switched to Note" "$work/daemon.log" || fail "the note's block was not clicked"
+python3 - "$annotations" <<PY || exit 1
+import json, sys
+notes = json.load(open(sys.argv[1]))["outputs"]["HEADLESS-1"]["notes"]
+assert len(notes) == 1, f"{len(notes)} notes"
+note = notes[0]
+for field, want in (("x", 120), ("y", 120), ("w", 180), ("h", 140)):
+    assert abs(note[field] - want) < 10, f"the drag did not size the note: {note}"
+print(f"  injected note ok: {note['x']},{note['y']} {note['w']}x{note['h']}")
+PY
+
+# 5d. a selection drag moves what the frame holds. The press is resolved in screen space and the gesture
+# works in canvas ones, so a mix-up between the two is exactly what a drag that drifts looks like.
+"$vinject" "$layout" seq <<VINJECT
+click $rail 307
+drag $((h1 + 200)) 190 $((h1 + 260)) 250 8
+sleep 1500
+VINJECT
+grep -q "tool switched to Selection" "$work/daemon.log" || fail "the selection's block was not clicked"
+python3 - "$annotations" <<PY || exit 1
+import json, sys
+note = json.load(open(sys.argv[1]))["outputs"]["HEADLESS-1"]["notes"][0]
+assert abs(note["x"] - 180) < 14 and abs(note["y"] - 180) < 14, f"the drag moved it to {note['x']},{note['y']}"
+assert abs(note["w"] - 180) < 14 and abs(note["h"] - 140) < 14, "a move resized the note"
+print(f"  injected selection drag ok: {note['x']},{note['y']}")
+PY
+"$bin" lock > /dev/null || fail "lock after the pointer stage failed"
+
+# 6. a second daemon is rejected
 if "$bin" daemon > /dev/null 2>&1; then fail "a second daemon started"; fi
 echo "  single instance ok"
 
-# 6. graceful exit on SIGTERM
+# 7. graceful exit on SIGTERM
 kill -TERM "$daemon_pid"
 for _ in $(seq 50); do kill -0 "$daemon_pid" 2>/dev/null || break; sleep 0.1; done
 wait "$daemon_pid" || fail "daemon exit code was non-zero"

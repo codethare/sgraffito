@@ -739,3 +739,54 @@ and two scenarios.
 
 Still untestable here: `pointer_press` and `escape()` are App-level, so the press rule has no unit test; it is
 verified by reading the branches above, not by a test that runs. Worth knowing when reading claims like this one.
+
+## The pointer injector, and the first two bugs it caught
+
+`examples/vinject.rs` + a new stage 5 in `scripts/smoke.sh`. `zwlr_virtual_pointer_manager_v1` is already in
+`wayland-protocols-wlr`, which is a direct dependency, so the injector adds **no dependency** to the crate.
+
+What it took to make it reliable, all measured rather than guessed:
+
+- **One invocation is one connection.** A virtual pointer is a device: creating one makes the seat gain the
+  pointer capability, destroying it takes the capability away. With one invocation per command, the second
+  command's events were dropped. `seq` reads a list of gestures from stdin and keeps one device for the whole
+  list; each smoke stage is one `seq`.
+- **Wait for the seat's capability.** The injector binds `wl_seat`, creates the pointer, and round-trips until
+  `capabilities` contains `Pointer`, plus 150 ms for the other clients of the session (the daemon is one) to
+  bind their own `wl_pointer`. Without it the *first* click of an invocation was dropped at random.
+- **Wall-clock timestamps.** A counter restarted at 1 per invocation is a timestamp going backwards; the
+  injector now starts from `SystemTime` milliseconds.
+- **Layout coordinates.** `motion_absolute` maps its position onto the layout's bounding box, so the smoke
+  session's two outputs (800x600 at scale 1 beside 800x600 at scale 2) are a **1200x600 layout** and a point on
+  HEADLESS-1 is its own x plus 400.
+- **Rail rows.** A block's centre is its row's y from `toolbar_pill` plus the rail's top margin (8) plus half a
+  block (15): `Color(3)` 131, `Pen` 205, `Eraser` 239, `Selection` 307, `Note` 545. The rail is 740 tall, so on
+  the smoke test's 600-pixel outputs everything from `SizeStep(-1)` down — including the drawer's `more` block —
+  is **off the surface**, which is why the drawer's own click path is still unit-tested only.
+
+What stage 5 asserts: a colour chip arms the colour (`#3584e4` in the stroke's own record), a drag draws a
+stroke that reaches both the file and the surface (852 blue-dominant pixels), the eraser's hit test removes it,
+a note is created **at the size its drag gave it**, and a selection drag moves it by exactly the drag's delta.
+
+### Two bugs it caught
+
+1. **A note created by a drag was never marked for the store.** `commit_note` pushed the note into the document
+   and entered its edit, but it never called `doc_changed_at` — every other commit path does — so the
+   debounced save was never armed by the creation. The note was on the screen and in memory and only reached
+   the file when the edit ended: a crash or a `SIGKILL` in between lost a note that had just been dragged out.
+   One line fixes it; the fix is what makes the note assertion above pass.
+2. **The smoke test used a stale binary once.** `cargo clippy --all-targets` did not refresh
+   `target/debug/sgraffito`, so a run of the whole script exercised the previous build and reported failures
+   from code that was already fixed. The verification order in `CLAUDE.md` (fmt, clippy, test, smoke) does
+   build the binary — `cargo test` builds all targets — so this only bites a hand-run; `cargo build` first.
+
+### What is still not covered, and why
+
+The **keyboard** needs `zwp_virtual_keyboard_manager_v1`, which lives in `wayland-protocols-misc` (a
+dev-dependency would be enough for an example) *and* a hand-written xkb keymap sent over an fd. That is the
+next step for this harness and it is what would cover `Esc`, `Delete`, `B`/`M`, the tool keys, typing, the
+caret and paste. The **wheel and the pinch** need `axis` and gesture injection (the protocol has `axis`; no
+gesture support). The **drawer** needs an output taller than the rail (768+) or the keyboard's `M`.
+The **handles** (resize, rotate) could be covered by the pointer alone and are the cheapest next assertion.
+One flake seen once in an unrelated stage: `2c`'s rail screenshot asserted no ink after 0.5 s — a grim race,
+not a renderer change; if it recurs it wants a retry around the screenshot rather than a longer sleep.
