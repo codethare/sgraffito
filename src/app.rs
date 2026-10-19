@@ -599,7 +599,13 @@ impl App {
     /// is painted on — a frame must never carry the state that was switched away from.
     pub(crate) fn toggle_scrim(&mut self) {
         self.scrim = !self.scrim;
+        // The flag the frame reads is the toolbar each output holds, not `self.scrim`, so the new one has
+        // to be pushed into every output: without this the frame went on painting the scrim it had, and
+        // the switch only took effect when a mode switch rebuilt the surfaces and refreshed the rail.
+        self.refresh_toolbar();
         self.invalidate_text_caches();
+        // Every pixel of the surface is the scrim or the lack of it, so the frame that follows is a
+        // whole-surface one.
         self.mark_all_dirty();
     }
 

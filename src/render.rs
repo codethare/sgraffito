@@ -2148,6 +2148,23 @@ mod tests {
     use super::*;
     use crate::canvas::{Note, View};
 
+    /// The raster is keyed by the backing it was painted on, so a switch of the backdrop cannot reuse it.
+    #[test]
+    fn the_raster_is_rebuilt_when_the_backdrop_changes() {
+        let key = |scrim| BaseKey {
+            width: 100,
+            height: 100,
+            scale: 1.0,
+            view: View::default(),
+            skip: vec![],
+            scrim,
+        };
+        // `BaseKey` is what the cached raster's identity is made of, so a different backing is a
+        // different raster.
+        assert!(!key(true).eq(&key(false)));
+        assert!(key(true).eq(&key(true)));
+    }
+
     /// The caret of a wrapped layout: the offset of each line's own text has to land on that line, or
     /// the caret sticks at the end of the last one.
     #[test]

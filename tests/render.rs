@@ -2317,3 +2317,47 @@ fn a_note_dragged_out_and_back_leaves_no_trail() {
         spots.last()
     );
 }
+
+#[test]
+fn switching_the_backdrop_repaints_the_whole_surface() {
+    // The scrim is the raster's own background, so a frame that follows the switch has to be a
+    // whole-surface one: a partial frame would leave every pixel outside its box with the backing the
+    // surface had before, which is what "only the area around the rail changed" was.
+    let (w, h) = (600u32, 500u32);
+    let view = View::default();
+    let rail = |scrim: bool| Toolbar {
+        scrim,
+        ..toolbar(Tool::Pen, PALETTE[0], 3.0, None)
+    };
+    let draw = |buf: &mut [u8], cache: &mut FrameCache, scrim: bool| {
+        Renderer::new().render_with_cache(
+            buf,
+            w,
+            h,
+            1.0,
+            view,
+            &OutputAnnotations::default(),
+            &Overlay {
+                toolbar: Some(rail(scrim)),
+                ..Default::default()
+            },
+            None,
+            cache,
+            &[],
+        );
+    };
+    let mut cache = FrameCache::default();
+    let mut buf = buffer(w, h);
+    draw(&mut buf, &mut cache, true);
+    let alpha = |b: &[u8], x: u32, y: u32| b[((y * w + x) * 4 + 3) as usize];
+    // The scrim is black at 90%, so a pixel on it is nearly opaque everywhere, well away from the rail.
+    assert!(alpha(&buf, 400, 400) > 200, "the scrim is not painted");
+    draw(&mut buf, &mut cache, false);
+    for (x, y) in [(400, 400), (400, 100), (550, 480), (200, 250)] {
+        assert_eq!(
+            alpha(&buf, x, y),
+            0,
+            "the scrim's own pixels at {x},{y} were not repainted"
+        );
+    }
+}
