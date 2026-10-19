@@ -721,3 +721,21 @@ asserts that one step left of it is still the block, so the corridor and the row
 other rather than against a number I typed.
 
 Not testable here: `Esc` closing the panel first (App-level, needs a session).
+
+### The hole the user's Esc question found
+
+Asked to check what `Esc` does with the panel open and the pointer elsewhere. `escape()` itself is right: the
+drawer stage is first and returns, so nothing else in the chain runs (no gesture abandoned, no edit ended, no
+selection dropped, no lock). But the state the question describes **was reachable**: `pointer_press` does not
+refresh the hover (only `pointer_motion` does), and it never touched `self.more`, so `M` with the pointer over
+the canvas, then `T`, then a click on the canvas entered a text box with the panel still open. In that state the
+focused-box branch of the key handler claims `Esc` (`EditAction::EndText`) before the rail sees it, so the first
+`Esc` ended the edit and left the menu up — the opposite order to the one specified.
+
+Fixed where the state is created rather than where it is noticed: a press that is not on the panel closes it
+(`pointer_press`, one line), which is the "clicking outside a menu dismisses it" idiom and makes the two states
+mutually exclusive. Amended `openspec/changes/drawer-closes-itself/` (it owns the closing rules) with the rule
+and two scenarios.
+
+Still untestable here: `pointer_press` and `escape()` are App-level, so the press rule has no unit test; it is
+verified by reading the branches above, not by a test that runs. Worth knowing when reading claims like this one.

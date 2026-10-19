@@ -661,6 +661,13 @@ impl App {
             self.apply_toolbar_action(action);
             return;
         }
+        // A press anywhere else is a press outside the menu, and clicking outside a menu dismisses it. This
+        // is also what keeps an open panel and a live text edit from existing at once: a press is what starts
+        // an edit, and the panel has already gone by the time the tool below sees it. Without it, `M` with the
+        // pointer over the canvas and then a click armed the text tool and entered a box with the panel still
+        // open — and `Esc` then went to the edit, because a focused box handles `Esc` before the rail does, so
+        // the first `Esc` ended the edit and left the menu up.
+        self.set_more(false);
         // A pan owns the pointer while it runs: nothing else may start under it.
         if self.panning() {
             return;
