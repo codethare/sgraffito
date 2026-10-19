@@ -1836,18 +1836,33 @@ fn the_drawer_opens_beside_the_rail_without_moving_it() {
         "the backdrop's switch is not on the rail while the drawer is closed"
     );
 
-    // Open, the switch is in the second column: one block and one gap to the right of the rail, and a
-    // press there applies it and reaches nothing else.
+    // Open, the switch is in the second column, on the row of the block that opened it — the drawer is
+    // that block's own list, so it starts there and not at the top of the rail.
     let band = toolbar_bounds(fw, fh);
     let column_x = band.x + 1.0 + 30.0 + 4.0 + 15.0;
+    let mut more_row = None;
+    for step in 1..band.h as u32 {
+        let y = band.y + step as f32;
+        if renderer.toolbar_hit(&open, fw, fh, band.x + 1.0 + 15.0, y) == Some(ToolbarAction::More)
+        {
+            more_row = Some(y);
+            break;
+        }
+    }
+    let more_row = more_row.expect("the more block is on the rail");
     assert_eq!(
-        renderer.toolbar_hit(&open, fw, fh, column_x, band.y + 1.0 + 15.0),
+        renderer.toolbar_hit(&open, fw, fh, column_x, more_row),
         Some(ToolbarAction::Scrim)
     );
-    // A press in the same row of the rail is the rail's own first block, not the drawer's.
+    // Nothing of the drawer is at the top of its column: the list hangs off the block, not the rail.
     assert_eq!(
-        renderer.toolbar_hit(&open, fw, fh, band.x + 1.0 + 15.0, band.y + 1.0 + 15.0),
-        Some(ToolbarAction::Color(0))
+        renderer.toolbar_hit(&open, fw, fh, column_x, band.y + 1.0 + 15.0),
+        None
+    );
+    // A press in the same row of the rail is the rail's own block, not the drawer's.
+    assert_eq!(
+        renderer.toolbar_hit(&open, fw, fh, band.x + 1.0 + 15.0, more_row),
+        Some(ToolbarAction::More)
     );
     // And a row below the drawer's only control is canvas, not a control: the drawer's column is only
     // as tall as what it holds.

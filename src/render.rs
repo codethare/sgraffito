@@ -1021,11 +1021,28 @@ impl Renderer {
         let ceiling = (surface - 2.0 * TOOLBAR_MARGIN).min(TOOLBAR_RESERVE);
         let mut controls = Vec::new();
         let mut hits = Vec::new();
+        // The drawer is the `more` block's own list, so its column starts on that block's row and grows
+        // upwards when the rows below would not hold it — the way a menu at the bottom of a window opens
+        // upwards. Starting at the top of the column instead left a control the rail has no room for
+        // sitting far from the block that owns it, with nothing saying the two belong together.
+        let residents: Vec<Block> = drawer_blocks(toolbar);
+        let residents_h = residents
+            .iter()
+            .map(|block| TOOLBAR_BLOCK + block.gap)
+            .sum::<f32>()
+            - residents.first().map_or(0.0, |block| block.gap);
+        let anchor = |more_y: f32| more_y.min(TOOLBAR_COLUMN - TOOLBAR_PAD - residents_h);
+        let mut more_y: Option<f32> = None;
         // One row counter per column: the drawer is a second column, so a block in it starts at the
         // top of its own column and leaves the rail's height alone.
         let mut y = [TOOLBAR_PAD; 2];
         for block in toolbar_blocks(toolbar) {
             let column = block.column as usize;
+            if column == 1
+                && let Some(row) = more_y
+            {
+                y[column] = y[column].max(anchor(row));
+            }
             let x = block.column as f32 * TOOLBAR_DRAWER_X;
             let gap = block.gap;
             let hovered = block.action.is_some() && block.action == toolbar.hover;
@@ -1049,6 +1066,9 @@ impl Renderer {
                     },
                     action,
                 ));
+            }
+            if block.action == Some(ToolbarAction::More) {
+                more_y = Some(y[column]);
             }
             controls.push(Control {
                 block,
@@ -2194,6 +2214,51 @@ fn fill(pixmap: &mut PixmapMut, x: f32, y: f32, w: f32, h: f32, color: Color) {
 mod tests {
     use super::*;
     use crate::canvas::{Note, View};
+
+    /// The drawer hangs off the block that opens it: its controls start on the `more` block's row, and a
+    /// list too tall for the rows below grows upwards instead of leaving the column.
+    #[test]
+    fn the_drawer_hangs_off_the_more_block() {
+        let mut renderer = Renderer::new();
+        let rail = |more: bool| Toolbar {
+            more,
+            ..crate::render::tests::rail_for_legend()
+        };
+        let placed = |renderer: &mut Renderer, toolbar: &Toolbar| {
+            let pill = renderer.toolbar_pill(toolbar, 900.0);
+            let row = |column: u8, action: Option<ToolbarAction>| {
+                pill.controls
+                    .iter()
+                    .find(|c| c.block.column == column && c.block.action == action)
+                    .map(|c| c.y)
+            };
+            let more = pill
+                .controls
+                .iter()
+                .find(|c| c.block.action == Some(ToolbarAction::More))
+                .map(|c| c.y)
+                .expect("the rail has a more block");
+            let drawer = pill
+                .controls
+                .iter()
+                .filter(|c| c.block.column == 1)
+                .map(|c| c.y)
+                .collect::<Vec<f32>>();
+            let bottom = drawer.iter().map(|y| y + 30.0).fold(0.0f32, f32::max);
+            (more, drawer, bottom, row(0, Some(ToolbarAction::Lock)))
+        };
+        let shut = placed(&mut renderer, &rail(false));
+        let open = placed(&mut renderer, &rail(true));
+        assert!(open.1.len() == 1, "the drawer holds {:?}", open.1);
+        assert_eq!(open.1[0], open.0, "the list did not start on the more row");
+        assert!(
+            open.2 <= shut.3.expect("the last rail block"),
+            "the list left the column"
+        );
+        // The rail's own blocks do not move when the drawer opens.
+        assert_eq!(shut.0, open.0, "the more block moved");
+        assert_eq!(shut.3, open.3, "the rail moved");
+    }
 
     /// The `more` block reports the drawer's own controls, and only while the drawer is shut: its one
     /// list is the drawer's, so the two cannot disagree.

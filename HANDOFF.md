@@ -664,3 +664,14 @@ too (`drop_selection` and `cancel_transient` do).
   described; `drawer_legend` is the same list as a string, drawn under the `more` capsule in the drawer's
   own column while that block is hovered and only while the drawer is shut (an open drawer names its own
   controls, and its column is then occupied). `openspec/changes/drawer-hover-list/`.
+
+### The drawer is anchored to `more` (feature)
+
+`openspec/changes/drawer-anchored-to-more/`. The drawer's column started at the top of the rail, so opening
+it (the `more` block is second-to-last) made a control appear at the top right, far from the block that owns
+it. `toolbar_pill` now anchors the drawer's rows to the `more` block's own row and pushes the list up when
+the rows below would not hold it, the way a menu at the bottom of a window opens upwards. The rail's rows
+and height are untouched (`TOOLBAR_COLUMN`'s debug assertion still holds), and the list stays inside
+`toolbar_bounds`. The hover legend from `drawer-hover-list` still sits where the list's first item will be,
+so the closed and open states read as the same thing. `the_drawer_hangs_off_the_more_block` checks the row,
+the column's bounds and that the rail does not move.
