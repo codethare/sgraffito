@@ -1,21 +1,24 @@
-//! Pointer input for the smoke test.
+//! Pointer **and keyboard** input for the smoke test.
 //!
 //! `scripts/smoke.sh` runs headless sway with `WLR_LIBINPUT_NO_DEVICES=1`, so the seat has no capabilities
-//! and nothing can reach the daemon's pointer paths: the hover, the rail's blocks, a stroke, a note's drag,
-//! a marquee, a handle. This client injects the pointer as a device the compositor believes in, through
-//! `zwlr_virtual_pointer_manager_v1`, which sway advertises.
+//! and nothing can reach the daemon's input paths: the hover, the rail's blocks, a stroke, a note's drag,
+//! a marquee, a handle, and every keyboard shortcut. This client injects both as devices the compositor
+//! believes in — the pointer through `zwlr_virtual_pointer_manager_v1` and the keyboard through
+//! `zwp_virtual_keyboard_manager_v1`, which sway advertises and which `wayland-protocols-misc` generates.
 //!
-//! **One invocation is one gesture, and a sequence of gestures is one `seq`.** A virtual pointer is a device:
-//! creating one makes the seat gain the pointer capability and destroying it takes the capability away, and a
+//! **One invocation is one gesture, and a sequence of gestures is one `seq`.** A virtual device is a device:
+//! creating one makes the seat gain that capability and destroying it takes the capability away, and a
 //! client that connected, clicked and exited was measured dropping the events of the invocation after it. A
 //! `seq` keeps one device for the whole sequence, which is what a test wants anyway — press, move, release
-//! and the waits between them are one run of the program.
+//! and the waits between them are one run of the program. Both devices are created together, so a `seq` can
+//! click an element and then press a key on it.
 //!
 //! ```text
 //! vinject <W>x<H> move X Y
 //! vinject <W>x<H> click X Y
 //! vinject <W>x<H> drag X0 Y0 X1 Y1 [steps]     - left button
 //! vinject <W>x<H> mdrag X0 Y0 X1 Y1 [steps]    - middle button, which pans
+//! vinject <W>x<H> key NAME                     - press and release a key, by keysym name
 //! vinject <W>x<H> seq <<'EOF'                  - commands on stdin, one per line:
 //!   move 100 100
 //!   click 15 205
@@ -24,48 +27,71 @@
 //!   mpress 400 300
 //!   move 500 300
 //!   mrelease 500 300
+//!   key Tab
+//!   key shift+Right
+//!   key Delete
 //! EOF
 //! ```
+//!
+//! A key is named as `xkeysym` names it without its `XK_` prefix — `Tab`, `Right`, `Delete`, `plus`, `0` —
+//! and `shift+` in front of it holds `Shift` across the press. The keycode is found by scanning the
+//! keymap, so no table of Linux keycodes is written down here, and a name the keymap does not have is an
+//! error rather than a key that quietly does nothing.
 //!
 //! `W`x`H` is the layout the coordinates are in, in the compositor's own pixels: `motion_absolute` maps its
 //! position onto the layout's bounding box, so the smoke test's two outputs — 800x600 at scale 1 beside
 //! 800x600 at scale 2 — are a 1200x600 layout.
 
-use std::io::BufRead as _;
+use std::io::{BufRead as _, Write as _};
+use std::os::fd::AsFd as _;
 use std::process::ExitCode;
 use std::time::Duration;
 
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
+use wayland_client::protocol::wl_keyboard::KeyState;
 use wayland_client::protocol::wl_pointer::ButtonState;
-use wayland_client::protocol::wl_registry;
-use wayland_client::protocol::wl_seat;
+use wayland_client::protocol::{wl_registry, wl_seat};
 use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
+use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{
+    zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1,
+    zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1,
+};
 use wayland_protocols_wlr::virtual_pointer::v1::client::{
     zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1,
     zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
 };
+use xkbcommon::xkb;
 
 /// `BTN_LEFT` and `BTN_MIDDLE` of the Linux input numbering, which `wl_pointer` buttons use.
 const BTN_LEFT: u32 = 0x110;
 const BTN_MIDDLE: u32 = 0x112;
+
+/// `XKB_KEYMAP_FORMAT_TEXT_V1`, and the xkb modifier mask's own `Shift` bit.
+const KEYMAP_FORMAT_XKB_V1: u32 = 1;
+const SHIFT_MASK: u32 = 1;
+
+/// The offset between a keymap's keycodes and the evdev codes this protocol's `key` request takes, which
+/// is what `wl_keyboard`'s own `key` event carries too. It is a fixed eight, not the keymap's minimum.
+const KEYCODE_OFFSET: u32 = 8;
 
 /// How many moves a `drag` interpolates when it is not told: enough that the daemon sees a drag rather than
 /// a jump, which is what a note's size, a marquee and a handle all depend on.
 const DRAG_STEPS: u32 = 8;
 
 const USAGE: &str = "\
-vinject — inject pointer input for the sgraffito smoke test
+vinject — inject pointer and keyboard input for the sgraffito smoke test
 
 Usage:
   vinject <W>x<H> move X Y
   vinject <W>x<H> click X Y
   vinject <W>x<H> drag X0 Y0 X1 Y1 [steps]
   vinject <W>x<H> mdrag X0 Y0 X1 Y1 [steps]
+  vinject <W>x<H> key NAME
   vinject <W>x<H> seq          (commands on stdin: move, click, press, release, mpress, mrelease,
-                                drag, mdrag, sleep MS, one per line)
+                                drag, mdrag, key, sleep MS, one per line)
 ";
 
-/// One thing the pointer does, in the order the compositor will deliver it.
+/// One thing the pointer or the keyboard does, in the order the compositor will deliver it.
 enum Step {
     Move {
         x: u32,
@@ -77,15 +103,21 @@ enum Step {
         button: u32,
         state: ButtonState,
     },
+    /// A press and a release of one key, by keysym name, with `Shift` held across it when asked.
+    Key {
+        name: String,
+        shift: bool,
+    },
     /// A wait, so the daemon has time to act on what it was just sent before the next thing arrives.
     Sleep(Duration),
 }
 
 #[derive(Default)]
 struct State {
-    /// Whether the seat has said it has a pointer: the device this client creates is only usable once the
+    /// Whether the seat has said it has each device: one this client creates is only usable once the
     /// compositor has added it to the seat and broadcast that.
     has_pointer: bool,
+    has_keyboard: bool,
 }
 
 impl Dispatch<wl_seat::WlSeat, ()> for State {
@@ -101,6 +133,7 @@ impl Dispatch<wl_seat::WlSeat, ()> for State {
             && let WEnum::Value(capabilities) = capabilities
         {
             state.has_pointer |= capabilities.contains(wl_seat::Capability::Pointer);
+            state.has_keyboard |= capabilities.contains(wl_seat::Capability::Keyboard);
         }
     }
 }
@@ -134,6 +167,30 @@ impl Dispatch<ZwlrVirtualPointerV1, ()> for State {
         _: &mut Self,
         _: &ZwlrVirtualPointerV1,
         _: <ZwlrVirtualPointerV1 as wayland_client::Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<ZwpVirtualKeyboardManagerV1, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &ZwpVirtualKeyboardManagerV1,
+        _: <ZwpVirtualKeyboardManagerV1 as wayland_client::Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<ZwpVirtualKeyboardV1, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &ZwpVirtualKeyboardV1,
+        _: <ZwpVirtualKeyboardV1 as wayland_client::Proxy>::Event,
         _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,
@@ -215,9 +272,25 @@ fn single(command: &str, rest: &[String]) -> Result<Vec<Step>, String> {
         }
         ("drag", _, Some(p)) => drag(p[0], p[1], p[2], p[3], optional_steps(rest, 4), BTN_LEFT),
         ("mdrag", _, Some(p)) => drag(p[0], p[1], p[2], p[3], optional_steps(rest, 4), BTN_MIDDLE),
+        ("key", _, _) => vec![key_step(rest.first().map(String::as_str).unwrap_or(""))?],
         _ => return Err(format!("{command} is not a command")),
     };
     Ok(plan)
+}
+
+/// A key, by the name `xkeysym` gives it, with `shift+` in front holding `Shift` across the press.
+fn key_step(spec: &str) -> Result<Step, String> {
+    let (shift, name) = match spec.split_once('+') {
+        Some(("shift", name)) => (true, name),
+        _ => (false, spec),
+    };
+    if name.is_empty() {
+        return Err("key wants a name, as `key Tab` or `key shift+Right`".to_string());
+    }
+    Ok(Step::Key {
+        name: name.to_string(),
+        shift,
+    })
 }
 
 /// A whole sequence in one connection, which is what keeps the virtual pointer — and so the seat's pointer
@@ -279,6 +352,7 @@ fn sequence() -> Result<Vec<Step>, String> {
                     .ok_or_else(bad)?;
                 plan.push(Step::Sleep(Duration::from_millis(ms.max(0.0) as u64)));
             }
+            ("key", _, _) => plan.push(key_step(rest.first().map(String::as_str).unwrap_or(""))?),
             _ => return Err(bad()),
         }
     }
@@ -326,20 +400,27 @@ fn inject(plan: &[Step], extent_w: u32, extent_h: u32) -> anyhow::Result<()> {
     let (globals, mut queue) = registry_queue_init::<State>(&conn)?;
     let qh = queue.handle();
     let manager: ZwlrVirtualPointerManagerV1 = globals.bind(&qh, 1..=2, ())?;
+    let keyboard_manager: ZwpVirtualKeyboardManagerV1 = globals.bind(&qh, 1..=1, ())?;
     let seat: wl_seat::WlSeat = globals.bind(&qh, 1..=9, ())?;
     let pointer = manager.create_virtual_pointer(Some(&seat), &qh, ());
+    let keyboard = keyboard_manager.create_virtual_keyboard(&seat, &qh, ());
+    // The keymap is required before any key, and it is compiled here rather than kept as a file, because a
+    // keymap is a layout rather than something this example should own a copy of.
+    let keymap = us_keymap()?;
+    let (file, size) = keymap_file(&keymap)?;
+    keyboard.keymap(KEYMAP_FORMAT_XKB_V1, file.as_fd(), size);
     let mut state = State::default();
-    // Wait for the seat to say it has a pointer. The device is only usable once the compositor has added it,
-    // and an event sent before that is dropped — which is what made the first click of one run land and the
-    // same click of the next one vanish.
+    // Wait for the seat to say it has both devices. A device is only usable once the compositor has added
+    // it, and an event sent before that is dropped — which is what made the first click of one run land and
+    // the same click of the next one vanish.
     for _ in 0..100 {
         queue.roundtrip(&mut state)?;
-        if state.has_pointer {
+        if state.has_pointer && state.has_keyboard {
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    // And let the other clients of this session — the daemon is one — bind their own pointer to the seat it
+    // And let the other clients of this session — the daemon is one — bind their own devices to the seat it
     // has just gained, so the first event of the sequence is delivered rather than dropped on the way in.
     std::thread::sleep(Duration::from_millis(150));
     // A timestamp orders and coalesces events, and the compositor compares it with its own clock: one that
@@ -382,9 +463,77 @@ fn inject(plan: &[Step], extent_w: u32, extent_h: u32) -> anyhow::Result<()> {
                 queue.roundtrip(&mut state)?;
                 time = time.wrapping_add(1);
             }
+            Step::Key { name, shift } => {
+                let (code, shifted) = key_named(&keymap, name)
+                    .ok_or_else(|| anyhow::anyhow!("{name} is not a key of the us layout"))?;
+                let shifted = *shift || shifted;
+                if shifted {
+                    keyboard.modifiers(SHIFT_MASK, 0, 0, 0);
+                }
+                keyboard.key(time, code, KeyState::Pressed as u32);
+                keyboard.key(time.wrapping_add(1), code, KeyState::Released as u32);
+                if shifted {
+                    keyboard.modifiers(0, 0, 0, 0);
+                }
+                queue.roundtrip(&mut state)?;
+                time = time.wrapping_add(2);
+            }
         }
     }
     pointer.destroy();
+    keyboard.destroy();
     queue.roundtrip(&mut state)?;
     Ok(())
+}
+
+fn us_keymap() -> anyhow::Result<xkb::Keymap> {
+    let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+    xkb::Keymap::new_from_names(
+        &context,
+        "",
+        "",
+        "us",
+        "",
+        None,
+        xkb::KEYMAP_COMPILE_NO_FLAGS,
+    )
+    .ok_or_else(|| anyhow::anyhow!("the us keymap did not compile"))
+}
+
+/// The keymap written to a file the compositor can map, and its size. The file outlives the request only
+/// until it is read, so it is left in the temp directory rather than cleaned up under the compositor's feet.
+fn keymap_file(keymap: &xkb::Keymap) -> anyhow::Result<(std::fs::File, u32)> {
+    let text = keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
+    let path = std::env::temp_dir().join(format!("vinject-keymap-{}.xkb", std::process::id()));
+    // Read and write, not write only: the compositor mmaps it read-only, and the descriptor is what it mmaps.
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)?;
+    file.write_all(text.as_bytes())?;
+    file.flush()?;
+    Ok((file, text.len() as u32))
+}
+
+/// The keycode and the shift level a key's name needs, found by scanning the keymap: `xkeysym` names its
+/// symbols `XK_...`, so `Right` and `Delete` resolve without a table of keycodes or of names being written
+/// down here. A name the layout does not have is an error rather than a key that quietly does nothing.
+///
+/// The keymap's keycodes are evdev codes plus eight, while this protocol's `key` request takes the evdev
+/// code itself, so the offset comes back off here: sending the keymap's own number lands eight keys away,
+/// and `e` arrives as `[`.
+fn key_named(keymap: &xkb::Keymap, name: &str) -> Option<(u32, bool)> {
+    let wanted = format!("XK_{name}");
+    for raw in keymap.min_keycode().raw()..=keymap.max_keycode().raw() {
+        let keycode = xkb::Keycode::new(raw);
+        for level in 0..2 {
+            let syms = keymap.key_get_syms_by_level(keycode, 0, level);
+            if syms.iter().any(|sym| sym.name() == Some(wanted.as_str())) {
+                return Some((raw - KEYCODE_OFFSET, level == 1));
+            }
+        }
+    }
+    None
 }

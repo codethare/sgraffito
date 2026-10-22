@@ -190,6 +190,53 @@ pub fn color_for_keysym(keysym: Keysym) -> Option<usize> {
     }
 }
 
+/// What a key does to the canvas when no text box is focused. With something held the arrows move it,
+/// with nothing held they move the view: that is `tmmpr`'s split between moving the viewport and moving
+/// the selected note, read off a state this program already has instead of a mode of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Nav {
+    /// Walk the selection to the next or the previous element.
+    Cycle { forward: bool },
+    /// Move the held selection, or the view when nothing is held: one step in that direction, `far` for
+    /// the long step `Shift` gives it.
+    Nudge { dx: i32, dy: i32, far: bool },
+    /// Zoom the view by one step in this direction (±1).
+    Zoom { dir: i32 },
+    /// Put the view back at 1:1 from the origin.
+    ResetView,
+    /// Open the held text box or note for writing.
+    Open,
+}
+
+impl Nav {
+    /// Whether a key held down may repeat this: only the movement does, because a held `Esc` walking the
+    /// cancel stages or a held `Tab` running through a drawing is never what a hand meant.
+    pub fn repeats(self) -> bool {
+        matches!(self, Nav::Nudge { .. })
+    }
+}
+
+/// The keyboard's canvas keys. Compared by keysym with every other shortcut, so a shortcut is layout
+/// independent; `shift` is the live modifier state, which is what tells `Shift+Tab` from `Tab`.
+pub fn nav_action(keysym: Keysym, shift: bool) -> Option<Nav> {
+    let nudge = |dx, dy| Some(Nav::Nudge { dx, dy, far: shift });
+    match keysym {
+        Keysym::Tab => Some(Nav::Cycle { forward: !shift }),
+        // Some layouts send `Shift+Tab` as its own keysym rather than as `Tab` with the modifier.
+        Keysym::ISO_Left_Tab => Some(Nav::Cycle { forward: false }),
+        Keysym::Left => nudge(-1, 0),
+        Keysym::Right => nudge(1, 0),
+        Keysym::Up => nudge(0, -1),
+        Keysym::Down => nudge(0, 1),
+        // `=` is the unshifted key `+` sits on, and a user pressing it means the same thing.
+        Keysym::plus | Keysym::equal | Keysym::KP_Add => Some(Nav::Zoom { dir: 1 }),
+        Keysym::minus | Keysym::KP_Subtract => Some(Nav::Zoom { dir: -1 }),
+        Keysym::_0 => Some(Nav::ResetView),
+        Keysym::Return | Keysym::KP_Enter => Some(Nav::Open),
+        _ => None,
+    }
+}
+
 /// Sampling filter: jitter closer than 1 logical pixel to the last sample is dropped.
 pub fn wants_sampling(last: [f32; 2], next: [f32; 2]) -> bool {
     let (dx, dy) = (next[0] - last[0], next[1] - last[1]);
@@ -306,6 +353,8 @@ impl KeyboardHandler for App {
             self.nudge_size(dir);
         } else if let Some(action) = panel_action_for_keysym(event.keysym) {
             self.apply_toolbar_action(action);
+        } else if let Some(nav) = nav_action(event.keysym, self.shift) {
+            self.nav_key(nav);
         }
     }
 
@@ -315,8 +364,18 @@ impl KeyboardHandler for App {
         _: &QueueHandle<Self>,
         _: &wl_keyboard::WlKeyboard,
         _: u32,
-        _: KeyEvent,
+        event: KeyEvent,
     ) {
+        if self.mode != Mode::Edit || self.focused_edit_mut().is_some() {
+            return;
+        }
+        // Only the movement keys repeat: everything else acts once per press, so a key held a fraction
+        // too long cannot walk the cancel stages or the selection.
+        if let Some(nav) = nav_action(event.keysym, self.shift)
+            && nav.repeats()
+        {
+            self.nav_key(nav);
+        }
     }
 
     fn release_key(

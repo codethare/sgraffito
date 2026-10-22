@@ -19,6 +19,12 @@ wayland-client = "0.31.15"
 wayland-protocols = { version = "0.32.13", features = ["client", "unstable", "staging"] }
 wayland-protocols-wlr = "0.3.12"
 
+[dev-dependencies]
+# The keyboard injector in `examples/vinject.rs`. Both are already in the lock file through
+# `smithay-client-toolkit`, so neither is built a second time and the daemon's own graph is unchanged.
+wayland-protocols-misc = { version = "0.3.12", features = ["client"] }
+xkbcommon = "0.8.0"
+
 [[bench]]
 name = "render"
 harness = false

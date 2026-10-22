@@ -314,6 +314,66 @@ assert abs(note["x"] - 180) < 14 and abs(note["y"] - 180) < 14, f"the drag moved
 assert abs(note["w"] - 180) < 14 and abs(note["h"] - 140) < 14, "a move resized the note"
 print(f"  injected selection drag ok: {note['x']},{note['y']}")
 PY
+
+# 5e. the keyboard alone: `Tab` selects, the arrows move what is held, `Delete` removes it. The click on
+# empty space is also what gives that output's surface the keyboard focus — every edit-mode surface is
+# `exclusive`, so exactly one output has it — and it clears the selection the drag above left behind.
+# One press moves a held element by 1 logical pixel and ten while `Shift` is held, so the note the drag
+# put at 180 moves to 180 + 1 + 1 + 10.
+"$vinject" "$layout" seq <<VINJECT
+click $((h1 + 700)) 500
+sleep 200
+key Tab
+key Right
+key Right
+key shift+Right
+sleep 1500
+VINJECT
+python3 - "$annotations" <<PY || exit 1
+import json, sys
+notes = json.load(open(sys.argv[1]))["outputs"]["HEADLESS-1"]["notes"]
+assert len(notes) == 1, f"{len(notes)} notes"
+note = notes[0]
+assert abs(note["x"] - 192) < 2, f"the arrows did not move it by their steps: {note['x']}"
+assert abs(note["y"] - 180) < 2, f"an arrow moved it on the other axis: {note['y']}"
+print(f"  keyboard nudge ok: {note['x']},{note['y']}")
+PY
+
+# and `Enter` opens the held note for writing, which is the only way into a committed box without a
+# click: the caret lands at the end, what is typed lands in the note when the edit ends, and `Esc` ends
+# the edit while the selection stays held.
+"$vinject" "$layout" seq <<VINJECT
+key Return
+sleep 300
+key a
+key b
+sleep 200
+key Escape
+sleep 1500
+VINJECT
+python3 - "$annotations" <<PY || exit 1
+import json, sys
+note = json.load(open(sys.argv[1]))["outputs"]["HEADLESS-1"]["notes"][0]
+assert note["text"] == "ab", f"Enter did not open the note for writing: {note['text']!r}"
+print(f"  keyboard note edit ok: {note['text']!r}")
+PY
+
+# and the same key with nothing held removes nothing: a second `Esc` drops the selection, and `Delete` on
+# an empty selection is inert. A press on empty space does not clear a selection — a marquee only decides
+# one when it is released after moving — so `Esc` is what the keyboard has for this.
+"$vinject" "$layout" seq <<VINJECT
+key Escape
+sleep 300
+key Delete
+sleep 1200
+VINJECT
+[ "$(kinds)" = "strokes=0 texts=0 shapes=0 notes=1" ] || fail "Delete with nothing selected removed $(kinds)"
+"$vinject" "$layout" seq <<VINJECT
+key Tab
+key Delete
+sleep 1500
+VINJECT
+[ "$(kinds)" = "strokes=0 texts=0 shapes=0 notes=0" ] || fail "the keyboard left $(kinds)"
 "$bin" lock > /dev/null || fail "lock after the pointer stage failed"
 
 # 6. a second daemon is rejected

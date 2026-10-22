@@ -44,8 +44,8 @@ use wayland_client::{
 use crate::canvas::{
     Doc, ERASER_THRESHOLD, Gesture, Grab, Handle, ItemId, Note, OutputAnnotations, Overlay, Press,
     Rect, Selection, Shape, ShapeKind, TEXT_SIZE_MAX, TEXT_SIZE_MIN, TextBuffer, TextItem,
-    TextOverlay, Toolbar, Transform, View, date_stamp, marquee_select, note_drag, selection_bounds,
-    selection_frame, selection_press, snap_square,
+    TextOverlay, Toolbar, Transform, View, ZOOM_STEP, date_stamp, marquee_select, note_drag,
+    nudge_delta, selection_bounds, selection_frame, selection_press, snap_square,
 };
 
 pub use crate::canvas::{PALETTE, Tool, ToolbarAction};
@@ -58,7 +58,7 @@ use wayland_protocols::wp::pointer_gestures::zv1::client::zwp_pointer_gestures_v
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3::ZwpTextInputManagerV3;
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::ZwpTextInputV3;
 
-use crate::input::{PinchData, stepped_size};
+use crate::input::{Nav, PinchData, stepped_size};
 use crate::render::{
     DamageRegion, FrameCache, Renderer, Screen, buffer_format, toolbar_bounds, transient_bounds,
     transient_damage,
@@ -67,6 +67,11 @@ use crate::store::{self, Store};
 
 /// Initial stroke width and the range `[`/`]` may adjust it within, in logical pixels.
 pub const PEN_WIDTH: f32 = 3.0;
+
+/// The distance the view moves by on an arrow press, in logical pixels: larger than a nudge, because a pan
+/// of one pixel is not a pan.
+pub const PAN_STEP: f32 = 40.0;
+pub const PAN_STEP_FAR: f32 = 400.0;
 pub const PEN_WIDTH_MIN: f32 = 1.0;
 pub const PEN_WIDTH_MAX: f32 = 16.0;
 pub const PEN_WIDTH_STEP: f32 = 1.0;
@@ -582,6 +587,129 @@ impl App {
             );
         }
         self.refresh_toolbar();
+    }
+
+    /// A keyboard step on the canvas, from [`crate::input::nav_action`]. It acts on the output the keyboard
+    /// is focused on, which is the output whose rail the same keys already act on.
+    pub(crate) fn nav_key(&mut self, nav: Nav) {
+        let Some(key) = self
+            .keyboard_focus
+            .filter(|key| self.outputs.contains_key(key))
+        else {
+            return;
+        };
+        match nav {
+            Nav::Cycle { forward } => self.cycle_selection(key, forward),
+            Nav::Nudge { dx, dy, far } => self.nudge(key, dx, dy, far),
+            Nav::Zoom { dir } => self.zoom_key(key, dir),
+            Nav::ResetView => self.view_changed(key, |view| *view = View::default()),
+            Nav::Open => self.open_held(key),
+        }
+    }
+
+    /// `Tab`/`Shift+Tab`: put the selection on the next or the previous element of the bucket. A gesture in
+    /// flight is committed first, or its transform would be written onto a selection that no longer holds
+    /// the elements it was dragging.
+    fn cycle_selection(&mut self, key: u32, forward: bool) {
+        self.commit_any_gesture();
+        let Some(out) = self.outputs.get(&key) else {
+            return;
+        };
+        let bucket = out.bucket(key).into_owned();
+        let held = out
+            .overlay
+            .selection
+            .as_ref()
+            .map(|s| s.items.clone())
+            .unwrap_or_default();
+        let empty = OutputAnnotations::default();
+        let ann = self.doc.outputs.get(&bucket).unwrap_or(&empty);
+        let items = crate::canvas::cycle_selection(ann, &held, forward);
+        self.set_selection(key, items, None);
+    }
+
+    /// An arrow key: with something held it moves every held element, and with nothing held it moves the
+    /// view. A held element moves by a screen distance — the step divided by the zoom — because a keyboard
+    /// step is the same gesture as a pointer's, so it has to be the same length to look at at every zoom.
+    fn nudge(&mut self, key: u32, dx: i32, dy: i32, far: bool) {
+        let Some((held, zoom)) = self.outputs.get(&key).map(|out| {
+            (
+                out.overlay
+                    .selection
+                    .as_ref()
+                    .map(|s| s.items.clone())
+                    .unwrap_or_default(),
+                out.view.zoom,
+            )
+        }) else {
+            return;
+        };
+        if held.is_empty() {
+            // The arrow names the edge of the drawing the viewport moves towards, so the drawing itself
+            // moves the other way: `Right` looks further right, as it does in `tmmpr`.
+            let step = if far { PAN_STEP_FAR } else { PAN_STEP };
+            let delta = [-dx as f32 * step, -dy as f32 * step];
+            self.view_changed(key, |view| view.pan_by(delta));
+            return;
+        }
+        let delta = nudge_delta(dx, dy, far, zoom);
+        if let Some(out) = self.outputs.get_mut(&key)
+            && let Some(selection) = out.overlay.selection.as_mut()
+        {
+            selection.transform = Some(Transform::Translate {
+                dx: delta[0],
+                dy: delta[1],
+            });
+        }
+        // The release path a drag takes: one document change, one damaged box and a note's text re-wrapped,
+        // without a second way of moving an element to drift from it.
+        self.write_gesture(key);
+    }
+
+    /// `+`/`-`: zoom about the centre of the output, which is the one anchor a keyboard has.
+    fn zoom_key(&mut self, key: u32, dir: i32) {
+        let Some(out) = self.outputs.get(&key) else {
+            return;
+        };
+        let anchor = [out.width as f32 / 2.0, out.height as f32 / 2.0];
+        self.zoom_about(key, anchor, ZOOM_STEP.powf(dir as f32));
+    }
+
+    /// `Enter`: open the held text box or note for writing, with the caret at its end. Only one element can
+    /// be written in at a time, so anything else does nothing; and it creates nothing, because a box where
+    /// there was none needs a point the keyboard has not got.
+    fn open_held(&mut self, key: u32) {
+        let Some(held) = self.outputs.get(&key).and_then(|out| {
+            out.overlay
+                .selection
+                .as_ref()
+                .map(|s| s.items.clone())
+                .filter(|items| items.len() == 1)
+        }) else {
+            return;
+        };
+        match held[0] {
+            ItemId::Note(index) => self.enter_note(&key, index),
+            ItemId::Text(index) => {
+                let Some(out) = self.outputs.get(&key) else {
+                    return;
+                };
+                let bucket = out.bucket(key).into_owned();
+                // A point inside the box the renderer measured, which is what a click on it would pass:
+                // the origin of the estimate is not necessarily inside it for a wide script.
+                let Some(box_) = self
+                    .doc
+                    .outputs
+                    .get(&bucket)
+                    .and_then(|ann| ann.texts.get(index))
+                    .map(TextItem::paint_bounds)
+                else {
+                    return;
+                };
+                self.begin_text_edit(&key, box_.x + box_.w / 2.0, box_.y + box_.h / 2.0);
+            }
+            _ => {}
+        }
     }
 
     /// Open or close the drawer. It changes which controls exist, not the rail's height, so the rail's

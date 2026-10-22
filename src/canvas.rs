@@ -31,6 +31,10 @@ pub const ZOOM_MIN: f32 = 0.2;
 pub const ZOOM_MAX: f32 = 8.0;
 pub const ZOOM_STEP: f32 = 1.15;
 
+/// What one arrow press moves a held element by, in logical pixels: one, and ten while `Shift` is held.
+pub const NUDGE_STEP: f32 = 1.0;
+pub const NUDGE_STEP_FAR: f32 = 10.0;
+
 /// Arrowhead length as a multiple of the pen width, and the floor below which a hairline arrow
 /// would stop reading as an arrow, in logical pixels.
 const ARROW_HEAD_SCALE: f32 = 4.0;
@@ -1397,6 +1401,46 @@ pub fn marquee_select(ann: &OutputAnnotations, marquee: Rect) -> Vec<ItemId> {
             .map(ItemId::Note),
     );
     ids
+}
+
+/// Every element a bucket holds, in the order the keyboard walks them: one kind after another, each in
+/// document order. The order a keyboard step and a marquee walk are the same one.
+pub fn items_in_order(ann: &OutputAnnotations) -> Vec<ItemId> {
+    let mut ids: Vec<ItemId> = (0..ann.strokes.len()).map(ItemId::Stroke).collect();
+    ids.extend((0..ann.texts.len()).map(ItemId::Text));
+    ids.extend((0..ann.shapes.len()).map(ItemId::Shape));
+    ids.extend((0..ann.notes.len()).map(ItemId::Note));
+    ids
+}
+
+/// The canvas delta one arrow press asks for. The step is a **screen** length — one logical pixel, ten
+/// with `Shift` — so it is divided by the zoom: a nudge is the same size to look at however far out the
+/// view is, which is the rule the eraser's radius already follows.
+pub fn nudge_delta(dx: i32, dy: i32, far: bool, zoom: f32) -> [f32; 2] {
+    let step = if far { NUDGE_STEP_FAR } else { NUDGE_STEP };
+    let step = step / zoom;
+    [dx as f32 * step, dy as f32 * step]
+}
+
+/// The one element `Tab` or `Shift+Tab` moves the selection to: the element after the first one held,
+/// wrapping at both ends, so a walk always ends up holding exactly one thing. With nothing held `Tab`
+/// takes the first element and `Shift+Tab` the last, and an empty bucket names nothing.
+pub fn cycle_selection(ann: &OutputAnnotations, held: &[ItemId], forward: bool) -> Vec<ItemId> {
+    let ids = items_in_order(ann);
+    if ids.is_empty() {
+        return Vec::new();
+    }
+    let at = held
+        .first()
+        .and_then(|first| ids.iter().position(|id| id == first));
+    let next = match (at, forward) {
+        (Some(i), true) => (i + 1) % ids.len(),
+        (Some(0), false) => ids.len() - 1,
+        (Some(i), false) => i - 1,
+        (None, true) => 0,
+        (None, false) => ids.len() - 1,
+    };
+    vec![ids[next]]
 }
 
 /// The direction from `pivot` to `p`, as an angle in radians.

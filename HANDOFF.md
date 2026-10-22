@@ -7,6 +7,24 @@ the user writes in Chinese and expects Chinese in chat, English in the artifacts
 
 ## State right now (2026-10-14)
 
+- **Keyboard control landed** in the working-copy commit on top of `d35339a4` (uncommitted at the time
+  of writing): `Tab`/`Shift+Tab` walk the selection, the arrows move what is held and pan the view when
+  nothing is held, `+`/`=`/`-`/`0` zoom and reset it, and `Enter` opens a single held text box or note.
+  Only the arrows repeat. The plans are in `openspec/changes/keyboard-control/` (4/4 artifacts, 20/20
+  tasks ticked, `openspec validate --strict` valid); the contract is the new bullet under *Input and
+  text* in `CLAUDE.md` and the README's key table.
+- `examples/vinject.rs` now injects a **keyboard** as well as a pointer
+  (`zwp_virtual_keyboard_manager_v1` from `wayland-protocols-misc`, keymap compiled with `xkbcommon`,
+  both `[dev-dependencies]` already in the lock file through sctk), so `scripts/smoke.sh` checks a
+  `Tab` → arrows → `Enter` → type → `Delete` round trip against the file. Two traps cost a session each
+  and are recorded in the file: the keymap fd must be readable (a write-only fd made sway answer
+  `no memory`), and a keymap keycode is the evdev code **plus eight**, so the offset comes back off
+  before `key` — without it `e` arrives as `[`.
+- Two behaviours found while writing that stage and worth remembering: a press on empty space with the
+  selection tool does **not** clear a selection (a marquee only decides one when it is released after
+  moving), so `Esc` is the keyboard's way to drop one; and `Enter` on a note is checked end to end with
+  the local-key path, because sway has no `text-input-v3`.
+
 - The tree is clean and nothing is in flight: `@` is an empty working-copy commit on top of the
   delete-and-plate work. `jj log -r 'main@origin..main'` is what says whether anything is left to
   push; the human pushes, this file does not track that. The human also committed their own work

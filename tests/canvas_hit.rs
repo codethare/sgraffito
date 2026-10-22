@@ -1429,3 +1429,99 @@ fn shift_scales_both_axes_by_one_factor() {
     let (fx, fy) = factors(corner.transform([500.0, 260.0], false).unwrap());
     assert!(fx > 1.0 && fy > 1.0 && (fx - fy).abs() > 1e-6, "{fx} {fy}");
 }
+
+#[test]
+fn the_selection_walk_visits_every_kind_in_document_order() {
+    let a = OutputAnnotations {
+        strokes: vec![line(10.0, 0.0, 5.0), line(20.0, 0.0, 5.0)],
+        texts: vec![text(0.0, 0.0, "one")],
+        shapes: vec![sgraffito::canvas::Shape {
+            kind: sgraffito::canvas::ShapeKind::Rect,
+            color: "#e01b24".into(),
+            width: 3.0,
+            from: [0.0, 0.0],
+            to: [10.0, 10.0],
+        }],
+        notes: vec![sgraffito::canvas::Note::new(
+            0.0,
+            0.0,
+            "#ffffff",
+            "2026/01/01".into(),
+        )],
+    };
+    let order = sgraffito::canvas::items_in_order(&a);
+    assert_eq!(
+        order,
+        vec![
+            ItemId::Stroke(0),
+            ItemId::Stroke(1),
+            ItemId::Text(0),
+            ItemId::Shape(0),
+            ItemId::Note(0),
+        ]
+    );
+    // `Tab` with nothing held takes the first, then one element at a time.
+    let mut held: Vec<ItemId> = Vec::new();
+    let mut walked = Vec::new();
+    for _ in 0..order.len() {
+        held = sgraffito::canvas::cycle_selection(&a, &held, true);
+        walked.push(held.clone());
+    }
+    assert_eq!(
+        walked,
+        order.iter().map(|id| vec![*id]).collect::<Vec<_>>(),
+        "the walk does not follow the document's order"
+    );
+    // And it wraps: one more step is the first element again.
+    assert_eq!(
+        sgraffito::canvas::cycle_selection(&a, &held, true),
+        vec![ItemId::Stroke(0)]
+    );
+}
+
+#[test]
+fn the_walk_wraps_backwards_and_steps_from_a_marquee() {
+    use sgraffito::canvas::{Note, Shape, ShapeKind, cycle_selection};
+    let a = OutputAnnotations {
+        strokes: vec![line(10.0, 0.0, 5.0), line(20.0, 0.0, 5.0)],
+        texts: vec![],
+        shapes: vec![Shape {
+            kind: ShapeKind::Line,
+            color: "#e01b24".into(),
+            width: 3.0,
+            from: [0.0, 0.0],
+            to: [10.0, 10.0],
+        }],
+        notes: vec![Note::new(0.0, 0.0, "#ffffff", "2026/01/01".into())],
+    };
+    // With nothing held, `Shift+Tab` takes the last element, and stepping back from the first wraps.
+    assert_eq!(cycle_selection(&a, &[], false), vec![ItemId::Note(0)]);
+    assert_eq!(
+        cycle_selection(&a, &[ItemId::Stroke(0)], false),
+        vec![ItemId::Note(0)]
+    );
+    // A marquee's selection steps out of itself from its first element, not from its last.
+    assert_eq!(
+        cycle_selection(&a, &[ItemId::Stroke(1), ItemId::Shape(0)], true),
+        vec![ItemId::Shape(0)]
+    );
+    // An empty bucket names nothing, whichever direction it is walked.
+    let empty = OutputAnnotations::default();
+    assert!(cycle_selection(&empty, &[], true).is_empty());
+    assert!(cycle_selection(&empty, &[], false).is_empty());
+}
+
+#[test]
+fn a_nudge_is_a_screen_step_at_every_zoom() {
+    use sgraffito::canvas::nudge_delta;
+    // At 1:1 a press is one of the document's own units, and ten with `Shift`.
+    assert_eq!(nudge_delta(1, 0, false, 1.0), [1.0, 0.0]);
+    assert_eq!(nudge_delta(0, -1, false, 1.0), [0.0, -1.0]);
+    assert_eq!(nudge_delta(1, 0, true, 1.0), [10.0, 0.0]);
+    // Zoomed out, the same press is the same length on screen, which is more of the document's units —
+    // and `Shift` stays ten times the plain step rather than ten units.
+    assert_eq!(nudge_delta(1, 0, false, 0.5), [2.0, 0.0]);
+    assert_eq!(nudge_delta(1, 0, true, 0.5), [20.0, 0.0]);
+    // Zoomed in, it is fewer.
+    assert_eq!(nudge_delta(-1, 0, false, 2.0), [-0.5, 0.0]);
+}

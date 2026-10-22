@@ -275,3 +275,157 @@ fn the_drawer_and_the_backdrop_have_their_own_keys() {
         assert_eq!(size_step_for_keysym(keysym), None);
     }
 }
+
+#[test]
+fn the_arrows_move_what_is_held() {
+    use sgraffito::input::{Nav, nav_action};
+    assert_eq!(
+        nav_action(Keysym::Right, false),
+        Some(Nav::Nudge {
+            dx: 1,
+            dy: 0,
+            far: false
+        })
+    );
+    assert_eq!(
+        nav_action(Keysym::Left, true),
+        Some(Nav::Nudge {
+            dx: -1,
+            dy: 0,
+            far: true
+        })
+    );
+    assert_eq!(
+        nav_action(Keysym::Up, false),
+        Some(Nav::Nudge {
+            dx: 0,
+            dy: -1,
+            far: false
+        })
+    );
+    assert_eq!(
+        nav_action(Keysym::Down, true),
+        Some(Nav::Nudge {
+            dx: 0,
+            dy: 1,
+            far: true
+        })
+    );
+    // Nothing else moves anything: a letter is a tool's, a digit is a colour's.
+    assert_eq!(nav_action(Keysym::h, false), None);
+    assert_eq!(nav_action(Keysym::_1, false), None);
+}
+
+#[test]
+fn tab_walks_the_selection_and_shift_turns_it_around() {
+    use sgraffito::input::{Nav, nav_action};
+    assert_eq!(
+        nav_action(Keysym::Tab, false),
+        Some(Nav::Cycle { forward: true })
+    );
+    assert_eq!(
+        nav_action(Keysym::Tab, true),
+        Some(Nav::Cycle { forward: false })
+    );
+    // A layout that sends `Shift+Tab` as its own keysym walks backward whatever the modifier says.
+    assert_eq!(
+        nav_action(Keysym::ISO_Left_Tab, false),
+        Some(Nav::Cycle { forward: false })
+    );
+}
+
+#[test]
+fn the_keyboard_zooms_and_has_a_way_back() {
+    use sgraffito::input::{Nav, nav_action};
+    for keysym in [Keysym::plus, Keysym::equal, Keysym::KP_Add] {
+        assert_eq!(nav_action(keysym, false), Some(Nav::Zoom { dir: 1 }));
+    }
+    for keysym in [Keysym::minus, Keysym::KP_Subtract] {
+        assert_eq!(nav_action(keysym, false), Some(Nav::Zoom { dir: -1 }));
+    }
+    assert_eq!(nav_action(Keysym::_0, false), Some(Nav::ResetView));
+    // The colours are `1`-`5`; only `0` is the view's.
+    for keysym in [Keysym::_1, Keysym::_5] {
+        assert_eq!(nav_action(keysym, false), None);
+    }
+}
+
+#[test]
+fn enter_opens_what_is_held() {
+    use sgraffito::input::{Nav, nav_action};
+    assert_eq!(nav_action(Keysym::Return, false), Some(Nav::Open));
+    assert_eq!(nav_action(Keysym::KP_Enter, false), Some(Nav::Open));
+    // It is the only key that opens a box, and it is not a tool key.
+    assert_eq!(tool_for_keysym(Keysym::Return), None);
+}
+
+#[test]
+fn only_the_movement_keys_repeat() {
+    use sgraffito::input::{Nav, nav_action};
+    for keysym in [Keysym::Left, Keysym::Right, Keysym::Up, Keysym::Down] {
+        assert!(nav_action(keysym, false).unwrap().repeats(), "{keysym:?}");
+    }
+    // A held key that walked the cancel stages, the selection or the view would be an accident.
+    for keysym in [
+        Keysym::Tab,
+        Keysym::Escape,
+        Keysym::Return,
+        Keysym::_0,
+        Keysym::plus,
+    ] {
+        assert!(
+            nav_action(keysym, false).is_none_or(|nav| !nav.repeats()),
+            "{keysym:?}"
+        );
+    }
+    assert!(!Nav::ResetView.repeats());
+}
+
+#[test]
+fn the_canvas_keys_collide_with_no_existing_shortcut() {
+    use sgraffito::input::nav_action;
+    for keysym in [
+        Keysym::Tab,
+        Keysym::ISO_Left_Tab,
+        Keysym::Left,
+        Keysym::Right,
+        Keysym::Up,
+        Keysym::Down,
+        Keysym::plus,
+        Keysym::equal,
+        Keysym::minus,
+        Keysym::_0,
+        Keysym::Return,
+    ] {
+        assert!(nav_action(keysym, false).is_some(), "{keysym:?}");
+        assert_eq!(tool_for_keysym(keysym), None, "{keysym:?}");
+        assert_eq!(color_for_keysym(keysym), None, "{keysym:?}");
+        assert_eq!(size_step_for_keysym(keysym), None, "{keysym:?}");
+        assert_eq!(
+            sgraffito::input::panel_action_for_keysym(keysym),
+            None,
+            "{keysym:?}"
+        );
+        assert!(!sgraffito::input::deletes_selection(keysym), "{keysym:?}");
+    }
+}
+
+#[test]
+fn a_focused_text_box_keeps_its_own_keys() {
+    use sgraffito::input::EditAction;
+    // What the box's own map says the canvas keys are: the arrows are the caret's and `Enter` is a
+    // newline, which is why the canvas map is only reached with no box focused.
+    assert_eq!(
+        edit_action(Keysym::Left, false, false),
+        EditAction::Move(Caret::Left)
+    );
+    assert_eq!(
+        edit_action(Keysym::Down, false, false),
+        EditAction::Move(Caret::Down)
+    );
+    assert_eq!(
+        edit_action(Keysym::Return, false, false),
+        EditAction::Newline
+    );
+    assert_eq!(edit_action(Keysym::Tab, false, false), EditAction::Local);
+}
