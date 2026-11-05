@@ -37,6 +37,15 @@ use crate::canvas::{
 };
 use crate::render::{drawer_stays_open, picks_from_drawer};
 
+/// The input method's own log, off unless `SGRAFFITO_IM_TRACE` is set: a commit that does not appear is a
+/// question about which batch the compositor sent, and the answer has to come from the session where it
+/// happens. A free function so that it can be called while a text box is borrowed for editing.
+fn im_trace(message: &str) {
+    if std::env::var_os("SGRAFFITO_IM_TRACE").is_some() {
+        crate::app::log(&format!("im: {message}"));
+    }
+}
+
 /// What a local key does while a text box is focused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditAction {
@@ -505,15 +514,23 @@ impl App {
         match state {
             Some((text, cursor)) => {
                 if !self.text_input_enabled {
+                    im_trace("enable");
                     ti.enable();
                     self.text_input_enabled = true;
                 }
+                im_trace(&format!(
+                    "surrounding {} bytes, cursor {}, buffer {:?}",
+                    text.len(),
+                    cursor,
+                    text
+                ));
                 ti.set_surrounding_text(text, cursor as i32, cursor as i32);
                 ti.set_content_type(ContentHint::None, ContentPurpose::Normal);
                 ti.commit();
             }
             None => {
                 if self.text_input_enabled {
+                    im_trace("disable");
                     ti.disable();
                     ti.commit();
                     self.text_input_enabled = false;
@@ -527,6 +544,7 @@ impl App {
         use zwp_text_input_v3::Event;
         match event {
             Event::Enter { .. } => {
+                im_trace("enter");
                 self.im_preedit = None;
                 self.im_commit.clear();
                 self.im_delete = None;
@@ -534,18 +552,36 @@ impl App {
                 self.sync_text_input();
             }
             Event::Leave { .. } => {
+                im_trace(&format!(
+                    "leave, dropping a pending preedit {:?} and commit {:?}",
+                    self.im_preedit, self.im_commit
+                ));
                 self.im_preedit = None;
                 self.im_commit.clear();
                 self.im_delete = None;
                 self.text_input_enabled = false;
             }
-            Event::PreeditString { text, .. } => self.im_preedit = text,
-            Event::CommitString { text: Some(text) } => self.im_commit.push_str(&text),
+            Event::PreeditString { text, .. } => {
+                im_trace(&format!("preedit {text:?}"));
+                self.im_preedit = text;
+            }
+            Event::CommitString { text: Some(text) } => {
+                im_trace(&format!("commit {text:?}"));
+                self.im_commit.push_str(&text);
+            }
             Event::DeleteSurroundingText {
                 before_length,
                 after_length,
-            } => self.im_delete = Some((before_length, after_length)),
-            Event::Done { .. } => self.apply_text_input_batch(),
+            } => {
+                im_trace(&format!(
+                    "delete {before_length} before, {after_length} after"
+                ));
+                self.im_delete = Some((before_length, after_length));
+            }
+            Event::Done { serial } => {
+                im_trace(&format!("done serial {serial}"));
+                self.apply_text_input_batch();
+            }
             _ => {}
         }
     }
@@ -555,6 +591,9 @@ impl App {
         let commit = std::mem::take(&mut self.im_commit);
         let delete = self.im_delete.take();
         let Some(edit) = self.focused_edit_mut() else {
+            im_trace(&format!(
+                "batch dropped, no text box is focused: preedit {preedit:?} commit {commit:?}"
+            ));
             return;
         };
         // The preedit is double-buffered: a `done` batch that carried no `preedit_string` resets
@@ -568,6 +607,10 @@ impl App {
         if !commit.is_empty() {
             edit.buffer.insert(&commit);
         }
+        im_trace(&format!(
+            "applied: preedit {:?}, commit {commit:?}, buffer {:?}",
+            edit.preedit, edit.buffer.text
+        ));
         self.mark_edit_dirty();
         self.sync_text_input();
     }
