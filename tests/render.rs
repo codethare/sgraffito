@@ -2770,3 +2770,113 @@ fn a_second_renderer_draws_the_same_sketch() {
     );
     assert_eq!(first, second);
 }
+
+/// The RGB a pixel carries, ignoring its alpha — what the eye reads on an opaque overlay.
+fn rgb(buf: &[u8], w: u32, x: u32, y: u32) -> (u8, u8, u8) {
+    let i = ((y * w + x) * 4) as usize;
+    (buf[i], buf[i + 1], buf[i + 2])
+}
+
+fn near(a: (u8, u8, u8), b: (u8, u8, u8), tolerance: u8) -> bool {
+    a.0.abs_diff(b.0) <= tolerance
+        && a.1.abs_diff(b.1) <= tolerance
+        && a.2.abs_diff(b.2) <= tolerance
+}
+
+#[test]
+fn a_note_keeps_its_exact_square() {
+    // A note is what the drawing is read against, so its square is a figure: a wobbling edge under
+    // wrapped text is not a mark, it is a bug. The edge is measured against the box, column by column.
+    let (w, h) = (400u32, 360u32);
+    let note = Note {
+        x: 100.0,
+        y: 80.0,
+        w: 200.0,
+        h: 160.0,
+        color: "#f6d32d".into(),
+        text: "buy milk".into(),
+        created: "2026/10/14".into(),
+    };
+    let doc = OutputAnnotations {
+        strokes: vec![line(20.0, 20.0, 380.0)],
+        texts: vec![],
+        shapes: vec![rect_shape([260.0, 240.0], [380.0, 340.0])],
+        notes: vec![note.clone()],
+    };
+    let mut buf = buffer(w, h);
+    frame(&mut buf, w, h, &doc, &Overlay::default(), None);
+    // Inside the rounded corners, every column of the top edge starts on the same row: the note's
+    // boundary is a straight line, not a trace that wanders by a pixel or two.
+    let top_of = |x: u32| {
+        (60..h)
+            .find(|y| alpha(&buf, w, x, *y) > 0)
+            .expect("the note painted its column")
+    };
+    let reference = top_of(200);
+    for x in 116..284u32 {
+        assert_eq!(
+            top_of(x),
+            reference,
+            "the note's top edge wobbled at column {x}"
+        );
+    }
+}
+
+#[test]
+fn the_interface_over_a_sketched_document_is_exact() {
+    // The rail, the selection frame, its handles, the marquee and the eraser cursor are interface, so
+    // they are drawn the same over a sketched document as over a bare one. The comparison is by the
+    // pixels they own: the accent and the near-white of a handle, which no mark shares.
+    const ACCENT: (u8, u8, u8) = (10, 132, 255);
+    const WHITE: (u8, u8, u8) = (255, 255, 255);
+    let (w, h) = (400u32, 300u32);
+    let shape = Shape {
+        color: "#e01b24".into(),
+        ..rect_shape([80.0, 90.0], [240.0, 200.0])
+    };
+    let marked = |bare: bool| {
+        let mut doc = sole_shape(shape.clone());
+        if !bare {
+            doc.strokes = vec![line(40.0, 260.0, 360.0)];
+            doc.shapes.push(Shape {
+                kind: ShapeKind::Circle,
+                ..rect_shape([260.0, 40.0], [370.0, 140.0])
+            });
+        }
+        doc
+    };
+    let overlay = Overlay {
+        selection: Some(Selection {
+            items: vec![ItemId::Shape(0)],
+            transform: None,
+        }),
+        marquee: Some(Rect {
+            x: 300.0,
+            y: 210.0,
+            w: 70.0,
+            h: 60.0,
+        }),
+        eraser: Some([60.0, 40.0]),
+        ..Default::default()
+    };
+    let owned = |doc: &OutputAnnotations| {
+        // Straight from the renderer, without the swap a shm buffer gets, so the accent's own bytes
+        // are the ones compared.
+        let mut buf = buffer(w, h);
+        Renderer::new().render(&mut buf, w, h, 1.0, View::default(), doc, &overlay, None);
+        let mut out = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let c = rgb(&buf, w, x, y);
+                if alpha(&buf, w, x, y) == 255 && (near(c, ACCENT, 6) || near(c, WHITE, 6)) {
+                    out.push((x, y, c));
+                }
+            }
+        }
+        out
+    };
+    let bare = owned(&marked(true));
+    let busy = owned(&marked(false));
+    assert!(!bare.is_empty(), "the selection frame painted nothing");
+    assert_eq!(bare, busy, "the interface moved over a sketched document");
+}
