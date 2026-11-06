@@ -4,4 +4,5 @@ pub mod app;
 pub mod canvas;
 pub mod input;
 pub mod render;
+pub mod sketch;
 pub mod store;

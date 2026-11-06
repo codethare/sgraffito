@@ -1,6 +1,7 @@
 use sgraffito::canvas::{
     ERASER_THRESHOLD, ItemId, OutputAnnotations, PALETTE, Rect, Stroke, TextItem,
 };
+use sgraffito::sketch::SKETCH_SLACK;
 
 fn line(y: f32, x0: f32, x1: f32) -> Stroke {
     Stroke {
@@ -171,20 +172,22 @@ fn rect_union_and_intersection() {
 }
 
 #[test]
-fn stroke_bounds_cover_the_width_and_handle_the_empty_and_single_case() {
+fn stroke_bounds_cover_the_width_and_leave_room_for_the_wander() {
     let s = Stroke {
         color: "#ffffff".into(),
         width: 4.0,
         points: vec![[10.0, 20.0], [30.0, 20.0]],
     };
-    // Half the stroke width plus one logical pixel for the anti-aliasing edge.
+    // Half the stroke width, one logical pixel for the anti-aliasing edge, and the slack the
+    // hand-drawn style can reach outside the stored geometry.
+    let slack = 2.0 + 1.0 + SKETCH_SLACK;
     assert_eq!(
         s.bounds(),
         Some(Rect {
-            x: 7.0,
-            y: 17.0,
-            w: 26.0,
-            h: 6.0
+            x: 10.0 - slack,
+            y: 20.0 - slack,
+            w: 20.0 + 2.0 * slack,
+            h: 2.0 * slack
         })
     );
     let empty = Stroke {
@@ -200,11 +203,35 @@ fn stroke_bounds_cover_the_width_and_handle_the_empty_and_single_case() {
     assert_eq!(
         dot.bounds(),
         Some(Rect {
-            x: 2.0,
-            y: 2.0,
-            w: 6.0,
-            h: 6.0
+            x: 5.0 - slack,
+            y: 5.0 - slack,
+            w: 2.0 * slack,
+            h: 2.0 * slack
         })
+    );
+}
+
+#[test]
+fn the_wander_is_room_for_painting_and_not_for_hitting() {
+    // The bounds grew so a damaged region repaints the whole mark. The eraser must not grow with
+    // them: what a mark looks like never changes what it is.
+    let line = Stroke {
+        color: "#ffffff".into(),
+        width: 2.0,
+        points: vec![[0.0, 0.0], [100.0, 0.0]],
+    };
+    let a = OutputAnnotations {
+        strokes: vec![line],
+        texts: vec![],
+        shapes: vec![],
+        notes: vec![],
+    };
+    assert_eq!(a.hit(50.0, 0.0, ERASER_THRESHOLD), Some(ItemId::Stroke(0)));
+    assert_eq!(a.hit(50.0, ERASER_THRESHOLD + 1.0, ERASER_THRESHOLD), None);
+    assert_eq!(
+        a.hit(50.0, SKETCH_SLACK.floor(), ERASER_THRESHOLD),
+        None,
+        "the drawn wander is not a target"
     );
 }
 
@@ -727,8 +754,9 @@ fn an_arrows_box_covers_its_head() {
         box_.h > plain.bounds().h,
         "an arrow's box is grown by its head"
     );
-    // Every edge allows for half the pen, a pixel of anti-aliasing and the head's spread.
-    let slack = arrow.width / 2.0 + 1.0 + arrow.head_half();
+    // Every edge allows for half the pen, a pixel of anti-aliasing, the head's spread and the
+    // wander the hand-drawn style can reach outside it.
+    let slack = arrow.width / 2.0 + 1.0 + arrow.head_half() + SKETCH_SLACK;
     assert!(
         (box_.x - (100.0 - slack)).abs() < 0.01,
         "the left edge is the head away"

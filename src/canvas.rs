@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::sketch::SKETCH_SLACK;
+
 /// Eraser hit radius, in logical pixels.
 pub const ERASER_THRESHOLD: f32 = 8.0;
 
@@ -580,7 +582,7 @@ impl Shape {
             ShapeKind::Arrow => self.head_half(),
             _ => 0.0,
         };
-        rect_of(self.from, self.to).grown(self.width / 2.0 + 1.0 + head)
+        rect_of(self.from, self.to).grown(self.width / 2.0 + 1.0 + head + SKETCH_SLACK)
     }
 
     /// The shape as a polyline in logical pixels: what a hit test measures against. A closed shape
@@ -659,7 +661,7 @@ impl Stroke {
                 w: x1 - x0,
                 h: y1 - y0,
             }
-            .grown(self.width / 2.0 + 1.0),
+            .grown(self.width / 2.0 + 1.0 + SKETCH_SLACK),
         )
     }
 
