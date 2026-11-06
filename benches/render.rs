@@ -182,9 +182,7 @@ fn sketch_cost(strokes: &[Stroke]) {
     let generate = || {
         let mut segments = 0usize;
         for s in strokes {
-            let anchor = s.points.first().copied().unwrap_or([0.0, 0.0]);
-            let seed = sketch::seed_for(0, &s.color, s.width, anchor);
-            segments += black_box(sketch::stroke(&s.points, s.width, seed)).len();
+            segments += black_box(sketch::stroke(&s.points, s.width, s.seed())).len();
         }
         black_box(segments)
     };
@@ -241,6 +239,18 @@ fn main() {
         false,
     );
     measure("dense-full", 3840, 2160, 1.0, &dense, &drag, None, false);
+    // A frame that only copies the raster: no overlay, so nothing is drawn into it and the style has
+    // no work to do at all. `dense-full` above copies *and* draws a live stroke.
+    measure(
+        "copy-only",
+        3840,
+        2160,
+        1.0,
+        &dense,
+        &Overlay::default(),
+        None,
+        false,
+    );
     sketch_cost(&dense.strokes);
     measure("rail-full", 3840, 2160, 1.0, &sparse, &toolbar, None, false);
     // A whole-surface frame that follows a document change: the document is rasterised again.

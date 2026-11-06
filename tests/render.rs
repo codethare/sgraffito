@@ -2575,16 +2575,16 @@ fn rect_shape(from: [f32; 2], to: [f32; 2]) -> Shape {
 }
 
 #[test]
-fn sketched_ink_stays_inside_the_element_bounds() {
+fn sketched_ink_stays_inside_the_paint_box() {
     let (w, h) = (320u32, 320u32);
     let mut cases: Vec<(OutputAnnotations, Rect)> = vec![
         (
             ann(vec![line(150.0, 40.0, 280.0)], vec![]),
-            line(150.0, 40.0, 280.0).bounds().unwrap(),
+            line(150.0, 40.0, 280.0).paint_bounds().unwrap(),
         ),
         (
             sole_shape(rect_shape([80.0, 80.0], [220.0, 200.0])),
-            rect_shape([80.0, 80.0], [220.0, 200.0]).bounds(),
+            rect_shape([80.0, 80.0], [220.0, 200.0]).paint_bounds(),
         ),
     ];
     for kind in [
@@ -2597,7 +2597,7 @@ fn sketched_ink_stays_inside_the_element_bounds() {
             kind,
             ..rect_shape([80.0, 80.0], [220.0, 200.0])
         };
-        let bounds = shape.bounds();
+        let bounds = shape.paint_bounds();
         cases.push((sole_shape(shape), bounds));
     }
     for (doc, bounds) in cases {
@@ -2676,8 +2676,8 @@ fn a_moved_sketched_shape_leaves_no_trail() {
     let before = heavy([60.0, 60.0], [200.0, 160.0]);
     let after = heavy([140.0, 130.0], [280.0, 230.0]);
     let mut buf = buffer(w, h);
-    let damage = before.bounds().union(after.bounds());
-    let bounds = after.bounds();
+    let damage = before.paint_bounds().union(after.paint_bounds());
+    let bounds = after.paint_bounds();
     frame(
         &mut buf,
         w,
@@ -2716,8 +2716,8 @@ fn a_damaged_frame_of_a_sketched_document_matches_a_whole_surface_one() {
     let mut whole = buffer(w, h);
     frame(&mut whole, w, h, &doc, &Overlay::default(), None);
     let damage = doc.shapes[0]
-        .bounds()
-        .union(doc.strokes[0].bounds().unwrap());
+        .paint_bounds()
+        .union(doc.strokes[0].paint_bounds().unwrap());
     let mut damaged = buffer(w, h);
     frame(&mut damaged, w, h, &doc, &Overlay::default(), Some(damage));
     let x0 = damage.x as u32;
@@ -2879,4 +2879,39 @@ fn the_interface_over_a_sketched_document_is_exact() {
     let busy = owned(&marked(false));
     assert!(!bare.is_empty(), "the selection frame painted nothing");
     assert_eq!(bare, busy, "the interface moved over a sketched document");
+}
+
+#[test]
+fn removing_an_element_does_not_redraw_the_others() {
+    // The seed comes from the element's own geometry, never from where it sits in its bucket, so
+    // erasing one element cannot change how the ones next to it are drawn.
+    let (w, h) = (400u32, 220u32);
+    let first = line(50.0, 40.0, 360.0);
+    let second = line(140.0, 40.0, 360.0);
+    let render = |doc: &OutputAnnotations| {
+        let mut buf = buffer(w, h);
+        Renderer::new().render(
+            &mut buf,
+            w,
+            h,
+            1.0,
+            View::default(),
+            doc,
+            &Overlay::default(),
+            None,
+        );
+        buf
+    };
+    let both = render(&ann(vec![first.clone(), second.clone()], vec![]));
+    let alone = render(&ann(vec![second.clone()], vec![]));
+    let box_ = second.paint_bounds().unwrap();
+    for y in box_.y as u32..(box_.y + box_.h) as u32 {
+        for x in box_.x as u32..(box_.x + box_.w) as u32 {
+            assert_eq!(
+                alpha(&both, w, x, y),
+                alpha(&alone, w, x, y),
+                "the second stroke was redrawn at {x},{y}"
+            );
+        }
+    }
 }

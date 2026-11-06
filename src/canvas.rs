@@ -395,7 +395,7 @@ impl OutputAnnotations {
     pub fn erase(&mut self, x: f32, y: f32, tolerance: f32) -> Option<Rect> {
         match self.hit(x, y, tolerance) {
             Some(ItemId::Stroke(i)) => {
-                let box_ = self.strokes[i].bounds();
+                let box_ = self.strokes[i].paint_bounds();
                 self.strokes.remove(i);
                 box_
             }
@@ -405,7 +405,7 @@ impl OutputAnnotations {
                 Some(box_)
             }
             Some(ItemId::Shape(i)) => {
-                let box_ = self.shapes[i].bounds();
+                let box_ = self.shapes[i].paint_bounds();
                 self.shapes.remove(i);
                 Some(box_)
             }
@@ -435,7 +435,7 @@ impl OutputAnnotations {
                 ItemId::Stroke(i) => {
                     if let Some(s) = self.strokes.get(i).cloned() {
                         copies.push(ItemId::Stroke(self.strokes.len()));
-                        union_into(&mut box_, s.bounds());
+                        union_into(&mut box_, s.paint_bounds());
                         self.strokes.push(s);
                     }
                 }
@@ -449,7 +449,7 @@ impl OutputAnnotations {
                 ItemId::Shape(i) => {
                     if let Some(s) = self.shapes.get(i).cloned() {
                         copies.push(ItemId::Shape(self.shapes.len()));
-                        union_into(&mut box_, Some(s.bounds()));
+                        union_into(&mut box_, Some(s.paint_bounds()));
                         self.shapes.push(s);
                     }
                 }
@@ -475,7 +475,7 @@ impl OutputAnnotations {
                 ItemId::Stroke(i) => {
                     if let Some(s) = self.strokes.get_mut(i) {
                         s.color = color.to_string();
-                        union_into(&mut box_, s.bounds());
+                        union_into(&mut box_, s.paint_bounds());
                     }
                 }
                 ItemId::Text(i) => {
@@ -487,7 +487,7 @@ impl OutputAnnotations {
                 ItemId::Shape(i) => {
                     if let Some(s) = self.shapes.get_mut(i) {
                         s.color = color.to_string();
-                        union_into(&mut box_, Some(s.bounds()));
+                        union_into(&mut box_, Some(s.paint_bounds()));
                     }
                 }
                 ItemId::Note(i) => {
@@ -582,7 +582,29 @@ impl Shape {
             ShapeKind::Arrow => self.head_half(),
             _ => 0.0,
         };
-        rect_of(self.from, self.to).grown(self.width / 2.0 + 1.0 + head + SKETCH_SLACK)
+        rect_of(self.from, self.to).grown(self.width / 2.0 + 1.0 + head)
+    }
+
+    /// The box this shape paints: its bounds plus the reach of the hand-drawn style. Every shape kind is
+    /// drawn by hand, so a damaged region cut from `bounds` would leave the outside of the wander
+    /// behind when the shape moves. The frame and the marquee still measure `bounds`, because they are
+    /// about the geometry the user drew, not about how it was drawn.
+    pub fn paint_bounds(&self) -> Rect {
+        self.bounds().grown(SKETCH_SLACK)
+    }
+
+    /// The seed the hand-drawn style is drawn from: its kind, colour and width, and the point it was
+    /// started at. Not the whole geometry — `to` moves while a shape is being sized, and the mark has
+    /// to sit still under the hand — and never the element's index, which a deletion would shift.
+    pub fn seed(&self) -> u64 {
+        let kind = match self.kind {
+            ShapeKind::Circle => 1,
+            ShapeKind::Rect => 2,
+            ShapeKind::Diamond => 3,
+            ShapeKind::Line => 4,
+            ShapeKind::Arrow => 5,
+        };
+        crate::sketch::seed_for(kind, &self.color, self.width, self.from)
     }
 
     /// The shape as a polyline in logical pixels: what a hit test measures against. A closed shape
@@ -661,8 +683,27 @@ impl Stroke {
                 w: x1 - x0,
                 h: y1 - y0,
             }
-            .grown(self.width / 2.0 + 1.0 + SKETCH_SLACK),
+            .grown(self.width / 2.0 + 1.0),
         )
+    }
+
+    /// The box this stroke paints: its bounds plus the reach of the hand-drawn style, except for a
+    /// single sample, which is drawn as an exact disc of the pen's width and does not wander.
+    pub fn paint_bounds(&self) -> Option<Rect> {
+        let bounds = self.bounds()?;
+        Some(if self.points.len() < 2 {
+            bounds
+        } else {
+            bounds.grown(SKETCH_SLACK)
+        })
+    }
+
+    /// The seed the hand-drawn style is drawn from: its colour and width and the sample it started
+    /// from. The anchor rather than the whole path, because a stroke gains a sample per motion event
+    /// and hashing all of them would re-roll the mark under the hand.
+    pub fn seed(&self) -> u64 {
+        let anchor = self.points.first().copied().unwrap_or([0.0, 0.0]);
+        crate::sketch::seed_for(0, &self.color, self.width, anchor)
     }
 
     /// Squared distance from a point to this polyline.

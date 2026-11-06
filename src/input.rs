@@ -1027,7 +1027,7 @@ impl App {
                 if let Some(stroke) = stroke
                     && !stroke.points.is_empty()
                 {
-                    changed = stroke.bounds();
+                    changed = stroke.paint_bounds();
                     self.doc
                         .outputs
                         .entry(bucket.clone())
@@ -1040,7 +1040,7 @@ impl App {
                 if let Some(shape) = shape
                     && !shape.is_empty()
                 {
-                    let box_ = shape.bounds();
+                    let box_ = shape.paint_bounds();
                     changed = Some(match changed {
                         Some(changed) => changed.union(box_),
                         None => box_,

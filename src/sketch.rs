@@ -26,16 +26,40 @@ pub const SKETCH_BOW_MAX: f32 = 6.0;
 /// Rough.js's divisor for the bow: a longer edge bows further, up to the cap above.
 pub const SKETCH_BOW_DIVISOR: f32 = 200.0;
 
+/// How far the second trace is displaced relative to the first: half as much, so the two ends differ and
+/// the two traces cross in the middle. Rough.js's `_doubleLine` does the same.
+pub const SKETCH_SECOND_PASS: f32 = 0.5;
+
+/// How far a closed loop's centre may drift from the oval's, as a fraction of the wander.
+const SKETCH_OVAL_DRIFT: f32 = 0.5;
+
+/// The closed loop's radius wander: a harmonic, its amplitude, and the per-pass phase it is shifted by.
+const SKETCH_OVAL_HARMONICS: [(f32, f32); 2] = [(3.0, 0.6), (5.0, 0.4)];
+
+/// Where a trace's two control points sit along the chord, as fractions of it.
+const SKETCH_CONTROL: [f32; 2] = [1.0 / 3.0, 2.0 / 3.0];
+
+/// The divisor the short-mark rule shrinks the wander by: a mark shorter than ten wander-widths is
+/// drawn more exactly, so it is not thickened into a blob.
+const SKETCH_SHORT_DIVISOR: f32 = 10.0;
+
+/// The seed bit that decides which side of a chord an edge bows to, so both traces bow the same way.
+const BOW_SIDE_BIT: u64 = 0x80;
+
 /// The samples a wandering closed loop is built from. Higher than Rough.js's nine because this
 /// project joins samples through their midpoints rather than running a spline through them, and nine
 /// midpoints let a large oval sag visibly towards a polygon.
 pub const SKETCH_OVAL_STEPS: usize = 24;
 
-/// How far any sketched ink can reach outside the geometry it was generated from. `canvas.rs` grows an
-/// element's bounds by this, and `2.0 * SKETCH_OFFSET` covers the two traces' endpoint wander while
-/// `SKETCH_BOW_MAX` covers the bow; a cubic's bulge is three quarters of its control points' offset, so
-/// the sum is an upper bound rather than a near miss.
-pub const SKETCH_SLACK: f32 = 2.0 * SKETCH_OFFSET + SKETCH_BOW_MAX;
+/// How far any sketched ink can reach outside the geometry it was generated from: the wander and the bow
+/// at their caps. A cubic never leaves the hull of its control points, so a control point pushed out by
+/// both caps is the furthest a mark can go, and `canvas.rs` grows a element's *paint* box by exactly this
+/// — never the box a selection frame or a marquee measures.
+pub const SKETCH_SLACK: f32 = SKETCH_OFFSET_MAX + SKETCH_BOW_MAX;
+
+/// The bound is the sum of the two caps by construction; a build that made it smaller would leave a
+/// one-pixel trail behind the heaviest mark, which is exactly what the constant exists to prevent.
+const _: () = assert!(SKETCH_SLACK >= SKETCH_OFFSET_MAX + SKETCH_BOW_MAX);
 
 /// One path command. `render` walks these and emits them through the view; the module itself never
 /// touches a `tiny_skia` type.
@@ -59,13 +83,17 @@ pub fn line(from: [f32; 2], to: [f32; 2], width: f32, seed: u64) -> Vec<Seg> {
     let bow = (offset * len / SKETCH_BOW_DIVISOR).min(SKETCH_BOW_MAX);
     // Both traces bow to the same side: a hand that goes over a line twice bulges it the same way, and
     // the side is taken from the seed rather than from the stream so it does not depend on draw order.
-    let side = if seed & 0x80 == 0 { -1.0 } else { 1.0 };
+    let side = if seed & BOW_SIDE_BIT == 0 { -1.0 } else { 1.0 };
     let (nx, ny) = (-dy / len * side, dx / len * side);
     let mut segs = Vec::with_capacity(4);
     for pass in 0..2u64 {
         // The second trace is displaced by half as much, which is Rough.js's `_doubleLine`: two ends
         // that differ, and a middle where the two cross.
-        let amount = if pass == 0 { offset } else { offset * 0.5 };
+        let amount = if pass == 0 {
+            offset
+        } else {
+            offset * SKETCH_SECOND_PASS
+        };
         let mut rng = Rng::new(seed ^ PASS_SALT[pass as usize]);
         let control = |frac: f32, rng: &mut Rng| {
             [
@@ -74,8 +102,8 @@ pub fn line(from: [f32; 2], to: [f32; 2], width: f32, seed: u64) -> Vec<Seg> {
             ]
         };
         let start = [from[0] + rng.bipolar(amount), from[1] + rng.bipolar(amount)];
-        let first = control(1.0 / 3.0, &mut rng);
-        let second = control(2.0 / 3.0, &mut rng);
+        let first = control(SKETCH_CONTROL[0], &mut rng);
+        let second = control(SKETCH_CONTROL[1], &mut rng);
         let end = [to[0] + rng.bipolar(amount), to[1] + rng.bipolar(amount)];
         segs.push(Seg::Move(start));
         segs.push(Seg::Cubic(first, second, end));
@@ -127,15 +155,27 @@ pub fn ellipse(centre: [f32; 2], radii: [f32; 2], width: f32, seed: u64) -> Vec<
     let offset = wander(width, 2.0 * rx.max(ry));
     let mut segs = Vec::with_capacity(SKETCH_OVAL_STEPS * 4);
     for pass in 0..2u64 {
-        let amount = if pass == 0 { offset } else { offset * 0.5 };
+        let amount = if pass == 0 {
+            offset
+        } else {
+            offset * SKETCH_SECOND_PASS
+        };
         let mut rng = Rng::new(seed ^ PASS_SALT[pass as usize]);
         let phase = [rng.unit() * TAU, rng.unit() * TAU];
-        let drift = [rng.bipolar(amount * 0.5), rng.bipolar(amount * 0.5)];
+        let drift = [
+            rng.bipolar(amount * SKETCH_OVAL_DRIFT),
+            rng.bipolar(amount * SKETCH_OVAL_DRIFT),
+        ];
         let samples: Vec<[f32; 2]> = (0..SKETCH_OVAL_STEPS)
             .map(|step| {
                 let angle = step as f32 / SKETCH_OVAL_STEPS as f32 * TAU;
-                let wobble =
-                    0.6 * (3.0 * angle + phase[0]).sin() + 0.4 * (5.0 * angle + phase[1]).sin();
+                let wobble = SKETCH_OVAL_HARMONICS
+                    .iter()
+                    .zip(phase)
+                    .map(|((harmonic, amplitude), phase)| {
+                        amplitude * (harmonic * angle + phase).sin()
+                    })
+                    .sum::<f32>();
                 let wander = amount * wobble;
                 [
                     centre[0] + drift[0] + (rx + wander) * angle.cos(),
@@ -179,7 +219,11 @@ pub fn stroke(points: &[[f32; 2]], width: f32, seed: u64) -> Vec<Seg> {
     let offset = wander(width, polyline_length(points));
     let mut segs = Vec::with_capacity(points.len() * 4);
     for pass in 0..2u64 {
-        let amount = if pass == 0 { offset } else { offset * 0.5 };
+        let amount = if pass == 0 {
+            offset
+        } else {
+            offset * SKETCH_SECOND_PASS
+        };
         let mut rng = Rng::new(seed ^ PASS_SALT[pass as usize]);
         let jittered: Vec<[f32; 2]> = points
             .iter()
@@ -212,7 +256,7 @@ fn wander(width: f32, len: f32) -> f32 {
         .max(width * SKETCH_WEIGHT)
         .min(SKETCH_OFFSET_MAX);
     if offset * offset * 100.0 > len * len {
-        len / 10.0
+        len / SKETCH_SHORT_DIVISOR
     } else {
         offset
     }
@@ -599,6 +643,31 @@ mod tests {
                 "the trace missed {end:?} by {nearest}"
             );
         }
+    }
+
+    #[test]
+    fn the_declared_slack_covers_the_worst_mark_the_style_can_draw() {
+        // The heaviest pen the style allows, on a long edge, over many seeds: the wander and the bow
+        // both reach their caps, and the curve stays inside the hull of its control points, so this is
+        // what `SKETCH_SLACK` has to hold. One seed cannot prove a bound; every seed can only falsify it.
+        let (from, to) = ([0.0, 0.0], [4000.0, 0.0]);
+        let mut worst = 0.0f32;
+        for seed in 0..512u64 {
+            let segs = line(from, to, 24.0, seed.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+            let reach = drawn(&segs)
+                .into_iter()
+                .map(|p| p[1].abs())
+                .fold(0.0f32, f32::max);
+            worst = worst.max(reach);
+        }
+        // A cubic never leaves the hull of its control points, and a control point is pushed out by at
+        // most the wander plus the bow, both at their caps: that is the bound `SKETCH_SLACK` declares
+        // (pinned by the const assertion above). One seed cannot prove a bound; sweeping them falsifies
+        // one, which is what a regression in the geometry would show up as.
+        assert!(
+            worst <= SKETCH_SLACK,
+            "a mark reached {worst} past its geometry, outside the declared {SKETCH_SLACK}"
+        );
     }
 
     #[test]

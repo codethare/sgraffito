@@ -941,7 +941,7 @@ impl App {
         let mut committed_box: Option<Rect> = None;
         let committed = !pending.is_empty() || !shapes.is_empty();
         for (_, bucket, stroke) in pending {
-            if let Some(box_) = stroke.bounds() {
+            if let Some(box_) = stroke.paint_bounds() {
                 committed_box = Some(match committed_box {
                     Some(pending) => pending.union(box_),
                     None => box_,
@@ -955,7 +955,7 @@ impl App {
                 .push(stroke);
         }
         for (_, bucket, shape) in shapes {
-            let box_ = shape.bounds();
+            let box_ = shape.paint_bounds();
             committed_box = Some(match committed_box {
                 Some(pending) => pending.union(box_),
                 None => box_,
@@ -1456,9 +1456,9 @@ impl App {
                     ItemId::Stroke(i) if i < ann.strokes.len() => {
                         let turned = transform.stroke(&ann.strokes[i]);
                         let changed = ann.strokes[i]
-                            .bounds()
+                            .paint_bounds()
                             .into_iter()
-                            .chain(turned.bounds())
+                            .chain(turned.paint_bounds())
                             .reduce(Rect::union);
                         ann.strokes[i] = turned;
                         changed
@@ -1477,7 +1477,7 @@ impl App {
                     }
                     ItemId::Shape(i) if i < ann.shapes.len() => {
                         let moved = transform.shape(&ann.shapes[i]);
-                        let changed = ann.shapes[i].bounds().union(moved.bounds());
+                        let changed = ann.shapes[i].paint_bounds().union(moved.paint_bounds());
                         ann.shapes[i] = moved;
                         Some(changed)
                     }

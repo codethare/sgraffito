@@ -668,10 +668,10 @@ impl Renderer {
             self.draw_document(&mut pixmap, ann, screen, text, skip, scrim);
         }
         if let Some(s) = &overlay.stroke {
-            draw_stroke(&mut pixmap, s, screen, Ink::Sketch(stroke_seed(s)));
+            draw_stroke(&mut pixmap, s, screen, Ink::Sketch(s.seed()));
         }
         if let Some(s) = &overlay.shape {
-            draw_shape(&mut pixmap, s, screen, Ink::Sketch(shape_seed(s)));
+            draw_shape(&mut pixmap, s, screen, Ink::Sketch(s.seed()));
         }
         if let Some(note) = &overlay.note {
             self.draw_note(&mut pixmap, note, screen, None);
@@ -699,7 +699,7 @@ impl Renderer {
                                 &mut pixmap,
                                 &transform.stroke(s),
                                 screen,
-                                Ink::Sketch(stroke_seed(s)),
+                                Ink::Sketch(s.seed()),
                             );
                         }
                     }
@@ -721,7 +721,7 @@ impl Renderer {
                                 &mut pixmap,
                                 &transform.shape(s),
                                 screen,
-                                Ink::Sketch(shape_seed(s)),
+                                Ink::Sketch(s.seed()),
                             );
                         }
                     }
@@ -787,13 +787,13 @@ impl Renderer {
             if skip.contains(&ItemId::Stroke(index)) {
                 continue;
             }
-            draw_stroke(pixmap, s, screen, Ink::Sketch(stroke_seed(s)));
+            draw_stroke(pixmap, s, screen, Ink::Sketch(s.seed()));
         }
         for (index, s) in ann.shapes.iter().enumerate() {
             if skip.contains(&ItemId::Shape(index)) {
                 continue;
             }
-            draw_shape(pixmap, s, screen, Ink::Sketch(shape_seed(s)));
+            draw_shape(pixmap, s, screen, Ink::Sketch(s.seed()));
         }
         for (index, item) in ann.texts.iter().enumerate() {
             // The box under edit is the overlay's, and a box a gesture is dragging is drawn with
@@ -1553,8 +1553,8 @@ pub fn transient_damage(last: Option<Rect>, now: Option<Rect>, rail: Option<Rect
 /// the overlay draws none of them. The selection's own box needs the document, so the caller adds
 /// it.
 pub fn transient_bounds(overlay: &Overlay) -> Option<Rect> {
-    let stroke = overlay.stroke.as_ref().and_then(Stroke::bounds);
-    let shape = overlay.shape.as_ref().map(Shape::bounds);
+    let stroke = overlay.stroke.as_ref().and_then(Stroke::paint_bounds);
+    let shape = overlay.shape.as_ref().map(Shape::paint_bounds);
     let note = overlay.note.as_ref().map(Note::bounds);
     let eraser = overlay.eraser.map(|[x, y]| {
         Rect {
@@ -2106,29 +2106,6 @@ enum Ink {
     Precise,
     /// The seed the mark's wander and bow are derived from — the element's own, never a copy's.
     Sketch(u64),
-}
-
-/// The kind tag a shape's seed is derived from, so a rectangle and a line at the same anchor do not
-/// share a wander.
-fn shape_tag(kind: ShapeKind) -> u8 {
-    match kind {
-        ShapeKind::Circle => 1,
-        ShapeKind::Rect => 2,
-        ShapeKind::Diamond => 3,
-        ShapeKind::Line => 4,
-        ShapeKind::Arrow => 5,
-    }
-}
-
-const STROKE_TAG: u8 = 0;
-
-fn stroke_seed(s: &Stroke) -> u64 {
-    let anchor = s.points.first().copied().unwrap_or([0.0, 0.0]);
-    sketch::seed_for(STROKE_TAG, &s.color, s.width, anchor)
-}
-
-fn shape_seed(s: &Shape) -> u64 {
-    sketch::seed_for(shape_tag(s.kind), &s.color, s.width, s.from)
 }
 
 /// Emit canvas-space sketch commands through the view. This is the module boundary: `sketch` knows the

@@ -172,24 +172,24 @@ fn rect_union_and_intersection() {
 }
 
 #[test]
-fn stroke_bounds_cover_the_width_and_leave_room_for_the_wander() {
+fn stroke_bounds_cover_the_width_and_its_paint_box_adds_the_wander() {
     let s = Stroke {
         color: "#ffffff".into(),
         width: 4.0,
         points: vec![[10.0, 20.0], [30.0, 20.0]],
     };
-    // Half the stroke width, one logical pixel for the anti-aliasing edge, and the slack the
-    // hand-drawn style can reach outside the stored geometry.
-    let slack = 2.0 + 1.0 + SKETCH_SLACK;
-    assert_eq!(
-        s.bounds(),
-        Some(Rect {
-            x: 10.0 - slack,
-            y: 20.0 - slack,
-            w: 20.0 + 2.0 * slack,
-            h: 2.0 * slack
-        })
-    );
+    // Half the stroke width and one logical pixel for the anti-aliasing edge: the geometry the user
+    // drew, which is what a selection frame and a marquee measure.
+    let slack = 2.0 + 1.0;
+    let exact = Rect {
+        x: 10.0 - slack,
+        y: 20.0 - slack,
+        w: 20.0 + 2.0 * slack,
+        h: 2.0 * slack,
+    };
+    assert_eq!(s.bounds(), Some(exact));
+    // The box a damaged region is cut from is the bigger one: the hand-drawn style reaches past it.
+    assert_eq!(s.paint_bounds(), Some(exact.grown(SKETCH_SLACK)));
     let empty = Stroke {
         points: vec![],
         ..s.clone()
@@ -754,9 +754,9 @@ fn an_arrows_box_covers_its_head() {
         box_.h > plain.bounds().h,
         "an arrow's box is grown by its head"
     );
-    // Every edge allows for half the pen, a pixel of anti-aliasing, the head's spread and the
-    // wander the hand-drawn style can reach outside it.
-    let slack = arrow.width / 2.0 + 1.0 + arrow.head_half() + SKETCH_SLACK;
+    // Every edge allows for half the pen, a pixel of anti-aliasing and the head's spread; the wander
+    // is the paint box's, not the geometry's.
+    let slack = arrow.width / 2.0 + 1.0 + arrow.head_half();
     assert!(
         (box_.x - (100.0 - slack)).abs() < 0.01,
         "the left edge is the head away"
@@ -1334,7 +1334,10 @@ fn a_colour_applies_to_every_element_the_selection_holds() {
     );
     assert_eq!(
         box_,
-        a.strokes[0].bounds().unwrap().union(a.notes[0].bounds())
+        a.strokes[0]
+            .paint_bounds()
+            .unwrap()
+            .union(a.notes[0].bounds())
     );
     // The other two kinds are reached the same way, and their indices are left alone.
     let more = a
@@ -1342,7 +1345,10 @@ fn a_colour_applies_to_every_element_the_selection_holds() {
         .expect("the other two kinds");
     assert_eq!(a.texts[0].color, PALETTE[2]);
     assert_eq!(a.shapes[0].color, PALETTE[2]);
-    assert_eq!(more, a.texts[0].paint_bounds().union(a.shapes[0].bounds()));
+    assert_eq!(
+        more,
+        a.texts[0].paint_bounds().union(a.shapes[0].paint_bounds())
+    );
     // Nothing held, or an id that names no element, changes nothing at all.
     assert_eq!(a.recolour(&[], PALETTE[0]), None);
     assert_eq!(
@@ -1376,9 +1382,9 @@ fn a_copy_leaves_the_original_in_place_and_keeps_every_index() {
     assert_eq!(
         box_.unwrap(),
         a.strokes[2]
-            .bounds()
+            .paint_bounds()
             .unwrap()
-            .union(a.shapes[1].bounds())
+            .union(a.shapes[1].paint_bounds())
             .union(a.notes[1].bounds())
     );
     // Removing the copies by id puts the document back exactly as it was.
@@ -1552,4 +1558,49 @@ fn a_nudge_is_a_screen_step_at_every_zoom() {
     assert_eq!(nudge_delta(1, 0, true, 0.5), [20.0, 0.0]);
     // Zoomed in, it is fewer.
     assert_eq!(nudge_delta(-1, 0, false, 2.0), [-0.5, 0.0]);
+}
+
+#[test]
+fn the_selection_frame_is_the_stored_geometry_and_not_the_ink() {
+    // The hand-drawn style reaches outside an element's geometry, but the frame is what the handles
+    // hang on and what a marquee measures, so it stays the stored box: a frame that grew with the
+    // wander would put its handles where a resize is not.
+    let stroke = Stroke {
+        color: "#e01b24".into(),
+        width: 4.0,
+        points: vec![[10.0, 20.0], [110.0, 20.0]],
+    };
+    let a = OutputAnnotations {
+        strokes: vec![stroke.clone()],
+        texts: vec![],
+        shapes: vec![],
+        notes: vec![],
+    };
+    let exact = Rect {
+        x: 7.0,
+        y: 17.0,
+        w: 106.0,
+        h: 6.0,
+    };
+    assert_eq!(selection_frame(&a, &[ItemId::Stroke(0)], None), Some(exact));
+    // A marquee takes an element by that same box, so a mark whose ink overhangs the marquee is
+    // still caught by the geometry the user drew.
+    assert_eq!(marquee_select(&a, exact), vec![ItemId::Stroke(0)]);
+    // The box a damaged region is cut from is the bigger one.
+    assert_eq!(
+        stroke.paint_bounds(),
+        Some(exact.grown(SKETCH_SLACK)),
+        "the paint box has to hold the wander"
+    );
+}
+
+#[test]
+fn a_dot_is_not_painted_beyond_its_own_disc() {
+    // A one-sample stroke is never sketched, so its paint box is its bounds.
+    let dot = Stroke {
+        color: "#ffffff".into(),
+        width: 4.0,
+        points: vec![[5.0, 5.0]],
+    };
+    assert_eq!(dot.paint_bounds(), dot.bounds());
 }
