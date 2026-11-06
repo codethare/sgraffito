@@ -16,6 +16,7 @@ use crate::canvas::{
     SELECT_HANDLE, SELECT_ROTATE_GAP, Shape, ShapeKind, Stroke, TextItem, TextOverlay, Tool,
     Toolbar, ToolbarAction, View, parse_hex, rect_of, rotate_handle, selection_frame,
 };
+use crate::sketch::{self, Seg};
 /// Radius of the eraser marker circle, in logical pixels.
 const ERASER_MARKER_RADIUS: f32 = 8.0;
 /// The edit-mode toolbar: a vertical rail of square blocks against the left edge, in the macOS
@@ -667,10 +668,10 @@ impl Renderer {
             self.draw_document(&mut pixmap, ann, screen, text, skip, scrim);
         }
         if let Some(s) = &overlay.stroke {
-            draw_stroke(&mut pixmap, s, screen);
+            draw_stroke(&mut pixmap, s, screen, Ink::Sketch(stroke_seed(s)));
         }
         if let Some(s) = &overlay.shape {
-            draw_shape(&mut pixmap, s, screen);
+            draw_shape(&mut pixmap, s, screen, Ink::Sketch(shape_seed(s)));
         }
         if let Some(note) = &overlay.note {
             self.draw_note(&mut pixmap, note, screen, None);
@@ -692,7 +693,14 @@ impl Renderer {
                 match id {
                     ItemId::Stroke(i) => {
                         if let Some(s) = ann.strokes.get(*i) {
-                            draw_stroke(&mut pixmap, &transform.stroke(s), screen);
+                            // The seed is the held element's, not the transformed copy's: a mark
+                            // that re-rolled as the pointer moved would shimmer under the drag.
+                            draw_stroke(
+                                &mut pixmap,
+                                &transform.stroke(s),
+                                screen,
+                                Ink::Sketch(stroke_seed(s)),
+                            );
                         }
                     }
                     ItemId::Text(i) => {
@@ -709,7 +717,12 @@ impl Renderer {
                     }
                     ItemId::Shape(i) => {
                         if let Some(s) = ann.shapes.get(*i) {
-                            draw_shape(&mut pixmap, &transform.shape(s), screen);
+                            draw_shape(
+                                &mut pixmap,
+                                &transform.shape(s),
+                                screen,
+                                Ink::Sketch(shape_seed(s)),
+                            );
                         }
                     }
                     ItemId::Note(i) => {
@@ -774,13 +787,13 @@ impl Renderer {
             if skip.contains(&ItemId::Stroke(index)) {
                 continue;
             }
-            draw_stroke(pixmap, s, screen);
+            draw_stroke(pixmap, s, screen, Ink::Sketch(stroke_seed(s)));
         }
         for (index, s) in ann.shapes.iter().enumerate() {
             if skip.contains(&ItemId::Shape(index)) {
                 continue;
             }
-            draw_shape(pixmap, s, screen);
+            draw_shape(pixmap, s, screen, Ink::Sketch(shape_seed(s)));
         }
         for (index, item) in ann.texts.iter().enumerate() {
             // The box under edit is the overlay's, and a box a gesture is dragging is drawn with
@@ -1886,6 +1899,7 @@ fn draw_icon(pixmap: &mut PixmapMut, icon: Icon, square: Rect, scale: f32, color
                 to,
             },
             icon_screen,
+            Ink::Precise,
         );
         return;
     }
@@ -1987,6 +2001,7 @@ fn draw_icon(pixmap: &mut PixmapMut, icon: Icon, square: Rect, scale: f32, color
                 ],
             },
             icon_screen,
+            Ink::Precise,
         );
         return;
     }
@@ -2083,7 +2098,137 @@ fn sk_rect(r: Rect) -> Option<tiny_skia::Rect> {
 
 /// A shape, in device pixels: its outline stroked with its own pen width, and the head of an arrow
 /// filled, because a stroked triangle would read as a hollow head rather than as an arrow.
-fn draw_shape(pixmap: &mut PixmapMut, s: &Shape, screen: Screen) {
+/// Whether a mark is drawn as the geometry stores it or as a hand would have traced it. `Precise` is
+/// everything the interface draws: a rail icon is the same figure as the tool it names, and a control
+/// is not a mark on the drawing.
+#[derive(Clone, Copy)]
+enum Ink {
+    Precise,
+    /// The seed the mark's wander and bow are derived from — the element's own, never a copy's.
+    Sketch(u64),
+}
+
+/// The kind tag a shape's seed is derived from, so a rectangle and a line at the same anchor do not
+/// share a wander.
+fn shape_tag(kind: ShapeKind) -> u8 {
+    match kind {
+        ShapeKind::Circle => 1,
+        ShapeKind::Rect => 2,
+        ShapeKind::Diamond => 3,
+        ShapeKind::Line => 4,
+        ShapeKind::Arrow => 5,
+    }
+}
+
+const STROKE_TAG: u8 = 0;
+
+fn stroke_seed(s: &Stroke) -> u64 {
+    let anchor = s.points.first().copied().unwrap_or([0.0, 0.0]);
+    sketch::seed_for(STROKE_TAG, &s.color, s.width, anchor)
+}
+
+fn shape_seed(s: &Shape) -> u64 {
+    sketch::seed_for(shape_tag(s.kind), &s.color, s.width, s.from)
+}
+
+/// Emit canvas-space sketch commands through the view. This is the module boundary: `sketch` knows the
+/// canvas, `Screen` owns the mapping, and nothing else converts.
+fn sketch_path(segs: &[Seg], screen: Screen) -> Option<tiny_skia::Path> {
+    let mut pb = PathBuilder::new();
+    for seg in segs {
+        match *seg {
+            Seg::Move(p) => {
+                let p = screen.point(p);
+                pb.move_to(p[0], p[1]);
+            }
+            Seg::Line(p) => {
+                let p = screen.point(p);
+                pb.line_to(p[0], p[1]);
+            }
+            Seg::Quad(c, p) => {
+                let (c, p) = (screen.point(c), screen.point(p));
+                pb.quad_to(c[0], c[1], p[0], p[1]);
+            }
+            Seg::Cubic(a, b, p) => {
+                let (a, b, p) = (screen.point(a), screen.point(b), screen.point(p));
+                pb.cubic_to(a[0], a[1], b[0], b[1], p[0], p[1]);
+            }
+        }
+    }
+    pb.finish()
+}
+
+/// The shape's body as hand-drawn commands, in canvas coordinates. An arrow adds the outline of its
+/// head, which is traced over the head's fill.
+fn sketched_shape(s: &Shape, seed: u64) -> Vec<Seg> {
+    let box_ = rect_of(s.from, s.to);
+    let mut segs = match s.kind {
+        ShapeKind::Circle => sketch::ellipse(
+            [box_.x + box_.w / 2.0, box_.y + box_.h / 2.0],
+            [box_.w / 2.0, box_.h / 2.0],
+            s.width,
+            seed,
+        ),
+        ShapeKind::Rect => sketch::closed(
+            &[
+                [box_.x, box_.y],
+                [box_.x + box_.w, box_.y],
+                [box_.x + box_.w, box_.y + box_.h],
+                [box_.x, box_.y + box_.h],
+            ],
+            s.width,
+            seed,
+        ),
+        ShapeKind::Diamond => {
+            let (cx, cy) = (box_.x + box_.w / 2.0, box_.y + box_.h / 2.0);
+            sketch::closed(
+                &[
+                    [cx, box_.y],
+                    [box_.x + box_.w, cy],
+                    [cx, box_.y + box_.h],
+                    [box_.x, cy],
+                ],
+                s.width,
+                seed,
+            )
+        }
+        ShapeKind::Line => sketch::line(s.from, s.to, s.width, seed),
+        ShapeKind::Arrow => {
+            let mut segs = sketch::line(s.from, s.to, s.width, seed);
+            if let Some(head) = arrow_head(s) {
+                segs.extend(sketch::closed(&head, s.width, seed ^ HEAD_SALT));
+            }
+            segs
+        }
+    };
+    if segs.is_empty() {
+        segs.push(Seg::Move(s.from));
+    }
+    segs
+}
+
+/// The three corners of an arrow's head in canvas coordinates: the tip, then the two barbs. `None`
+/// when the arrow is too short to have a direction.
+fn arrow_head(s: &Shape) -> Option<[[f32; 2]; 3]> {
+    let (dx, dy) = (s.to[0] - s.from[0], s.to[1] - s.from[1]);
+    let len = (dx * dx + dy * dy).sqrt();
+    if len <= f32::EPSILON {
+        return None;
+    }
+    let (ux, uy) = (dx / len, dy / len);
+    let (head, half) = (s.head_len(), s.head_half());
+    let base = [s.to[0] - ux * head, s.to[1] - uy * head];
+    let (px, py) = (-uy * half, ux * half);
+    Some([
+        s.to,
+        [base[0] + px, base[1] + py],
+        [base[0] - px, base[1] - py],
+    ])
+}
+
+const HEAD_SALT: u64 = 0x9ddf_ea08_eb38_2d69;
+
+fn draw_shape(pixmap: &mut PixmapMut, s: &Shape, screen: Screen, ink: Ink) {
     if s.is_empty() {
         return;
     }
@@ -2097,6 +2242,55 @@ fn draw_shape(pixmap: &mut PixmapMut, s: &Shape, screen: Screen) {
         line_join: LineJoin::Round,
         ..Default::default()
     };
+    let Ink::Sketch(seed) = ink else {
+        draw_exact_shape(pixmap, s, screen, &paint, &stroke);
+        return;
+    };
+    if s.kind == ShapeKind::Arrow {
+        // The head is filled with the exact triangle and then outlined by hand: filling the two
+        // traced passes instead would fill six slivers rather than one head.
+        fill_arrow_head(pixmap, s, screen, &paint);
+    }
+    let Some(path) = sketch_path(&sketched_shape(s, seed), screen) else {
+        return;
+    };
+    pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+}
+
+/// The head of an arrow, filled with the shape's colour. Shared by both inks: a filled head is a
+/// filled head, and only its outline is traced.
+fn fill_arrow_head(pixmap: &mut PixmapMut, s: &Shape, screen: Screen, paint: &Paint) {
+    let Some(corners) = arrow_head(s) else {
+        return;
+    };
+    let mut pb = PathBuilder::new();
+    let tip = screen.point(corners[0]);
+    pb.move_to(tip[0], tip[1]);
+    for corner in &corners[1..] {
+        let p = screen.point(*corner);
+        pb.line_to(p[0], p[1]);
+    }
+    pb.close();
+    if let Some(path) = pb.finish() {
+        pixmap.fill_path(
+            &path,
+            paint,
+            tiny_skia::FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+    }
+}
+
+/// The exact outline of a shape: today's geometry, unchanged, for the rail's icons and for anything
+/// that has to be a figure rather than a mark.
+fn draw_exact_shape(
+    pixmap: &mut PixmapMut,
+    s: &Shape,
+    screen: Screen,
+    paint: &Paint,
+    stroke: &SkStroke,
+) {
     let from = screen.point(s.from);
     let to = screen.point(s.to);
     let box_ = rect_of(from, to);
@@ -2119,7 +2313,7 @@ fn draw_shape(pixmap: &mut PixmapMut, s: &Shape, screen: Screen) {
                 }
             }
             if let Some(path) = pb.finish() {
-                pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+                pixmap.stroke_path(&path, paint, stroke, Transform::identity(), None);
             }
         }
         ShapeKind::Line | ShapeKind::Arrow => {
@@ -2127,50 +2321,33 @@ fn draw_shape(pixmap: &mut PixmapMut, s: &Shape, screen: Screen) {
             pb.move_to(from[0], from[1]);
             pb.line_to(to[0], to[1]);
             if let Some(path) = pb.finish() {
-                pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+                pixmap.stroke_path(&path, paint, stroke, Transform::identity(), None);
             }
-            if s.kind != ShapeKind::Arrow {
-                return;
-            }
-            let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
-            let len = (dx * dx + dy * dy).sqrt();
-            if len <= f32::EPSILON {
-                return;
-            }
-            let (ux, uy) = (dx / len, dy / len);
-            let head = screen.len(s.head_len());
-            let half = screen.len(s.head_half());
-            let base = [to[0] - ux * head, to[1] - uy * head];
-            let (px, py) = (-uy * half, ux * half);
-            let mut head_path = PathBuilder::new();
-            head_path.move_to(to[0], to[1]);
-            head_path.line_to(base[0] + px, base[1] + py);
-            head_path.line_to(base[0] - px, base[1] - py);
-            head_path.close();
-            if let Some(path) = head_path.finish() {
-                pixmap.fill_path(
-                    &path,
-                    &paint,
-                    tiny_skia::FillRule::Winding,
-                    Transform::identity(),
-                    None,
-                );
+            if s.kind == ShapeKind::Arrow {
+                fill_arrow_head(pixmap, s, screen, paint);
             }
         }
     }
 }
 
-fn draw_stroke(pixmap: &mut PixmapMut, s: &Stroke, screen: Screen) {
+fn draw_stroke(pixmap: &mut PixmapMut, s: &Stroke, screen: Screen, ink: Ink) {
     let c = parse_hex(&s.color);
     let mut paint = Paint::default();
     paint.set_color_rgba8(c[0], c[1], c[2], c[3]);
     paint.anti_alias = true;
     let width = screen.len(s.width);
     let transform = Transform::identity();
+    let stroke = SkStroke {
+        width,
+        line_cap: LineCap::Round,
+        line_join: LineJoin::Round,
+        ..Default::default()
+    };
 
     match s.points.as_slice() {
         [] => {}
         [only] => {
+            // A dot has no direction to wander, so it stays a disc of the pen's own width.
             let mut pb = PathBuilder::new();
             let p = screen.point(*only);
             pb.push_circle(p[0], p[1], width / 2.0);
@@ -2179,14 +2356,12 @@ fn draw_stroke(pixmap: &mut PixmapMut, s: &Stroke, screen: Screen) {
             }
         }
         points => {
-            let Some(path) = smoothed_path(points, screen) else {
-                return;
+            let path = match ink {
+                Ink::Precise => smoothed_path(points, screen),
+                Ink::Sketch(seed) => sketch_path(&sketch::stroke(points, s.width, seed), screen),
             };
-            let stroke = SkStroke {
-                width,
-                line_cap: LineCap::Round,
-                line_join: LineJoin::Round,
-                ..Default::default()
+            let Some(path) = path else {
+                return;
             };
             pixmap.stroke_path(&path, &paint, &stroke, transform, None);
         }
@@ -2940,7 +3115,33 @@ mod tests {
             &mut FrameCache::default(),
             &[],
         );
-        assert_eq!(dragged, committed);
+        // The two marks are the same pen over the same path, but not the same mark: the live one
+        // wanders from where the element started and the committed one from where it landed, so they
+        // differ by their wander and settle when the gesture is released. What must not differ is
+        // where the ink is and how much of it there is — twice the ink would be a double draw.
+        let ink = |buf: &[u8]| buf.as_chunks::<4>().0.iter().filter(|p| p[3] != 0).count();
+        let ink_box = |buf: &[u8]| {
+            let mut out: Option<(u32, u32, u32, u32)> = None;
+            for y in 0..100u32 {
+                for x in 0..200u32 {
+                    if buf[((y * 200 + x) * 4 + 3) as usize] == 0 {
+                        continue;
+                    }
+                    out = Some(match out {
+                        None => (x, y, x, y),
+                        Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+                    });
+                }
+            }
+            out.expect("something was painted")
+        };
+        assert_eq!(ink_box(&dragged), ink_box(&committed));
+        let (live, settled) = (ink(&dragged), ink(&committed));
+        let off = live.abs_diff(settled);
+        assert!(
+            off * 10 <= settled,
+            "the live frame painted {live} to the committed {settled}"
+        );
     }
 
     #[test]
@@ -3095,6 +3296,45 @@ mod tests {
                 "every function has an icon, and only functions do"
             );
         }
+    }
+
+    #[test]
+    fn the_pen_icon_is_the_exact_figure_and_not_a_mark() {
+        // The rail is interface, so its icon is the tool's own drawing in the exact ink. This compares
+        // the icon against that exact drawing: routing the icon through `Ink::Sketch` anywhere would
+        // make the two disagree.
+        let (scale, square) = (
+            1.0,
+            Rect {
+                x: 10.0,
+                y: 10.0,
+                w: TOOLBAR_BLOCK,
+                h: TOOLBAR_BLOCK,
+            },
+        );
+        let mut icon = Pixmap::new(60, 60).unwrap();
+        draw_icon(&mut icon.as_mut(), Icon::Pen, square, scale, "#ffffffee");
+        let l = square.grown(-ICON_INSET * scale);
+        let mut exact = Pixmap::new(60, 60).unwrap();
+        draw_stroke(
+            &mut exact.as_mut(),
+            &Stroke {
+                color: "#ffffffee".into(),
+                width: ICON_STROKE,
+                points: vec![
+                    [l.x + l.w * 0.05, l.y + l.h * 0.8],
+                    [l.x + l.w * 0.35, l.y + l.h * 0.25],
+                    [l.x + l.w * 0.65, l.y + l.h * 0.75],
+                    [l.x + l.w * 0.95, l.y + l.h * 0.2],
+                ],
+            },
+            Screen {
+                scale,
+                view: View::default(),
+            },
+            Ink::Precise,
+        );
+        assert_eq!(icon.data(), exact.data());
     }
 
     #[test]

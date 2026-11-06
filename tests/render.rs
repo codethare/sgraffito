@@ -1,6 +1,7 @@
 use sgraffito::canvas::{
-    Doc, ERASER_THRESHOLD, ItemId, Note, OutputAnnotations, Overlay, PALETTE, Rect, Shape,
-    ShapeKind, Stroke, TextBuffer, TextItem, TextOverlay, Tool, Toolbar, ToolbarAction, View,
+    Doc, ERASER_THRESHOLD, ItemId, Note, OutputAnnotations, Overlay, PALETTE, Rect, Selection,
+    Shape, ShapeKind, Stroke, TextBuffer, TextItem, TextOverlay, Tool, Toolbar, ToolbarAction,
+    Transform, View,
 };
 use sgraffito::render::{
     DAMAGE_SLACK, DamageRegion, FrameCache, Renderer, Screen, buffer_format, toolbar_bounds,
@@ -2487,4 +2488,285 @@ fn a_row_of_the_panel_can_be_clicked_with_the_pointer_on_the_block_that_opened_i
         Some(ToolbarAction::Scrim),
         "a panel row shares the block's band"
     );
+}
+
+// --- the hand-drawn style ---------------------------------------------------------------------
+
+/// The box the inked pixels occupy, as `(min_x, min_y, max_x, max_y)` in device pixels with `scale`
+/// 1.0. `None` when nothing was painted.
+fn inked_box(buf: &[u8], w: u32, h: u32) -> Option<(u32, u32, u32, u32)> {
+    let mut out: Option<(u32, u32, u32, u32)> = None;
+    for y in 0..h {
+        for x in 0..w {
+            if alpha(buf, w, x, y) > 0 {
+                out = Some(match out {
+                    None => (x, y, x, y),
+                    Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+                });
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn a_stroke_is_drawn_as_a_hand_drawn_mark() {
+    let (w, h) = (200u32, 100u32);
+    let doc = ann(vec![line(50.0, 20.0, 180.0)], vec![]);
+    let mut buf = buffer(w, h);
+    frame(&mut buf, w, h, &doc, &Overlay::default(), None);
+    let (_, top, _, bottom) = inked_box(&buf, w, h).expect("the stroke painted something");
+    // The pen is four logical pixels wide, so the exact mark reaches two pixels either side of the
+    // stored line plus one of anti-aliasing. A hand-drawn trace wanders past that, and both traces
+    // cross, so the mark is wider than the pen.
+    assert!(
+        50.0 - top as f32 > 2.5 || bottom as f32 - 50.0 > 2.5,
+        "the mark was the pen's exact width: top {top} bottom {bottom}"
+    );
+}
+
+#[test]
+fn a_shape_is_drawn_as_a_hand_drawn_outline() {
+    let (w, h) = (240u32, 160u32);
+    let doc = OutputAnnotations {
+        strokes: vec![],
+        texts: vec![],
+        shapes: vec![Shape {
+            kind: ShapeKind::Rect,
+            color: "#3584e4".into(),
+            width: 3.0,
+            from: [60.0, 50.0],
+            to: [180.0, 120.0],
+        }],
+        notes: vec![],
+    };
+    let mut buf = buffer(w, h);
+    frame(&mut buf, w, h, &doc, &Overlay::default(), None);
+    let (left, top, right, bottom) = inked_box(&buf, w, h).expect("the shape painted something");
+    // Half the pen plus anti-aliasing is the exact rectangle's reach; a bowed trace leaves that box.
+    let exact = 1.5 + 1.0;
+    assert!(
+        left as f32 <= 60.0 - exact - 0.5
+            || top as f32 <= 50.0 - exact - 0.5
+            || right as f32 >= 180.0 + exact + 0.5
+            || bottom as f32 >= 120.0 + exact + 0.5,
+        "the outline was the exact rectangle: {left},{top}..{right},{bottom}"
+    );
+}
+
+/// One shape, alone on the surface, drawn exactly as the daemon draws a committed document.
+fn sole_shape(shape: Shape) -> OutputAnnotations {
+    OutputAnnotations {
+        strokes: vec![],
+        texts: vec![],
+        shapes: vec![shape],
+        notes: vec![],
+    }
+}
+
+fn rect_shape(from: [f32; 2], to: [f32; 2]) -> Shape {
+    Shape {
+        kind: ShapeKind::Rect,
+        color: "#3584e4".into(),
+        width: 3.0,
+        from,
+        to,
+    }
+}
+
+#[test]
+fn sketched_ink_stays_inside_the_element_bounds() {
+    let (w, h) = (320u32, 320u32);
+    let mut cases: Vec<(OutputAnnotations, Rect)> = vec![
+        (
+            ann(vec![line(150.0, 40.0, 280.0)], vec![]),
+            line(150.0, 40.0, 280.0).bounds().unwrap(),
+        ),
+        (
+            sole_shape(rect_shape([80.0, 80.0], [220.0, 200.0])),
+            rect_shape([80.0, 80.0], [220.0, 200.0]).bounds(),
+        ),
+    ];
+    for kind in [
+        ShapeKind::Circle,
+        ShapeKind::Diamond,
+        ShapeKind::Line,
+        ShapeKind::Arrow,
+    ] {
+        let shape = Shape {
+            kind,
+            ..rect_shape([80.0, 80.0], [220.0, 200.0])
+        };
+        let bounds = shape.bounds();
+        cases.push((sole_shape(shape), bounds));
+    }
+    for (doc, bounds) in cases {
+        let mut buf = buffer(w, h);
+        frame(&mut buf, w, h, &doc, &Overlay::default(), None);
+        let (left, top, right, bottom) = inked_box(&buf, w, h).expect("the element painted");
+        assert!(
+            left as f32 >= bounds.x - 1.0
+                && top as f32 >= bounds.y - 1.0
+                && right as f32 <= bounds.x + bounds.w + 1.0
+                && bottom as f32 <= bounds.y + bounds.h + 1.0,
+            "{left},{top}..{right},{bottom} escaped {bounds:?}"
+        );
+    }
+}
+
+#[test]
+fn a_dragged_shape_keeps_the_mark_it_had() {
+    // The gesture draws the held element at the transform the pointer is dragging, and its wander must
+    // come from the element it holds rather than from the moved copy: a mark that re-rolled every
+    // motion event would shimmer under the hand.
+    let (w, h) = (360u32, 220u32);
+    let doc = sole_shape(rect_shape([60.0, 60.0], [180.0, 150.0]));
+    let dragged = |dx: f32| {
+        // Exactly the daemon's frame: the held element is left out of the document pass and drawn
+        // once, at the gesture's transform.
+        let selection = Selection {
+            items: vec![ItemId::Shape(0)],
+            transform: Some(Transform::Translate { dx, dy: 0.0 }),
+        };
+        let overlay = Overlay {
+            selection: Some(selection.clone()),
+            ..Default::default()
+        };
+        let mut buf = buffer(w, h);
+        let mut cache = FrameCache::default();
+        Renderer::new().render_with_cache(
+            &mut buf,
+            w,
+            h,
+            1.0,
+            View::default(),
+            &doc,
+            &overlay,
+            None,
+            &mut cache,
+            selection.live(),
+        );
+        buf
+    };
+    let near = dragged(10.0);
+    let far = dragged(40.0);
+    let shift = 30u32;
+    for y in 0..h {
+        for x in 0..w - shift {
+            assert_eq!(
+                alpha(&near, w, x, y),
+                alpha(&far, w, x + shift, y),
+                "the mark re-rolled at {x},{y}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_moved_sketched_shape_leaves_no_trail() {
+    // The daemon damages the union of the box an element left and the box it went to. If the drawn
+    // mark reached past those boxes, the outer edge of where it used to be would survive the frame.
+    let (w, h) = (400u32, 300u32);
+    // A heavy pen, because a light one's wander is inside what the half-width already allows for:
+    // the point is the ink that only the style puts past the box.
+    let heavy = |from: [f32; 2], to: [f32; 2]| Shape {
+        width: 8.0,
+        ..rect_shape(from, to)
+    };
+    let before = heavy([60.0, 60.0], [200.0, 160.0]);
+    let after = heavy([140.0, 130.0], [280.0, 230.0]);
+    let mut buf = buffer(w, h);
+    let damage = before.bounds().union(after.bounds());
+    let bounds = after.bounds();
+    frame(
+        &mut buf,
+        w,
+        h,
+        &sole_shape(before),
+        &Overlay::default(),
+        None,
+    );
+    frame(
+        &mut buf,
+        w,
+        h,
+        &sole_shape(after),
+        &Overlay::default(),
+        Some(damage),
+    );
+    let (left, top, right, bottom) = inked_box(&buf, w, h).expect("the shape painted");
+    assert!(
+        left as f32 >= bounds.x - 1.0
+            && top as f32 >= bounds.y - 1.0
+            && right as f32 <= bounds.x + bounds.w + 1.0
+            && bottom as f32 <= bounds.y + bounds.h + 1.0,
+        "{left},{top}..{right},{bottom} kept ink from where the shape was, inside {bounds:?}"
+    );
+}
+
+#[test]
+fn a_damaged_frame_of_a_sketched_document_matches_a_whole_surface_one() {
+    let (w, h) = (300u32, 240u32);
+    let doc = OutputAnnotations {
+        strokes: vec![line(120.0, 30.0, 270.0)],
+        texts: vec![],
+        shapes: vec![rect_shape([50.0, 50.0], [150.0, 120.0])],
+        notes: vec![],
+    };
+    let mut whole = buffer(w, h);
+    frame(&mut whole, w, h, &doc, &Overlay::default(), None);
+    let damage = doc.shapes[0]
+        .bounds()
+        .union(doc.strokes[0].bounds().unwrap());
+    let mut damaged = buffer(w, h);
+    frame(&mut damaged, w, h, &doc, &Overlay::default(), Some(damage));
+    let x0 = damage.x as u32;
+    let x1 = (damage.x + damage.w).ceil() as u32;
+    let y0 = damage.y as u32;
+    let y1 = (damage.y + damage.h).ceil() as u32;
+    for y in y0..y1.min(h) {
+        for x in x0..x1.min(w) {
+            assert_eq!(
+                alpha(&whole, w, x, y),
+                alpha(&damaged, w, x, y),
+                "the localized frame disagreed at {x},{y}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_second_renderer_draws_the_same_sketch() {
+    // The style is derived from the element, not from a stream that runs across frames, so a restart
+    // cannot change a drawing.
+    let (w, h) = (300u32, 200u32);
+    let doc = OutputAnnotations {
+        strokes: vec![line(60.0, 30.0, 260.0)],
+        texts: vec![],
+        shapes: vec![rect_shape([40.0, 90.0], [180.0, 170.0])],
+        notes: vec![],
+    };
+    let mut first = buffer(w, h);
+    Renderer::new().render(
+        &mut first,
+        w,
+        h,
+        1.0,
+        View::default(),
+        &doc,
+        &Overlay::default(),
+        None,
+    );
+    let mut second = buffer(w, h);
+    Renderer::new().render(
+        &mut second,
+        w,
+        h,
+        1.0,
+        View::default(),
+        &doc,
+        &Overlay::default(),
+        None,
+    );
+    assert_eq!(first, second);
 }
