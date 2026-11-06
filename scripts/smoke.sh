@@ -96,8 +96,11 @@ red = [(x, y) for y in range(h) for x in range(w)
 assert red, "no red line on the scale-2 output"
 xs = [p[0] for p in red]
 ys = [p[1] for p in red]
-assert 90 <= min(xs) and max(xs) <= 310, f"line x {min(xs)}..{max(xs)} is not 100..300: the scale is not applied"
-assert 140 <= min(ys) and max(ys) <= 160, f"line y {min(ys)}..{max(ys)} is not at 150: the scale is not applied"
+# The pen is 8 logical pixels wide and the hand-drawn style wanders it by up to 4 and bows it by 2, so
+# at scale 2 the mark reaches 20 device pixels past the stored line: the endpoints at 84..316 on a row
+# band of 130..170. Without the scale it would be half as wide, and with the scale applied twice, twice.
+assert 84 <= min(xs) and max(xs) <= 316, f"line x {min(xs)}..{max(xs)} is not 100..300 within the pen: the scale is not applied"
+assert 130 <= min(ys) and max(ys) <= 170, f"line y {min(ys)}..{max(ys)} is not at 150 within the pen: the scale is not applied"
 print(f"  scale 2 ok: red x {min(xs)}..{max(xs)} y {min(ys)}..{max(ys)}")
 PY
 

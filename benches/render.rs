@@ -6,6 +6,7 @@ use sgraffito::canvas::{
     ToolbarAction, View,
 };
 use sgraffito::render::{FrameCache, Renderer, toolbar_bounds, transient_bounds, transient_damage};
+use sgraffito::sketch;
 
 const WARMUP: usize = 8;
 const SAMPLES: usize = 30;
@@ -174,6 +175,37 @@ fn rail_state() -> Toolbar {
     }
 }
 
+/// What the hand-drawn style costs before any pixel is touched: the wander for every stroke in a dense
+/// document. Path generation happens in the raster build, so this is the part of the style that is not
+/// a rasterisation cost, and the figure is what says whether caching the commands would buy anything.
+fn sketch_cost(strokes: &[Stroke]) {
+    let generate = || {
+        let mut segments = 0usize;
+        for s in strokes {
+            let anchor = s.points.first().copied().unwrap_or([0.0, 0.0]);
+            let seed = sketch::seed_for(0, &s.color, s.width, anchor);
+            segments += black_box(sketch::stroke(&s.points, s.width, seed)).len();
+        }
+        black_box(segments)
+    };
+    for _ in 0..WARMUP {
+        generate();
+    }
+    let mut samples = Vec::with_capacity(SAMPLES);
+    for _ in 0..SAMPLES {
+        let start = Instant::now();
+        generate();
+        samples.push(start.elapsed().as_nanos() as u64);
+    }
+    samples.sort_unstable();
+    let median = samples[samples.len() / 2] as f64 / 1_000.0;
+    let p95 = samples[(samples.len() * 95 / 100).min(samples.len() - 1)] as f64 / 1_000.0;
+    println!(
+        "sketch-commands: median={median:.1}us p95={p95:.1}us strokes={} (path generation only, no pixels)",
+        strokes.len()
+    );
+}
+
 fn main() {
     let sparse = document(30, 3840.0, 2160.0);
     let small = document(30, 1920.0, 1080.0);
@@ -209,6 +241,7 @@ fn main() {
         false,
     );
     measure("dense-full", 3840, 2160, 1.0, &dense, &drag, None, false);
+    sketch_cost(&dense.strokes);
     measure("rail-full", 3840, 2160, 1.0, &sparse, &toolbar, None, false);
     // A whole-surface frame that follows a document change: the document is rasterised again.
     measure(
