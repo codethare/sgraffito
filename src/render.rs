@@ -396,12 +396,17 @@ pub(crate) struct TextLayoutCache {
 pub struct FrameCache {
     text: TextLayoutCache,
     base: BaseLayer,
+    /// What a frame drawn at a coarser rung is rasterised into before it is blitted up. It is reused
+    /// across a gesture rather than allocated per frame, and it is never the cached raster: a soft
+    /// document is only ever produced by a frame that repaints the whole surface anyway.
+    coarse: Option<Pixmap>,
 }
 
 /// The committed document of one output, rasterised into a pixmap that every frame fills from.
 /// A frame therefore paints only the overlays, and its cost follows what changed rather than how
-/// much is drawn. The raster is rebuilt when the output's pixel size, its scale, or the text box
-/// under edit changes, and whenever the document changes. See [`TextLayoutCache`].
+/// much is drawn. The raster is rebuilt by the first frame that needs a document-only base — a
+/// localized frame — and a frame whose damage covers the surface does not maintain it: it draws the
+/// document into the published buffer and leaves the raster absent. See [`TextLayoutCache`].
 #[derive(Default)]
 pub(crate) struct BaseLayer {
     pixmap: Option<Pixmap>,
@@ -500,6 +505,13 @@ impl FrameCache {
         self.text.invalidate();
         self.base.invalidate();
     }
+
+    /// Whether a document raster valid for the last frame is held. A whole-surface frame leaves it
+    /// absent — it draws the document into the published buffer instead — so this is what says
+    /// whether the next localized frame has anything to fill from.
+    pub fn base_valid(&self) -> bool {
+        self.base.key.is_some()
+    }
 }
 
 impl BaseLayer {
@@ -595,6 +607,7 @@ impl Renderer {
             width,
             height,
             scale,
+            1.0,
             view,
             ann,
             overlay,
@@ -614,6 +627,10 @@ impl Renderer {
         width: u32,
         height: u32,
         scale: f32,
+        // The fraction of the surface's own pixels the document is rasterised at, `1.0` for full
+        // resolution. It never reaches the cache key: a coarser frame only ever happens on the path
+        // that would rebuild the raster anyway, and it leaves the raster absent.
+        quality: f32,
         view: View,
         ann: &OutputAnnotations,
         overlay: &Overlay,
@@ -621,7 +638,7 @@ impl Renderer {
         cache: &mut FrameCache,
         skip: &[ItemId],
     ) {
-        let FrameCache { text, base } = cache;
+        let FrameCache { text, base, coarse } = cache;
         let screen = Screen { scale, view };
         text.sync(ann.texts.len(), screen.len(1.0));
         let region = match damage {
@@ -648,7 +665,16 @@ impl Renderer {
         };
         let mut draw_document = false;
         if base.matches(&key) {
+            // A warm raster is one pass over the pixels whatever the damage is, so a whole-surface
+            // frame copies it rather than drawing the document again.
             base.fill(buf, region, width, height);
+        } else if matches!(region, DamageRegion::All) {
+            // A whole-surface frame writes every pixel of the buffer anyway, so the document is drawn
+            // straight into it and the raster is left absent: keeping the raster would be a third
+            // whole-surface write per frame. The next frame that needs a document-only base — any
+            // localized damage — rebuilds it then, for its own view.
+            base.invalidate();
+            draw_document = true;
         } else {
             let renderer = &mut *self;
             let built = base.rasterise(key, |target| {
@@ -665,7 +691,20 @@ impl Renderer {
             return;
         };
         if draw_document {
-            self.draw_document(&mut pixmap, ann, screen, text, skip, scrim);
+            if quality < 1.0 {
+                self.draw_document_coarse(
+                    &mut pixmap,
+                    coarse,
+                    ann,
+                    screen,
+                    text,
+                    skip,
+                    scrim,
+                    quality,
+                );
+            } else {
+                self.draw_document(&mut pixmap, ann, screen, text, skip, scrim);
+            }
         }
         if let Some(s) = &overlay.stroke {
             draw_stroke(&mut pixmap, s, screen, Ink::Sketch(s.seed()));
@@ -819,6 +858,104 @@ impl Renderer {
                 continue;
             }
             self.draw_note(pixmap, note, screen, None);
+        }
+    }
+
+    /// Draw the document at a coarser rung and scale it up into `target`, which is what a moving
+    /// canvas spends instead of a full-resolution document: every pixel is laid down once, over
+    /// `quality` of the area.
+    ///
+    /// The scaling is a replication of whole pixels by an integer factor rather than a resample,
+    /// because tiny-skia has no fast path for transforming an image at all: filling the surface with a
+    /// scaled `Pattern`, or `draw_pixmap` with a scale transform, costs 70 to 215 ms at 3840x2160 on
+    /// this machine, against 6 ms for copying the rows out by hand. A source pixel is therefore
+    /// repeated `factor` times across and `factor` times down, which is coarse and never blurry, and
+    /// the anti-aliasing the document already carries comes with it.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_document_coarse(
+        &mut self,
+        target: &mut PixmapMut,
+        coarse: &mut Option<Pixmap>,
+        ann: &OutputAnnotations,
+        screen: Screen,
+        text: &mut TextLayoutCache,
+        skip: &[ItemId],
+        scrim: Option<[u8; 4]>,
+        quality: f32,
+    ) {
+        // The rung is a whole-pixel factor: any fraction is rounded, and a factor of one is not a
+        // rung at all.
+        let factor = (1.0 / quality.max(f32::EPSILON)).round().max(1.0) as u32;
+        let (tw, th) = (target.width(), target.height());
+        if factor < 2 {
+            self.draw_document(target, ann, screen, text, skip, scrim);
+            return;
+        }
+        let (w, h) = (tw.div_ceil(factor), th.div_ceil(factor));
+        if !coarse
+            .as_ref()
+            .is_some_and(|pm| pm.width() == w && pm.height() == h)
+        {
+            *coarse = Pixmap::new(w, h);
+        }
+        let Some(pixmap) = coarse.as_mut() else {
+            // No pixmap to spare: the frame is drawn at full resolution rather than left stale.
+            self.draw_document(target, ann, screen, text, skip, scrim);
+            return;
+        };
+        // The same document on a smaller surface: the *view* is what shrinks, once — a device pixel is
+        // `screen.point`, which is the view's screen position times the output's scale, so dividing
+        // both would draw the document at a quarter of its size rather than a half.
+        let coarse_screen = Screen {
+            scale: screen.scale,
+            view: View {
+                zoom: screen.view.zoom / factor as f32,
+                offset: [
+                    screen.view.offset[0] / factor as f32,
+                    screen.view.offset[1] / factor as f32,
+                ],
+            },
+        };
+        self.draw_document(&mut pixmap.as_mut(), ann, coarse_screen, text, skip, scrim);
+
+        let (cw, ch) = (pixmap.width() as usize, pixmap.height() as usize);
+        let stride = tw as usize * 4;
+        let factor = factor as usize;
+        let mut row = vec![0u8; stride];
+        let data = pixmap.data();
+        let out = target.data_mut();
+        for dy in 0..th as usize {
+            let sy = (dy / factor).min(ch - 1);
+            let source = &data[sy * cw * 4..(sy + 1) * cw * 4];
+            // One source pixel at a time, written `factor` times across. The inner loop is a runtime
+            // length, which is why the doubling it actually uses has its own arm: a bounded copy per
+            // destination pixel measured four times as long as one store per source pixel.
+            let pixels = source.as_chunks::<4>().0;
+            if factor == 2 {
+                for (chunk, pixel) in row.as_chunks_mut::<8>().0.iter_mut().zip(pixels) {
+                    chunk[..4].copy_from_slice(pixel);
+                    chunk[4..].copy_from_slice(pixel);
+                }
+                // An odd destination width leaves one pixel past the paired chunks.
+                if tw as usize % 2 == 1
+                    && let (Some(pixel), Some(last)) =
+                        (pixels.last(), row.as_chunks_mut::<4>().0.last_mut())
+                {
+                    last.copy_from_slice(pixel);
+                }
+            } else {
+                let mut dx = 0;
+                for pixel in pixels {
+                    for _ in 0..factor {
+                        if dx == tw as usize {
+                            break;
+                        }
+                        row[dx * 4..dx * 4 + 4].copy_from_slice(pixel);
+                        dx += 1;
+                    }
+                }
+            }
+            out[dy * stride..(dy + 1) * stride].copy_from_slice(&row);
         }
     }
 
@@ -2729,6 +2866,7 @@ mod tests {
             200,
             100,
             1.0,
+            1.0,
             View::default(),
             annotations,
             &Overlay::default(),
@@ -2770,15 +2908,45 @@ mod tests {
         assert_eq!(cold, warm);
     }
 
+    /// The shapes the renderer draws a document into, which a test needs when it wants the raster
+    /// path rather than the whole-surface one.
+    fn render_damaged(
+        renderer: &mut Renderer,
+        cache: &mut FrameCache,
+        annotations: &OutputAnnotations,
+        buffer: &mut [u8],
+    ) {
+        renderer.render_with_cache(
+            buffer,
+            200,
+            100,
+            1.0,
+            1.0,
+            View::default(),
+            annotations,
+            &Overlay::default(),
+            Some(crate::canvas::Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 200.0,
+                h: 100.0,
+            }),
+            cache,
+            &[],
+        );
+    }
+
     #[test]
     fn the_document_raster_is_reused_until_it_is_invalidated() {
-        // What a frame costs stands or falls on this: the second frame must fill from the raster
-        // instead of rasterising the document again.
+        // What a frame costs stands or falls on this: a localized frame builds the raster and the
+        // next one fills from it instead of rasterising the document again. A whole-surface frame
+        // deliberately keeps no raster — it draws the document into the buffer instead — so the
+        // reuse this test is about is the localized frame's.
         let mut renderer = Renderer::new();
         let mut cache = FrameCache::default();
         let annotations = document();
         let mut first = vec![0; 200 * 100 * 4];
-        render_cached(&mut renderer, &mut cache, &annotations, &mut first);
+        render_damaged(&mut renderer, &mut cache, &annotations, &mut first);
         assert!(cache.base.matches(&BaseKey {
             width: 200,
             height: 100,
@@ -2789,14 +2957,14 @@ mod tests {
         }));
 
         let mut second = vec![0; 200 * 100 * 4];
-        render_cached(&mut renderer, &mut cache, &annotations, &mut second);
+        render_damaged(&mut renderer, &mut cache, &annotations, &mut second);
         assert_eq!(first, second, "a reused raster draws the same pixels");
 
         // Invalidating drops it, and the frame that follows is built from the document again.
         cache.invalidate();
         assert!(cache.base.key.is_none());
         let mut rebuilt = vec![0; 200 * 100 * 4];
-        render_cached(&mut renderer, &mut cache, &annotations, &mut rebuilt);
+        render_damaged(&mut renderer, &mut cache, &annotations, &mut rebuilt);
         assert_eq!(first, rebuilt, "a rebuilt raster draws the same pixels");
     }
 
@@ -2834,6 +3002,7 @@ mod tests {
             &mut without_item,
             200,
             100,
+            1.0,
             1.0,
             View::default(),
             &annotations,
@@ -2950,6 +3119,7 @@ mod tests {
             200,
             100,
             1.0,
+            1.0,
             View::default(),
             &annotations,
             &overlay,
@@ -3026,6 +3196,7 @@ mod tests {
             200,
             100,
             1.0,
+            1.0,
             View::default(),
             &old_document,
             &overlay,
@@ -3062,6 +3233,7 @@ mod tests {
             200,
             100,
             1.0,
+            1.0,
             View::default(),
             &stored,
             &live,
@@ -3084,6 +3256,7 @@ mod tests {
             &mut committed,
             200,
             100,
+            1.0,
             1.0,
             View::default(),
             &moved,
@@ -3151,6 +3324,7 @@ mod tests {
             200,
             100,
             1.0,
+            1.0,
             View::default(),
             &stored,
             &live,
@@ -3164,6 +3338,7 @@ mod tests {
             &mut committed,
             200,
             100,
+            1.0,
             1.0,
             View::default(),
             &stored,
@@ -3182,6 +3357,7 @@ mod tests {
             &mut only_raster,
             200,
             100,
+            1.0,
             1.0,
             View::default(),
             &stored,

@@ -825,6 +825,9 @@ impl App {
         if self.mode != Mode::Edit {
             return;
         }
+        // How fast the pointer is going decides the resolution this output's frames are drawn at, so
+        // it is measured before anything reads the pointer.
+        self.note_motion(key, x, y);
         // A pan takes the pointer: it does not highlight the rail and it does not draw.
         if self.panning() {
             self.drag_pan(*key, x, y);

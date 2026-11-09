@@ -2,14 +2,34 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use sgraffito::canvas::{
-    OutputAnnotations, Overlay, Rect, Stroke, TextBuffer, TextItem, TextOverlay, Tool, Toolbar,
-    ToolbarAction, View,
+    MOTION_QUALITY, OutputAnnotations, Overlay, Rect, Stroke, TextBuffer, TextItem, TextOverlay,
+    Tool, Toolbar, ToolbarAction, View,
 };
 use sgraffito::render::{FrameCache, Renderer, toolbar_bounds, transient_bounds, transient_damage};
 use sgraffito::sketch;
 
 const WARMUP: usize = 8;
 const SAMPLES: usize = 30;
+
+/// The optimisation level the release profile declares. The benchmark runs under whichever profile
+/// `cargo bench` built it with, so an environment override of that profile is invisible here — the
+/// figures themselves are the evidence in that case.
+fn opt_level() -> String {
+    let manifest = std::fs::read_to_string("Cargo.toml").unwrap_or_default();
+    let mut in_release = false;
+    for line in manifest.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.starts_with('[') {
+            in_release = line == "[profile.release]";
+        } else if in_release
+            && let Some((key, value)) = line.split_once('=')
+            && key.trim() == "opt-level"
+        {
+            return value.trim().trim_matches('"').to_string();
+        }
+    }
+    "unknown".to_string()
+}
 
 fn line(y: f32, x0: f32, x1: f32, width: f32) -> Stroke {
     Stroke {
@@ -73,16 +93,70 @@ fn measure(
     logical_width: u32,
     logical_height: u32,
     scale: f32,
+    view: View,
     annotations: &OutputAnnotations,
     overlay: &Overlay,
     damage: Option<Rect>,
     cold_raster: bool,
+) {
+    measure_at(
+        name,
+        logical_width,
+        logical_height,
+        scale,
+        view,
+        annotations,
+        overlay,
+        damage,
+        cold_raster,
+        1.0,
+    );
+}
+
+/// The same measurement, with the document rasterised at `quality` of the surface's own pixels: what
+/// a canvas moving faster than `SETTLE_SPEED` is drawn at.
+#[allow(clippy::too_many_arguments)]
+fn measure_at(
+    name: &str,
+    logical_width: u32,
+    logical_height: u32,
+    scale: f32,
+    view: View,
+    annotations: &OutputAnnotations,
+    overlay: &Overlay,
+    damage: Option<Rect>,
+    cold_raster: bool,
+    quality: f32,
 ) {
     let width = (logical_width as f32 * scale) as u32;
     let height = (logical_height as f32 * scale) as u32;
     let mut buffer = vec![0u8; (width * height * 4) as usize];
     let mut renderer = Renderer::new();
     let mut cache = FrameCache::default();
+
+    // A warm whole-surface frame only exists after a localized frame has built the raster — a
+    // whole-surface frame does not maintain one — so this case is set up the way the daemon reaches
+    // it, instead of pretending a document drawn from scratch is the copy that case measures.
+    if !cold_raster && damage.is_none() {
+        render_frame(
+            &mut renderer,
+            &mut cache,
+            &mut buffer,
+            width,
+            height,
+            scale,
+            annotations,
+            overlay,
+            Some(Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 1.0,
+                h: 1.0,
+            }),
+            view,
+            quality,
+        );
+    }
 
     for _ in 0..WARMUP {
         if cold_raster {
@@ -98,6 +172,8 @@ fn measure(
             annotations,
             overlay,
             damage,
+            view,
+            quality,
         );
     }
 
@@ -117,6 +193,8 @@ fn measure(
             annotations,
             overlay,
             damage,
+            view,
+            quality,
         );
         samples.push(start.elapsed().as_nanos() as u64);
     }
@@ -126,13 +204,17 @@ fn measure(
     let median = samples[samples.len() / 2] as f64 / 1_000.0;
     let p95 = samples[(samples.len() * 95 / 100).min(samples.len() - 1)] as f64 / 1_000.0;
     println!(
-        "{name}: median={median:.1}us p95={p95:.1}us logical={logical_width}x{logical_height} scale={scale:.1} buffer={width}x{height} strokes={} texts={} damage={} toolbar={} text={} raster={}",
+        "{name}: median={median:.1}us p95={p95:.1}us logical={logical_width}x{logical_height} scale={scale:.1} buffer={width}x{height} strokes={} texts={} damage={} toolbar={} text={} raster={} view={:.2}@{:.0},{:.0} quality={quality:.2} opt={}",
         annotations.strokes.len(),
         annotations.texts.len(),
         damage.is_some(),
         overlay.toolbar.is_some(),
         overlay.text.is_some(),
         if cold_raster { "cold" } else { "warm" },
+        view.zoom,
+        view.offset[0],
+        view.offset[1],
+        opt_level(),
     );
 }
 
@@ -147,13 +229,16 @@ fn render_frame(
     annotations: &OutputAnnotations,
     overlay: &Overlay,
     damage: Option<Rect>,
+    view: View,
+    quality: f32,
 ) {
     renderer.render_with_cache(
         buffer,
         width,
         height,
         scale,
-        View::default(),
+        quality,
+        view,
         annotations,
         overlay,
         damage,
@@ -222,6 +307,7 @@ fn main() {
         3840,
         2160,
         1.0,
+        View::default(),
         &sparse,
         &drag,
         Some(drag_damage),
@@ -233,12 +319,23 @@ fn main() {
         3840,
         2160,
         1.0,
+        View::default(),
         &dense,
         &drag,
         Some(drag_damage),
         false,
     );
-    measure("dense-full", 3840, 2160, 1.0, &dense, &drag, None, false);
+    measure(
+        "dense-full",
+        3840,
+        2160,
+        1.0,
+        View::default(),
+        &dense,
+        &drag,
+        None,
+        false,
+    );
     // A frame that only copies the raster: no overlay, so nothing is drawn into it and the style has
     // no work to do at all. `dense-full` above copies *and* draws a live stroke.
     measure(
@@ -246,19 +343,31 @@ fn main() {
         3840,
         2160,
         1.0,
+        View::default(),
         &dense,
         &Overlay::default(),
         None,
         false,
     );
     sketch_cost(&dense.strokes);
-    measure("rail-full", 3840, 2160, 1.0, &sparse, &toolbar, None, false);
+    measure(
+        "rail-full",
+        3840,
+        2160,
+        1.0,
+        View::default(),
+        &sparse,
+        &toolbar,
+        None,
+        false,
+    );
     // A whole-surface frame that follows a document change: the document is rasterised again.
     measure(
         "rail-rebuild",
         3840,
         2160,
         1.0,
+        View::default(),
         &sparse,
         &toolbar,
         None,
@@ -277,6 +386,7 @@ fn main() {
         3840,
         2160,
         1.0,
+        View::default(),
         &sparse,
         &hovered,
         None,
@@ -288,6 +398,7 @@ fn main() {
         3840,
         2160,
         1.0,
+        View::default(),
         &sparse,
         &hovered,
         Some(toolbar_bounds(3840.0, 2160.0)),
@@ -298,6 +409,7 @@ fn main() {
         1920,
         1080,
         1.0,
+        View::default(),
         &small,
         &text_overlay(1920.0, 1080.0, ""),
         None,
@@ -316,6 +428,7 @@ fn main() {
         1920,
         1080,
         1.0,
+        View::default(),
         &small,
         &typing,
         Some(typing_damage),
@@ -331,16 +444,55 @@ fn main() {
         3840,
         2160,
         1.0,
+        View::default(),
         &dense,
         &Overlay::default(),
         None,
         true,
     );
+    // The frame a pan or a zoom produces, at both sizes the change is held to: a cold raster, a
+    // whole-surface damage and a view that is not the identity, over a dense document.
+    for (w, h) in [(2560, 1440), (3840, 2160)] {
+        let dense = document(200, w as f32, h as f32);
+        measure(
+            "view-change",
+            w,
+            h,
+            1.0,
+            View {
+                zoom: 1.0,
+                offset: [-200.0, -120.0],
+            },
+            &dense,
+            &Overlay::default(),
+            None,
+            true,
+        );
+    }
+    for (w, h) in [(2560, 1440), (3840, 2160)] {
+        let dense = document(200, w as f32, h as f32);
+        measure_at(
+            "view-change-coarse",
+            w,
+            h,
+            1.0,
+            View {
+                zoom: 1.0,
+                offset: [-200.0, -120.0],
+            },
+            &dense,
+            &Overlay::default(),
+            None,
+            true,
+            MOTION_QUALITY,
+        );
+    }
     measure(
         "dense-commit",
         3840,
         2160,
         1.0,
+        View::default(),
         &dense,
         &Overlay::default(),
         Some(drag_damage),
@@ -351,6 +503,7 @@ fn main() {
         1920,
         1080,
         1.0,
+        View::default(),
         &small,
         &text_overlay(1920.0, 1080.0, ""),
         None,
@@ -361,6 +514,7 @@ fn main() {
         1920,
         1080,
         1.0,
+        View::default(),
         &small,
         &text_overlay(1920.0, 1080.0, "ni"),
         None,
@@ -371,6 +525,7 @@ fn main() {
         1920,
         1080,
         2.0,
+        View::default(),
         &small,
         &Overlay::default(),
         None,

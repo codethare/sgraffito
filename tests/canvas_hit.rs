@@ -1604,3 +1604,120 @@ fn a_dot_is_not_painted_beyond_its_own_disc() {
     };
     assert_eq!(dot.paint_bounds(), dot.bounds());
 }
+
+#[test]
+fn a_zoom_eases_to_its_target_about_its_anchor() {
+    use sgraffito::canvas::{ZOOM_SECONDS, Zoom};
+
+    let mut view = View {
+        zoom: 1.0,
+        offset: [30.0, -10.0],
+    };
+    let anchor = [640.0, 360.0];
+    let canvas = view.to_canvas(anchor);
+    let mut zoom = Zoom::request(
+        view,
+        view.zoom,
+        canvas,
+        anchor,
+        ZOOM_STEP * ZOOM_STEP * ZOOM_STEP,
+    );
+    let target = zoom.target;
+    assert!(target > view.zoom, "the fixture does not zoom in");
+
+    // A frame's worth of transition at a time, which is what the daemon's tick does.
+    let mut seen = vec![view.zoom];
+    let mut running = true;
+    let mut frames = 0;
+    while running && frames < 200 {
+        running = zoom.step(&mut view, 0.016);
+        seen.push(view.zoom);
+        frames += 1;
+        let under = view.to_screen(canvas);
+        assert!(
+            (under[0] - anchor[0]).abs() < 0.01 && (under[1] - anchor[1]).abs() < 0.01,
+            "the anchored point moved to {under:?}"
+        );
+    }
+    assert!(!running, "the transition never landed");
+    assert_eq!(view.zoom, target, "the zoom stopped short of its target");
+    assert_eq!(
+        frames,
+        ((ZOOM_SECONDS / 0.016).ceil()) as i32,
+        "it took another time than the limit"
+    );
+    // Monotone: an eased zoom never goes back and forth on its way to the target.
+    for pair in seen.windows(2) {
+        assert!(
+            pair[1] >= pair[0],
+            "the zoom went backwards: {} then {}",
+            pair[0],
+            pair[1]
+        );
+    }
+}
+
+#[test]
+fn a_burst_of_zoom_requests_lands_on_its_last_target() {
+    use sgraffito::canvas::Zoom;
+
+    let mut view = View::default();
+    let anchor = [400.0, 300.0];
+    let canvas = view.to_canvas(anchor);
+    // Three notches in one burst: each request is measured from where the zoom is heading, so they
+    // compound, and the transition starts from where the view visibly is.
+    let mut zoom = None;
+    for _ in 0..3 {
+        let base = zoom.map_or(view.zoom, |z: Zoom| z.target);
+        let mut request = Zoom::request(view, base, canvas, anchor, ZOOM_STEP);
+        request.step(&mut view, 0.016);
+        zoom = Some(request);
+    }
+    let mut zoom = zoom.expect("a burst left no transition");
+    let mut running = true;
+    while running {
+        running = zoom.step(&mut view, 0.016);
+    }
+    let expected = ZOOM_STEP * ZOOM_STEP * ZOOM_STEP;
+    assert!(
+        (view.zoom - expected).abs() < 0.0001,
+        "the burst landed on {} instead of {expected}",
+        view.zoom
+    );
+}
+
+#[test]
+fn the_rung_follows_the_speed_of_the_pointer_and_settles_back() {
+    use sgraffito::canvas::{MOTION_QUALITY, Motion, SETTLE_SPEED};
+
+    // A fast drag: a hundred logical pixels every frame is well past the settle speed.
+    let mut fast = Motion::default();
+    for _ in 0..6 {
+        fast.moved(100.0, 0.016);
+    }
+    assert!(
+        fast.speed() > SETTLE_SPEED,
+        "a fast drag measured {} pt/s",
+        fast.speed()
+    );
+    assert_eq!(fast.quality(), MOTION_QUALITY);
+
+    // A slow adjustment: two pixels a frame never gets there.
+    let mut slow = Motion::default();
+    for _ in 0..6 {
+        slow.moved(2.0, 0.016);
+    }
+    assert_eq!(slow.quality(), 1.0, "a slow adjustment went coarse");
+
+    // The pointer stopped: the speed decays and the drawing is crisp again without another event.
+    let mut frames = 0;
+    while fast.quality() < 1.0 && frames < 100 {
+        fast.idle(0.016);
+        frames += 1;
+    }
+    assert_eq!(fast.quality(), 1.0, "the rung never came back");
+    assert!(
+        frames * 16 <= 200,
+        "it took {frames} frames to come back, which is not a settle"
+    );
+}

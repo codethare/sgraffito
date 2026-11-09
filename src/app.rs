@@ -42,9 +42,9 @@ use wayland_client::{
 };
 
 use crate::canvas::{
-    Doc, ERASER_THRESHOLD, Gesture, Grab, Handle, ItemId, Note, OutputAnnotations, Overlay, Press,
-    Rect, Selection, Shape, ShapeKind, TEXT_SIZE_MAX, TEXT_SIZE_MIN, TextBuffer, TextItem,
-    TextOverlay, Toolbar, Transform, View, ZOOM_STEP, date_stamp, marquee_select, note_drag,
+    Doc, ERASER_THRESHOLD, Gesture, Grab, Handle, ItemId, Motion, Note, OutputAnnotations, Overlay,
+    Press, Rect, Selection, Shape, ShapeKind, TEXT_SIZE_MAX, TEXT_SIZE_MIN, TextBuffer, TextItem,
+    TextOverlay, Toolbar, Transform, View, ZOOM_STEP, Zoom, date_stamp, marquee_select, note_drag,
     nudge_delta, selection_bounds, selection_frame, selection_press, snap_square,
 };
 
@@ -166,10 +166,28 @@ pub struct Output {
     /// How this output is looking at the canvas. Never persisted, and carried across a surface
     /// recreation like `name`: losing the view on every `Esc` would be felt immediately.
     pub(crate) view: View,
+    /// How fast the pointer is moving over this output, which decides the rung its frames are drawn
+    /// at. Smoothed, so one slow event between fast ones does not flip the resolution.
+    motion: Motion,
+    /// The last pointer position seen on this output, and when, which is what `motion` measures the
+    /// speed from. Per output, so crossing between outputs is not read as one enormous jump.
+    motion_from: Option<[f32; 2]>,
+    motion_at: Option<Instant>,
+    /// The zoom this output is transitioning to, while one is in flight. It is not part of the view
+    /// because it is not part of where the view *is*: the view is what every frame and every press
+    /// reads, and this is only what the loop owes the next frames of animation.
+    zoom: Option<Zoom>,
     cache: FrameCache,
 }
 
 impl Output {
+    /// The rung this output's document is drawn at: full resolution unless the pointer is moving fast
+    /// over it, which is what keeps a dragged or zoomed canvas at a frame time the eye reads as
+    /// motion. It is a property of drawing only — nothing the view resolves through changes.
+    fn quality(&self) -> f32 {
+        self.motion.quality()
+    }
+
     /// Key used for annotations; falls back to `output-<id>` until the name arrives.
     pub(crate) fn bucket(&self, id: u32) -> Cow<'_, str> {
         if self.name.is_empty() {
@@ -285,6 +303,8 @@ pub struct App {
     /// What a pinch remembers from its `begin`: the output it is on, the screen point the fingers
     /// started at, the canvas point that was under it, and the scale the protocol last reported.
     pub(crate) pinch_state: Option<PinchState>,
+    /// When the previous tick ran, which is the `dt` a zoom in flight is stepped by.
+    last_tick: Instant,
 }
 
 /// A pinch in flight, as the protocol reports it.
@@ -385,6 +405,7 @@ impl App {
             pinch: None,
             pointer_at: None,
             pinch_state: None,
+            last_tick: Instant::now(),
         };
         app.bind_text_input_manager();
         app.bind_cursor_shape();
@@ -484,6 +505,10 @@ impl App {
                     ..Default::default()
                 },
                 view: View::default(),
+                motion: Motion::default(),
+                motion_from: None,
+                motion_at: None,
+                zoom: None,
                 cache: FrameCache::default(),
             },
         );
@@ -780,6 +805,8 @@ impl App {
     /// frame of it.
     fn animating(&self) -> bool {
         self.toolbar_grow(Instant::now()) < 1.0
+            || zoom_in_flight(self.outputs.values().map(|out| out.zoom))
+            || self.outputs.values().any(|out| out.motion.quality() < 1.0)
     }
 
     /// The toolbar control under a pointer position on an output, if any.
@@ -1189,6 +1216,27 @@ impl App {
         self.sync_cursor();
     }
 
+    /// Record how fast the pointer is moving over an output, which is what decides the resolution its
+    /// frames are drawn at. It takes the movement and the time since the last one on *this* output, so
+    /// crossing between outputs does not read as one enormous jump.
+    pub(crate) fn note_motion(&mut self, key: &u32, x: f32, y: f32) {
+        let now = Instant::now();
+        let Some(out) = self.outputs.get_mut(key) else {
+            return;
+        };
+        let dt = out
+            .motion_at
+            .map_or(FRAME_WAIT.as_secs_f32(), |at: Instant| {
+                now.saturating_duration_since(at).as_secs_f32().max(0.001)
+            });
+        let distance = out
+            .motion_from
+            .map_or(0.0, |p| ((x - p[0]).powi(2) + (y - p[1]).powi(2)).sqrt());
+        out.motion_from = Some([x, y]);
+        out.motion_at = Some(now);
+        out.motion.moved(distance, dt);
+    }
+
     /// Start panning from a screen point. A pan takes the pointer for its duration: it cannot also
     /// draw, erase, select or place text, and a gesture in flight is finished rather than continued
     /// beside it.
@@ -1218,9 +1266,26 @@ impl App {
         self.view_changed(key, |view| view.pan_by(delta));
     }
 
-    /// Zoom about a screen point, which stays where it is.
+    /// Zoom about a screen point, which stays where it is for the whole transition.
     pub(crate) fn zoom_about(&mut self, key: u32, anchor: [f32; 2], factor: f32) {
-        self.view_changed(key, |view| view.zoom_about(anchor, factor));
+        let Some(out) = self.outputs.get(&key) else {
+            return;
+        };
+        let canvas = out.view.to_canvas(anchor);
+        self.zoom_request(key, canvas, anchor, factor);
+    }
+
+    /// Ask for a zoom that holds a given canvas point under a screen point. A pinch needs this shape,
+    /// because the fingers both move and change their distance; a wheel and a key go through
+    /// `zoom_about` and land here. A second request while one is in flight retargets it and leaves
+    /// the zoom where it visibly is, so a burst is one transition and its last target wins.
+    fn zoom_request(&mut self, key: u32, canvas: [f32; 2], anchor: [f32; 2], factor: f32) {
+        let Some(out) = self.outputs.get_mut(&key) else {
+            return;
+        };
+        let base = out.zoom.map_or(out.view.zoom, |zoom| zoom.target);
+        out.zoom = Some(Zoom::request(out.view, base, canvas, anchor, factor));
+        self.view_moved(key);
     }
 
     /// Let go of a pan.
@@ -1276,13 +1341,19 @@ impl App {
         let anchor = [state.origin[0] + dx, state.origin[1] + dy];
         let (key, canvas) = (state.key, state.canvas);
         if factor != 1.0 {
-            self.view_changed(key, |view| view.zoom_onto(factor, canvas, anchor));
+            self.zoom_request(key, canvas, anchor, factor);
         } else {
-            // The fingers only moved: the canvas point they started on follows them.
+            // The fingers only moved: the canvas point they started on follows them, and a zoom
+            // already in flight is held under the fingers' new position rather than the old one.
             self.view_changed(key, |view| {
                 let zoom = view.zoom;
                 view.offset = [anchor[0] - canvas[0] * zoom, anchor[1] - canvas[1] * zoom];
             });
+            if let Some(out) = self.outputs.get_mut(&key)
+                && let Some(zoom) = out.zoom.as_mut()
+            {
+                zoom.anchor = anchor;
+            }
         }
     }
 
@@ -1302,10 +1373,18 @@ impl App {
     /// pixel of it: the cache is dropped, the boxes the previous frame cached describe a view that no
     /// longer exists, and the frame that follows repaints the whole surface.
     pub(crate) fn view_changed(&mut self, key: u32, f: impl FnOnce(&mut View)) {
+        if let Some(out) = self.outputs.get_mut(&key) {
+            f(&mut out.view);
+        }
+        self.view_moved(key);
+    }
+
+    /// Note that an output's view has already changed: the boxes the previous frame cached describe a
+    /// view that no longer exists, so they go and the frame that follows repaints whole.
+    fn view_moved(&mut self, key: u32) {
         let Some(out) = self.outputs.get_mut(&key) else {
             return;
         };
-        f(&mut out.view);
         out.pending = None;
         out.last_transient = None;
         out.last_text_bounds = None;
@@ -1991,6 +2070,22 @@ impl App {
     /// Called once per event-loop iteration: flush pending writes and redraw. Returns how long
     /// the loop may wait before the next iteration, which is a frame while a pop-out is opening.
     pub fn tick(&mut self) -> Duration {
+        let now = Instant::now();
+        let dt = now.saturating_duration_since(self.last_tick).as_secs_f32();
+        self.last_tick = now;
+        self.step_zooms(dt);
+        // A canvas that has stopped goes back to full resolution on its own tick, not on the next
+        // pointer event: nothing may be left drawn coarse while the image is still.
+        let mut settled = false;
+        for out in self.outputs.values_mut() {
+            let was_coarse = out.motion.quality() < 1.0;
+            out.motion.idle(dt);
+            if was_coarse && out.motion.quality() >= 1.0 {
+                out.dirty = true;
+                settled = true;
+            }
+        }
+        self.dirty |= settled;
         if self.store.due(Instant::now())
             && let Err(e) = self.store.flush(&self.doc)
         {
@@ -2010,6 +2105,29 @@ impl App {
             }
         }
         self.next_wait()
+    }
+
+    /// Move every zoom in flight one frame closer to its target, and drop the ones that landed. A
+    /// transition is the only thing the canvas animates, and it is driven by this tick rather than by
+    /// a timer of its own, so it costs exactly the frames it is drawn on.
+    fn step_zooms(&mut self, dt: f32) {
+        let keys: Vec<u32> = self.outputs.keys().copied().collect();
+        for key in keys {
+            let stepped = {
+                let Some(out) = self.outputs.get_mut(&key) else {
+                    continue;
+                };
+                let Some(mut zoom) = out.zoom else {
+                    continue;
+                };
+                let running = zoom.step(&mut out.view, dt);
+                out.zoom = running.then_some(zoom);
+                true
+            };
+            if stepped {
+                self.view_moved(key);
+            }
+        }
     }
 
     /// The wait until the loop is worth running again: a frame while a pop-out is opening, and
@@ -2285,6 +2403,7 @@ impl App {
                 px.0,
                 px.1,
                 scale,
+                out.quality(),
                 out.view,
                 ann,
                 &out.overlay,
@@ -2338,6 +2457,13 @@ impl App {
             .find(|(_, o)| &o.layer == layer)
             .map(|(key, _)| *key)
     }
+}
+
+/// Whether any output still owes frames to a zoom that has not landed. This is what makes the loop
+/// come back for the next frame of the transition instead of waiting for the next input event, and it
+/// is why a zoom needs no timer of its own.
+fn zoom_in_flight(zooms: impl Iterator<Item = Option<Zoom>>) -> bool {
+    zooms.flatten().next().is_some()
 }
 
 /// How far the pop-out of the block under the pointer has opened, 0 to 1. A block with no
@@ -2703,3 +2829,20 @@ impl ProvidesRegistryState for App {
 }
 
 delegate_dispatch2!(App);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The loop comes back for a zoom's next frame only while one is in flight: this predicate is
+    /// what `animating` asks, and `next_wait` is what turns it into the 16 ms wait. A zoom that has
+    /// landed — or an output that never had one — must leave the loop idle rather than spinning.
+    #[test]
+    fn only_a_zoom_in_flight_keeps_the_loop_coming_back() {
+        let view = View::default();
+        let zoom = Zoom::request(view, view.zoom, [0.0, 0.0], [100.0, 100.0], 1.5);
+        assert!(zoom_in_flight([None, Some(zoom), None].into_iter()));
+        assert!(!zoom_in_flight([None, None].into_iter()));
+        assert!(!zoom_in_flight(std::iter::empty()));
+    }
+}

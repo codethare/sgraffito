@@ -1593,6 +1593,7 @@ fn a_cached_frame_keeps_the_scrim_after_a_document_change() {
         w,
         h,
         1.0,
+        1.0,
         View::default(),
         &before,
         &overlay,
@@ -1606,6 +1607,7 @@ fn a_cached_frame_keeps_the_scrim_after_a_document_change() {
         &mut second,
         w,
         h,
+        1.0,
         1.0,
         View::default(),
         &after,
@@ -1720,6 +1722,7 @@ fn the_default_view_draws_what_no_view_drew() {
         &mut cached,
         w,
         h,
+        1.0,
         1.0,
         View::default(),
         &doc,
@@ -1951,6 +1954,7 @@ fn the_backdrop_can_be_switched_off_and_on() {
         w,
         h,
         1.0,
+        1.0,
         View::default(),
         &OutputAnnotations::default(),
         &on,
@@ -1963,6 +1967,7 @@ fn the_backdrop_can_be_switched_off_and_on() {
         &mut second,
         w,
         h,
+        1.0,
         1.0,
         View::default(),
         &OutputAnnotations::default(),
@@ -2044,6 +2049,7 @@ fn a_note_being_typed_in_is_drawn_wrapped_while_the_typing_goes_on() {
         &mut only_raster,
         w,
         h,
+        1.0,
         1.0,
         view,
         &doc(&empty),
@@ -2224,6 +2230,7 @@ fn a_note_dragged_left_leaves_no_trail_in_its_damage_box() {
             w,
             h,
             1.0,
+            1.0,
             view,
             &OutputAnnotations::default(),
             &far,
@@ -2235,6 +2242,7 @@ fn a_note_dragged_left_leaves_no_trail_in_its_damage_box() {
             &mut buf,
             w,
             h,
+            1.0,
             1.0,
             view,
             &OutputAnnotations::default(),
@@ -2312,6 +2320,7 @@ fn a_note_dragged_out_and_back_leaves_no_trail() {
             w,
             h,
             1.0,
+            1.0,
             view,
             &OutputAnnotations::default(),
             &overlay,
@@ -2365,6 +2374,7 @@ fn switching_the_backdrop_repaints_the_whole_surface() {
             buf,
             w,
             h,
+            1.0,
             1.0,
             view,
             &OutputAnnotations::default(),
@@ -2638,6 +2648,7 @@ fn a_dragged_shape_keeps_the_mark_it_had() {
             &mut buf,
             w,
             h,
+            1.0,
             1.0,
             View::default(),
             &doc,
@@ -2914,4 +2925,462 @@ fn removing_an_element_does_not_redraw_the_others() {
             );
         }
     }
+}
+
+/// How much of an element's ink lies beyond the exact outline it stores, as a fraction of its ink.
+/// A figure drawn exactly scores ~0; a hand-drawn trace puts a good share of its ink outside.
+fn outside_the_outline(
+    doc: &OutputAnnotations,
+    outline: &[[f32; 2]],
+    reach: f32,
+    w: u32,
+    h: u32,
+) -> f32 {
+    let mut buf = buffer(w, h);
+    frame(&mut buf, w, h, doc, &Overlay::default(), None);
+    let (mut ink, mut out) = (0usize, 0usize);
+    for y in 0..h {
+        for x in 0..w {
+            if alpha(&buf, w, x, y) == 0 {
+                continue;
+            }
+            ink += 1;
+            let p = [x as f32 + 0.5, y as f32 + 0.5];
+            let nearest = outline
+                .windows(2)
+                .map(|seg| {
+                    let (a, b) = (seg[0], seg[1]);
+                    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                    let len2 = dx * dx + dy * dy;
+                    let t = if len2 <= f32::EPSILON {
+                        0.0
+                    } else {
+                        (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2).clamp(0.0, 1.0)
+                    };
+                    let (qx, qy) = (a[0] + dx * t, a[1] + dy * t);
+                    ((p[0] - qx).powi(2) + (p[1] - qy).powi(2)).sqrt()
+                })
+                .fold(f32::INFINITY, f32::min);
+            if nearest > reach {
+                out += 1;
+            }
+        }
+    }
+    out as f32 / ink.max(1) as f32
+}
+
+#[test]
+fn every_shape_kind_puts_ink_outside_its_own_outline() {
+    // The single-`||` guard could be satisfied by one hand-drawn edge on one kind. This asks each kind
+    // on its own for a real share of its ink beyond the outline it stores.
+    let (w, h) = (360u32, 300u32);
+    for kind in [
+        ShapeKind::Rect,
+        ShapeKind::Circle,
+        ShapeKind::Diamond,
+        ShapeKind::Line,
+        ShapeKind::Arrow,
+    ] {
+        let shape = Shape {
+            kind,
+            width: 3.0,
+            ..rect_shape([70.0, 70.0], [290.0, 230.0])
+        };
+        let reach = shape.width / 2.0 + 1.0;
+        let share = outside_the_outline(&sole_shape(shape.clone()), &shape.outline(), reach, w, h);
+        eprintln!("DEBUG {kind:?} {:.1}% outside", share * 100.0);
+        assert!(
+            share > 0.05,
+            "{kind:?} put only {:.1}% of its ink outside its own outline",
+            share * 100.0
+        );
+    }
+}
+
+/// One frame drawn through a cache that outlives it, which is the daemon's path: the commit is
+/// skipped, so every assertion below is about pixels and about what the cache holds afterwards.
+#[allow(clippy::too_many_arguments)]
+fn cached(
+    renderer: &mut Renderer,
+    cache: &mut FrameCache,
+    buf: &mut [u8],
+    w: u32,
+    h: u32,
+    view: View,
+    doc: &OutputAnnotations,
+    damage: Option<Rect>,
+) {
+    renderer.render_with_cache(
+        buf,
+        w,
+        h,
+        1.0,
+        1.0,
+        view,
+        doc,
+        &Overlay::default(),
+        damage,
+        cache,
+        &[],
+    );
+}
+
+/// A document with a stroke and a text box, so a frame has one of each to draw.
+fn cached_document() -> OutputAnnotations {
+    OutputAnnotations {
+        strokes: vec![line(50.0, 20.0, 180.0)],
+        texts: vec![TextItem {
+            x: 20.0,
+            y: 20.0,
+            color: "#ffffff".into(),
+            size: 18.0,
+            text: "cached".into(),
+        }],
+        shapes: vec![],
+        notes: vec![],
+    }
+}
+
+#[test]
+fn a_whole_surface_frame_draws_the_document_and_leaves_no_raster() {
+    // The frame writes the buffer once for the background and once for the content: maintaining the
+    // raster as well would be a third whole-surface write, so it is left absent instead.
+    let (w, h) = (W, H);
+    let mut renderer = Renderer::new();
+    let mut cache = FrameCache::default();
+    let doc = cached_document();
+    let mut first = buffer(w, h);
+    cached(
+        &mut renderer,
+        &mut cache,
+        &mut first,
+        w,
+        h,
+        View::default(),
+        &doc,
+        None,
+    );
+    assert!(
+        !cache.base_valid(),
+        "a whole-surface frame kept a raster it did not need"
+    );
+
+    // And it still draws the document: the second whole-surface frame is byte-identical.
+    let mut second = buffer(w, h);
+    cached(
+        &mut renderer,
+        &mut cache,
+        &mut second,
+        w,
+        h,
+        View::default(),
+        &doc,
+        None,
+    );
+    assert_eq!(first, second, "the same document drew differently");
+    assert!(ink(&first) > 0, "the document painted nothing");
+}
+
+#[test]
+fn the_first_localized_frame_after_a_view_change_rebuilds_the_raster() {
+    let (w, h) = (W, H);
+    let mut renderer = Renderer::new();
+    let mut cache = FrameCache::default();
+    let doc = cached_document();
+    let mut whole = buffer(w, h);
+    cached(
+        &mut renderer,
+        &mut cache,
+        &mut whole,
+        w,
+        h,
+        View::default(),
+        &doc,
+        None,
+    );
+
+    // A damage box this frame must not paint outside of: everything else keeps the sentinel.
+    let damage = Rect {
+        x: 10.0,
+        y: 10.0,
+        w: 80.0,
+        h: 60.0,
+    };
+    let mut buf = vec![0x5a; (w * h * 4) as usize];
+    cached(
+        &mut renderer,
+        &mut cache,
+        &mut buf,
+        w,
+        h,
+        View::default(),
+        &doc,
+        Some(damage),
+    );
+    assert!(
+        cache.base_valid(),
+        "the localized frame left no raster to fill from"
+    );
+    let region = DamageRegion::from_logical(damage, 1.0, w, h);
+    let inside = |x: u32, y: u32| match region {
+        DamageRegion::All => true,
+        DamageRegion::Rect { x0, y0, x1, y1 } => x >= x0 && x < x1 && y >= y0 && y < y1,
+    };
+    for y in 0..h {
+        for x in 0..w {
+            if !inside(x, y) {
+                assert_eq!(
+                    alpha(&buf, w, x, y),
+                    0x5a,
+                    "the localized frame painted outside its damage at {x},{y}"
+                );
+            }
+        }
+    }
+    // Inside the box it agrees with a whole-surface frame of the same document.
+    for y in damage.y as u32..(damage.y + damage.h) as u32 {
+        for x in damage.x as u32..(damage.x + damage.w) as u32 {
+            assert_eq!(
+                alpha(&whole, w, x, y),
+                alpha(&buf, w, x, y),
+                "the rebuilt raster disagreed at {x},{y}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_warm_raster_is_copied_for_a_whole_surface_frame_and_stays_valid() {
+    // Copying a warm raster is one pass over the pixels where drawing the document is a fill plus
+    // every element, so a whole-surface frame takes the copy and keeps the raster.
+    let (w, h) = (W, H);
+    let mut renderer = Renderer::new();
+    let mut cache = FrameCache::default();
+    let doc = cached_document();
+    let damage = Rect {
+        x: 10.0,
+        y: 10.0,
+        w: 40.0,
+        h: 40.0,
+    };
+    let mut primed = buffer(w, h);
+    cached(
+        &mut renderer,
+        &mut cache,
+        &mut primed,
+        w,
+        h,
+        View::default(),
+        &doc,
+        Some(damage),
+    );
+    assert!(cache.base_valid(), "the priming frame built no raster");
+
+    let mut copied = buffer(w, h);
+    cached(
+        &mut renderer,
+        &mut cache,
+        &mut copied,
+        w,
+        h,
+        View::default(),
+        &doc,
+        None,
+    );
+    assert!(cache.base_valid(), "the copy dropped the raster it used");
+
+    let mut drawn = buffer(w, h);
+    let mut cold = FrameCache::default();
+    cached(
+        &mut renderer,
+        &mut cold,
+        &mut drawn,
+        w,
+        h,
+        View::default(),
+        &doc,
+        None,
+    );
+    assert_eq!(copied, drawn, "the copy disagreed with the document itself");
+}
+
+#[test]
+fn a_localized_frame_rebuilds_the_raster_for_the_view_it_paints() {
+    // The raster is screen-space, so a view change makes it stale: the localized frame that follows
+    // must rebuild it for the new view instead of filling from the old one.
+    let (w, h) = (W, H);
+    let mut renderer = Renderer::new();
+    let mut cache = FrameCache::default();
+    let doc = cached_document();
+    let moved = View {
+        zoom: 1.0,
+        offset: [-30.0, -20.0],
+    };
+    let mut before = buffer(w, h);
+    cached(
+        &mut renderer,
+        &mut cache,
+        &mut before,
+        w,
+        h,
+        View::default(),
+        &doc,
+        None,
+    );
+
+    let damage = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: 120.0,
+        h: 80.0,
+    };
+    let mut localized = buffer(w, h);
+    cached(
+        &mut renderer,
+        &mut cache,
+        &mut localized,
+        w,
+        h,
+        moved,
+        &doc,
+        Some(damage),
+    );
+    let mut whole = buffer(w, h);
+    cached(
+        &mut renderer,
+        &mut cache,
+        &mut whole,
+        w,
+        h,
+        moved,
+        &doc,
+        None,
+    );
+    for y in 0..80u32 {
+        for x in 0..120u32 {
+            assert_eq!(
+                alpha(&whole, w, x, y),
+                alpha(&localized, w, x, y),
+                "the localized frame used the previous view at {x},{y}"
+            );
+        }
+    }
+}
+
+/// The rung: a coarse frame is the same drawing, drawn at a fraction of the pixels and blitted up, so
+/// it is the same ink in the same place and slightly softer. What must not change is where it is.
+#[test]
+fn a_coarse_frame_keeps_the_drawing_where_the_full_one_puts_it() {
+    use sgraffito::canvas::MOTION_QUALITY;
+
+    let (w, h) = (300u32, 240u32);
+    let doc = OutputAnnotations {
+        strokes: vec![line(120.0, 30.0, 270.0)],
+        texts: vec![],
+        shapes: vec![rect_shape([50.0, 50.0], [150.0, 120.0])],
+        notes: vec![],
+    };
+    let render = |quality: f32| {
+        let mut buf = buffer(w, h);
+        let mut renderer = Renderer::new();
+        let mut cache = FrameCache::default();
+        renderer.render_with_cache(
+            &mut buf,
+            w,
+            h,
+            1.0,
+            quality,
+            View::default(),
+            &doc,
+            &Overlay::default(),
+            None,
+            &mut cache,
+            &[],
+        );
+        (buf, cache.base_valid())
+    };
+    let (full, full_valid) = render(1.0);
+    let (coarse, coarse_valid) = render(MOTION_QUALITY);
+    assert!(
+        !full_valid && !coarse_valid,
+        "a whole-surface frame kept a raster"
+    );
+
+    let whole = inked_box(&full, w, h).expect("the full frame painted");
+    let soft = inked_box(&coarse, w, h).expect("the coarse frame painted");
+    // The blit spreads an edge by at most a pixel at 0.5, so the drawing may not move further than
+    // that in any direction: a coarse frame is a softer copy, never a displaced one.
+    for (a, b) in [(whole.0, soft.0), (whole.1, soft.1)] {
+        assert!(
+            a.abs_diff(b) <= 2,
+            "the coarse frame moved the drawing's edge: {whole:?} against {soft:?}"
+        );
+    }
+    for (a, b) in [(whole.2, soft.2), (whole.3, soft.3)] {
+        assert!(
+            a.abs_diff(b) <= 2,
+            "the coarse frame moved the drawing's edge: {whole:?} against {soft:?}"
+        );
+    }
+}
+
+#[test]
+fn a_full_resolution_frame_after_a_coarse_one_is_crisp_again() {
+    use sgraffito::canvas::MOTION_QUALITY;
+
+    let (w, h) = (300u32, 240u32);
+    let doc = OutputAnnotations {
+        strokes: vec![line(120.0, 30.0, 270.0)],
+        texts: vec![],
+        shapes: vec![],
+        notes: vec![],
+    };
+    let mut renderer = Renderer::new();
+    let mut cache = FrameCache::default();
+    let mut coarse = buffer(w, h);
+    renderer.render_with_cache(
+        &mut coarse,
+        w,
+        h,
+        1.0,
+        MOTION_QUALITY,
+        View::default(),
+        &doc,
+        &Overlay::default(),
+        None,
+        &mut cache,
+        &[],
+    );
+    let mut landed = buffer(w, h);
+    renderer.render_with_cache(
+        &mut landed,
+        w,
+        h,
+        1.0,
+        1.0,
+        View::default(),
+        &doc,
+        &Overlay::default(),
+        None,
+        &mut cache,
+        &[],
+    );
+    // The frame the pointer stopped on is the one a renderer that never went coarse would draw.
+    let mut reference = buffer(w, h);
+    let mut cold = FrameCache::default();
+    renderer.render_with_cache(
+        &mut reference,
+        w,
+        h,
+        1.0,
+        1.0,
+        View::default(),
+        &doc,
+        &Overlay::default(),
+        None,
+        &mut cold,
+        &[],
+    );
+    assert_eq!(landed, reference, "the settle frame kept the coarse pixels");
+    assert_ne!(coarse, landed, "the coarse frame drew at full resolution");
 }

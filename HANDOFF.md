@@ -5,6 +5,39 @@ and plate. `CLAUDE.md` is the behaviour contract and the source of truth; this f
 behind, so a new session can start without re-deriving it. English, like the rest of the repository;
 the user writes in Chinese and expects Chinese in chat, English in the artifacts.
 
+## State right now (2026-11-09)
+
+- **Pan and zoom were made cheap enough to be smooth** at 2K and 4K, and the change is planned in
+  `openspec/changes/view-motion-throughput/` (4/4 artifacts, 26 of 30 tasks ticked, `openspec
+  validate --strict` valid). The four unticked tasks are group 6, banded rasterisation, which its own
+  gate kept out: the motion rung met both targets. Figures and the reason are in the change's
+  `design.md` under *Results*.
+- What landed, in the order it was measured: `opt-level = 3` in `[profile.release]` (2.98 MB → 3.76
+  MB, 2.8x on every rasterised frame); a whole-surface frame now draws the document **straight into
+  the buffer** and leaves the cached raster absent instead of rasterising a second full-surface
+  pixmap and copying it, which removed an 8 ms write per frame; a zoom **eases to its target**
+  (`Zoom` in `canvas.rs`, stepped by `App::step_zooms` on the existing 16 ms tick) so a burst of wheel
+  or pinch events is one transition; and the drawing is **drawn at half resolution while it moves**
+  (`Motion`, `SETTLE_SPEED`, `MOTION_QUALITY` in `canvas.rs`), back to full resolution a few frames
+  after the pointer stops.
+- 4K pan/zoom frame: 83.2 ms as it shipped → **16.7–20.4 ms** at full resolution and **12.5–14.3 ms**
+  at the motion rung. 2K: 46.0 ms → 9.9–11.7 ms and 7.2–8.1 ms. A drag that follows the pointer is
+  90 µs. Repeat runs on this machine move by up to 20%, so read the ranges, not one figure.
+- Two things cost real time to learn and are recorded in the code where they bite: **tiny-skia cannot
+  scale an image** (a scaled `Pattern` is 69–214 ms at 4K, `draw_pixmap` with a scale transform 95 ms
+  and it puts the content in the wrong corner, because the pattern transform it builds carries the
+  offset but not the scale), so the rung's upscale is a hand-written row copy, 6 ms; and indexing a
+  row by `dx / factor` per destination pixel is a division per pixel, which measured four times the
+  copy itself.
+- **Unverified**: the motion rung and the zoom easing on a real touchpad — the thresholds
+  (`SETTLE_SPEED` 900 pt/s, `MOTION_QUALITY` 0.5) are first guesses that only a hand-feel pass can
+  settle, and `scripts/smoke.sh` injects no wheel or pinch, so the pacing that keeps the loop ticking
+  until a transition lands (`App::animating` → `FRAME_WAIT`) is checked by reading and by unit tests,
+  not end to end.
+- The working copy also held uncommitted work that is **not** this change: `src/sketch.rs` (heavier
+  wander) and `examples/vis_shapes.rs` (a throwaway PPM renderer). They were left in place, out of
+  the commit, and the benchmark figures above were measured with them in the tree.
+
 ## State right now (2026-10-14)
 
 - **Keyboard control landed** in the working-copy commit on top of `d35339a4` (uncommitted at the time

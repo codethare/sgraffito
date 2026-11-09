@@ -1265,6 +1265,123 @@ impl View {
     }
 }
 
+/// A zoom in flight. A wheel notch, a pinch and a key ask for one of these instead of setting the
+/// view's zoom, so a burst of events becomes one continuous transition that lands on the last target
+/// rather than one jump per event — and so a transition is drawn a frame at a time instead of
+/// arriving already finished.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Zoom {
+    /// Where the view's zoom is heading, already clamped.
+    pub target: f32,
+    /// The zoom the transition started from, so a retarget mid-flight does not jump.
+    from: f32,
+    /// The canvas point the transition holds still.
+    pub canvas: [f32; 2],
+    /// Where on screen that point is held.
+    pub anchor: [f32; 2],
+    /// How long the transition has been running, in seconds.
+    elapsed: f32,
+}
+
+impl Zoom {
+    /// The transition a zoom request asks for. `base` is where the zoom is already heading, not where
+    /// the view is now, so a burst of wheel notches compounds and the last one decides where the view
+    /// lands.
+    pub fn request(view: View, base: f32, canvas: [f32; 2], anchor: [f32; 2], factor: f32) -> Self {
+        Self {
+            target: (base * factor).clamp(ZOOM_MIN, ZOOM_MAX),
+            from: view.zoom,
+            canvas,
+            anchor,
+            elapsed: 0.0,
+        }
+    }
+
+    /// Advance the view by `dt` seconds. Returns whether the transition is still running; the frame
+    /// that lands sets the zoom to the target exactly, so nothing drifts and nothing is left to do.
+    pub fn step(&mut self, view: &mut View, dt: f32) -> bool {
+        self.elapsed += dt.max(0.0);
+        let t = (self.elapsed / ZOOM_SECONDS).clamp(0.0, 1.0);
+        // Ease-out, because the movement is a gesture settling rather than a thing being thrown.
+        let eased = 1.0 - (1.0 - t).powi(3);
+        let wanted = self.from + (self.target - self.from) * eased;
+        // The anchor is honoured through the same path a one-shot zoom takes, so the point under the
+        // pointer stays under it for the whole transition.
+        let factor = if view.zoom > 0.0 {
+            wanted / view.zoom
+        } else {
+            1.0
+        };
+        view.zoom_onto(factor, self.canvas, self.anchor);
+        if t >= 1.0 {
+            // Land on the target exactly. The ratio above rounds, and a zoom that stopped a hair
+            // short would leave the last fraction of the transition on screen for good.
+            view.zoom = self.target;
+            view.offset = [
+                self.anchor[0] - self.canvas[0] * view.zoom,
+                self.anchor[1] - self.canvas[1] * view.zoom,
+            ];
+        }
+        t < 1.0
+    }
+}
+
+/// How long a zoom takes to land, in seconds: the same short-motion limit the rail's pop-out keeps
+/// (`TOOLBAR_ANIM`), because a view change and an interface transition are the same kind of motion.
+pub const ZOOM_SECONDS: f32 = 0.14;
+
+/// The pointer speed above which a moving canvas is drawn at a coarser rung, in logical pixels a
+/// second. Below it, the canvas is drawn at full resolution — so a slow adjustment, and every frame
+/// after the pointer stops, is crisp.
+pub const SETTLE_SPEED: f32 = 900.0;
+
+/// The rung a fast gesture is drawn at: the document is rasterised at this fraction of the surface's
+/// own pixels and blitted up. Half is a quarter of the work and is not readable as a loss while the
+/// drawing is moving; the overlays stay at full resolution either way.
+pub const MOTION_QUALITY: f32 = 0.5;
+
+/// How quickly the measured speed follows the pointer, in seconds. It has to be long enough that one
+/// slow event between fast ones does not flip the rung and short enough that the drawing is crisp
+/// again a few frames after the pointer stops.
+const MOTION_TAU: f32 = 0.05;
+
+/// How fast the pointer is moving on one output, smoothed. It decides which rung the document is
+/// drawn at: a gesture's speed, never the amount on screen, so the same gesture looks the same over a
+/// crowded canvas and an empty one.
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub struct Motion {
+    speed: f32,
+}
+
+impl Motion {
+    /// One pointer movement of `distance` logical pixels, over `dt` seconds.
+    pub fn moved(&mut self, distance: f32, dt: f32) {
+        let instant = if dt > 0.0 { distance / dt } else { 0.0 };
+        let follow = (dt / MOTION_TAU).clamp(0.0, 1.0);
+        self.speed += (instant - self.speed) * follow;
+    }
+
+    /// Time passing with the pointer where it is: the speed decays, so a canvas that has stopped is
+    /// crisp again without waiting for another event.
+    pub fn idle(&mut self, dt: f32) {
+        self.moved(0.0, dt);
+    }
+
+    /// The speed this motion has been measured at, in logical pixels a second.
+    pub fn speed(self) -> f32 {
+        self.speed
+    }
+
+    /// The rung the document is drawn at: full resolution unless the pointer is moving fast.
+    pub fn quality(self) -> f32 {
+        if self.speed >= SETTLE_SPEED {
+            MOTION_QUALITY
+        } else {
+            1.0
+        }
+    }
+}
+
 /// The size a note being dragged out gets: the rectangle the drag swept, in whichever direction it went,
 /// with each side no smaller than a note may be. `None` while the drag is smaller than that in both
 /// directions, which is a click — and a click keeps the default size rather than creating a sliver.
