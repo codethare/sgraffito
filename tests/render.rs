@@ -2445,29 +2445,31 @@ fn a_row_of_the_panel_can_be_clicked_with_the_pointer_on_the_block_that_opened_i
     let hit = |renderer: &mut Renderer, x: f32, y: f32| {
         renderer.toolbar_hit(&toolbar, w as f32, h as f32, band.x + x, band.y + y)
     };
-    let more_row = (1..band.h as u32)
-        .map(|step| step as f32)
-        .find(|y| hit(&mut renderer, 15.0, *y) == Some(ToolbarAction::More))
-        .expect("the more block is on the rail");
-    // The panel's control answers on the block's own row, past the corridor: this is the assertion. Before
-    // the fix the panel's rows all sat above this row, so the pointer left the block and hit nothing.
-    assert_eq!(
-        hit(&mut renderer, 60.0, more_row + 5.0),
-        Some(ToolbarAction::Scrim),
-        "the panel's control is not reachable from the block's own row"
+    // The panel's rows, found the way the pointer finds them: in its own column. The row nearest the block is
+    // the last one when the panel grows up, which it does from a block near the foot of the rail.
+    let rows: Vec<f32> = (1..band.h as u32)
+        .map(|step| band.y + step as f32)
+        .filter(|y| hit(&mut renderer, 60.0, *y).is_some())
+        .collect();
+    let (first_row, last_row) = (
+        *rows.first().expect("the panel's row is not reachable"),
+        *rows.last().expect("the panel's row is not reachable"),
     );
-    // The corridor is still the block: the same row band, out to the panel's left edge.
+    // The panel's control answers on a row, and the block's own strip covers the rail's column beside it.
     assert_eq!(
-        hit(&mut renderer, 20.0, more_row + 5.0),
+        hit(&mut renderer, 60.0, last_row - 5.0),
+        Some(ToolbarAction::Shared)
+    );
+    assert_eq!(
+        hit(&mut renderer, 20.0, last_row - 5.0),
         Some(ToolbarAction::More)
     );
-    // And down the panel's own column, from the row level with the block to the end of the list, no point
-    // belongs to nothing: two 30 pt rows and the gap between them, so moving from one row to the next is
-    // staying on the list rather than closing it.
-    for dy in 0..2 * 30 + 4 {
+    // And down the panel's own column, from the first row to the last, no point belongs to nothing: the gap
+    // between two rows belongs to the row above it, so moving between them is staying on the list.
+    for y in (first_row as u32)..(last_row as u32) {
         assert!(
-            hit(&mut renderer, 60.0, more_row + dy as f32).is_some(),
-            "the panel has a hole {dy} below the row that is level with its block"
+            hit(&mut renderer, 60.0, y as f32 + 0.5).is_some(),
+            "the panel has a hole at {y}"
         );
     }
 }
@@ -3627,4 +3629,90 @@ fn a_panel_draws_only_rows_that_are_inside_the_output_and_clickable() {
             "the panel paints {y} and nothing is hit there"
         );
     }
+}
+
+/// The corridor is the block's strip in the rail's column, as tall as the panel it opened, and the rows answer
+/// from the panel's own column: the pointer leaves the block at whatever row it likes on its way into the list.
+/// Drifting on the way there used to step into a neighbouring rail block, which reads as leaving the menu, and
+/// the list closed before the pointer had arrived.
+#[test]
+fn the_corridor_covers_the_panels_whole_span_not_just_the_blocks_row() {
+    let (w, h) = (900.0f32, 1000.0f32);
+    let mut renderer = Renderer::new();
+    let rail = boards_rail(&[("Board 1", true), ("office", false)]);
+    let band = toolbar_bounds(&rail, w, h);
+    let (rail_x, row_x) = (band.x + 1.0 + 15.0, band.x + 1.0 + 40.0);
+    // The panel's own span, found the way the pointer finds it: its rows in the second column.
+    let rows: Vec<f32> = (0..h as u32)
+        .map(|y| y as f32 + 0.5)
+        .filter(|y| renderer.toolbar_hit(&rail, w, h, row_x, *y).is_some())
+        .collect();
+    let (top, bottom) = (
+        *rows.first().expect("no rows"),
+        *rows.last().expect("no rows"),
+    );
+    assert!(
+        bottom - top > 60.0,
+        "the panel is one row tall: {top}..{bottom}"
+    );
+    // Every point of the rail's column beside the panel is the block that opened it, and every point of the
+    // panel's column is one of its rows: nothing between the two is nobody's.
+    for y in (top as u32 + 1)..(bottom as u32 - 1) {
+        assert_eq!(
+            renderer.toolbar_hit(&rail, w, h, rail_x, y as f32 + 0.5),
+            Some(ToolbarAction::Boards),
+            "the rail's column at {y} is not the block that opened the panel"
+        );
+        assert!(
+            renderer
+                .toolbar_hit(&rail, w, h, row_x, y as f32 + 0.5)
+                .is_some(),
+            "the panel's column at {y} belongs to no row"
+        );
+    }
+}
+
+/// A panel has no plate behind it: the rows are the control, and a dark rectangle behind the list was a second
+/// surface to read through. So the panel's column is the wallpaper between the rows and above the first one.
+#[test]
+fn a_panel_paints_no_plate_behind_its_rows() {
+    let (w, h) = (900u32, 1000u32);
+    let mut rail = boards_rail(&[("Board 1", true), ("office", false)]);
+    rail.scrim = false;
+    let mut buf = buffer(w, h);
+    Renderer::new().render(
+        &mut buf,
+        w,
+        h,
+        1.0,
+        View::default(),
+        &Board::default(),
+        &Overlay {
+            toolbar: Some(rail.clone()),
+            ..Default::default()
+        },
+        None,
+    );
+    let mut renderer = Renderer::new();
+    let band = toolbar_bounds(&rail, w as f32, h as f32);
+    // One point for the hit test, one inside a row's capsule for the pixels.
+    let (x, probe) = (band.x + 1.0 + 40.0, band.x + 1.0 + 55.0);
+    let row = (0..h)
+        .map(|y| y as f32 + 0.5)
+        .find(|y| {
+            renderer
+                .toolbar_hit(&rail, w as f32, h as f32, x, *y)
+                .is_some()
+        })
+        .expect("the panel has no rows");
+    // Two pixels above the first row, and the gap between two rows: both were the plate's before.
+    for y in [row - 2.0, row + 32.0] {
+        assert_eq!(
+            alpha(&buf, w, probe as u32, y as u32),
+            0,
+            "the panel painted a plate at y={y}"
+        );
+    }
+    // The rows themselves are still painted, so this is not a test of an empty panel.
+    assert!(alpha(&buf, w, probe as u32, row as u32 + 10) > 0);
 }

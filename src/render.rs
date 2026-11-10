@@ -422,7 +422,7 @@ struct RailLayout {
     overflow: Vec<Block>,
     /// Height of the rail's column.
     column: f32,
-    /// The open panel's owner, its rows and its plate, when one is open.
+    /// The open panel's owner, its rows and its box, when one is open.
     panel: Option<(ToolbarAction, Vec<Block>, Rect)>,
     /// How far the rail and its panel reach, from the rail's own origin.
     height: f32,
@@ -1236,23 +1236,8 @@ impl Renderer {
             parse_hex(TOOLBAR_PLATE_FILL),
             None,
         );
-        // The drawer's own plate, from the box the layout computed with its rows: a menu is read while it is
-        // being chosen from, so it needs the backing the rail has for the same reason — a label has to stay
-        // legible over whatever wallpaper is behind it.
-        if let Some(panel) = pill.panel {
-            round_rect(
-                pixmap,
-                Rect {
-                    x: (ox + panel.x) * scale,
-                    y: (oy + panel.y) * scale,
-                    w: panel.w * scale,
-                    h: panel.h * scale,
-                },
-                TOOLBAR_RADIUS * scale,
-                parse_hex(TOOLBAR_PLATE_FILL),
-                None,
-            );
-        }
+        // No plate behind the panel: the rows are the control, and a dark rectangle behind a list of them was
+        // a second surface the eye had to read through. The rail keeps its own plate.
         // How far the block under the pointer has opened. The layout is settled, so a frame of the
         // transition only moves the capsule's trailing edge and the text that edge uncovers.
         let grow = toolbar.grow.clamp(0.0, 1.0);
@@ -1441,6 +1426,15 @@ impl Renderer {
         if column_x < 0.0 || column_y < 0.0 || column_y >= pill.height {
             return None;
         }
+        // The corridor answers before the rail's own rows: it is the way from the block into the list.
+        if let Some((corridor, owner)) = pill.corridor
+            && column_x >= corridor.x
+            && column_x < corridor.x + corridor.w
+            && column_y >= corridor.y
+            && column_y < corridor.y + corridor.h
+        {
+            return Some(owner);
+        }
         pill.hits
             .iter()
             .find(|(hit, _)| {
@@ -1605,10 +1599,22 @@ impl Renderer {
             hits[index].0.h = hits[index + 1].0.y - hits[index].0.y;
         }
         let height = reach;
+        let corridor = match (plate, owner) {
+            (Some(plate), Some(owner)) => Some((
+                Rect {
+                    x: 0.0,
+                    y: plate.y,
+                    w: TOOLBAR_DRAWER_X,
+                    h: plate.h,
+                },
+                owner,
+            )),
+            _ => None,
+        };
         ToolbarPill {
             controls,
             hits,
-            panel: plate,
+            corridor,
             column,
             height,
             overflow,
@@ -2084,11 +2090,12 @@ struct Control {
 struct ToolbarPill {
     controls: Vec<Control>,
     hits: Vec<(Rect, ToolbarAction)>,
-    /// The box the drawer's panel is painted in: its plate, which holds its rows. `None` while the drawer is
-    /// shut. Computed here with the rows' own rows, so what is painted and what is hit are one geometry.
-    panel: Option<Rect>,
-    /// Height of the rail's own column on this output, which the frame, the hit test and the box a rail-only
-    /// frame damages all place themselves from.
+    /// Waiting to answer first: while a panel is open, the strip of the rail's column beside it belongs to the
+    /// block that opened it. The pointer leaves the block at whatever row it likes on its way into the list,
+    /// and a step into a neighbouring block would read as leaving the menu. It is a strip of its own rather
+    /// than a wider box on the block, because the rail's rows answer in column order and a later row would win.
+    corridor: Option<(Rect, ToolbarAction)>,
+    /// Height of the rail's own column on this output, which the plate and the origin are placed from.
     column: f32,
     /// Everything the rail and its open panel reach, from the rail's own origin: what the frame paints, what
     /// the hit test accepts and what a rail-only frame damages.
@@ -2981,7 +2988,7 @@ mod tests {
         };
         let closed = pill(&mut renderer, false);
         let open = pill(&mut renderer, true);
-        assert_eq!(closed.panel, None, "a shut drawer has no panel");
+        assert!(closed.corridor.is_none(), "a shut drawer has no panel");
         let row_y = |pill: &ToolbarPill, action: Option<ToolbarAction>| {
             pill.controls
                 .iter()
@@ -3003,7 +3010,7 @@ mod tests {
             "no row shares the more block's band: {rows:?} against {more}"
         );
         // The plate holds its rows, and both are inside the column and the reserve the rail declares.
-        let panel = open.panel.expect("an open drawer has a panel");
+        let panel = open.corridor.expect("an open drawer has a panel").0;
         for y in &rows {
             assert!(*y >= panel.y && *y + TOOLBAR_BLOCK <= panel.y + panel.h);
         }
