@@ -1324,12 +1324,18 @@ impl Renderer {
             .map(|block| TOOLBAR_BLOCK + block.gap)
             .sum::<f32>()
             - residents.first().map_or(0.0, |block| block.gap);
-        // The panel's own corner: its rows start a gap above the `more` block's row — never sharing that
-        // block's band, which the block's own capsule uses — and grow upwards. When they do not fit above,
-        // the panel starts at the top of the column and grows down, which is the one case where it can
-        // reach the block's row. One `panel_top` for both the rows below and the corridor's box, so the two
-        // cannot drift apart.
-        let panel_top = |owner_y: f32| (owner_y - TOOLBAR_GAP - residents_h).max(TOOLBAR_PAD);
+        // One row of the panel is level with the block that opened it, and the rest grow away from it:
+        // down the column while they fit, up when they do not. Level, because the corridor the block's
+        // hit box builds leads sideways — into a row, not into an empty strip a row above the block, which
+        // is what closed the panel on the pointer the moment it left the block. One `panel_top` for the
+        // rows and for the plate, so the two cannot drift apart.
+        let panel_top = |owner_y: f32| {
+            if owner_y + residents_h <= TOOLBAR_COLUMN - TOOLBAR_PAD {
+                owner_y
+            } else {
+                (owner_y + TOOLBAR_BLOCK - residents_h).max(TOOLBAR_PAD)
+            }
+        };
         let mut owner_y: Option<f32> = None;
         let mut panel: Option<Rect> = None;
         // One row counter per column: the drawer is a second column, so a block in it starts at the
@@ -1423,6 +1429,13 @@ impl Renderer {
         }
         if rail_rows > 0 {
             hits[rail_rows - 1].0.h = TOOLBAR_COLUMN - hits[rail_rows - 1].0.y;
+        }
+        // The panel's column, by the same rule: the four pixels between two rows belong to the row above
+        // them, so moving from one to the next is staying on the list. Only between its own first and last
+        // row, though — the strip beside the rail at any other height is the canvas's, and the block level
+        // with a row is the rail's, whose box is tested first.
+        for index in rail_rows..hits.len().saturating_sub(1) {
+            hits[index].0.h = hits[index + 1].0.y - hits[index].0.y;
         }
         ToolbarPill {
             controls,
@@ -2801,11 +2814,11 @@ mod tests {
             .map(|c| c.y)
             .collect();
         assert_eq!(rows.len(), drawer_blocks(&rail(true)).len());
-        // The rows end a gap above the block's own row, so the block's band holds nothing else.
-        let lowest = rows.iter().copied().fold(f32::MIN, f32::max);
+        // One row is level with the block's own row, so the block and its list are one control and the
+        // corridor the block's hit box builds leads into a row rather than into an empty strip.
         assert!(
-            lowest + TOOLBAR_BLOCK + TOOLBAR_GAP <= more,
-            "a row shares the more block's band: {rows:?} against {more}"
+            rows.iter().any(|y| *y <= more && more < *y + TOOLBAR_BLOCK),
+            "no row shares the more block's band: {rows:?} against {more}"
         );
         // The plate holds its rows, and both are inside the column and the reserve the rail declares.
         let panel = open.panel.expect("an open drawer has a panel");

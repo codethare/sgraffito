@@ -7,6 +7,15 @@ the user writes in Chinese and expects Chinese in chat, English in the artifacts
 
 ## State right now (2026-11-10)
 
+- **A panel is now anchored to the block that opened it** (`openspec/changes/panel-beside-its-block/`):
+  exactly one of its rows shares that block's row band and the rest grow away from it, and the gaps
+  between rows belong to the row above them. Before this, every row sat above the block: the corridor
+  the block's hit box builds led into an empty strip, so the pointer left the block and the menu closed,
+  and the list read as one cell too high. `tests/render.rs`'s
+  `the_pointer_can_walk_from_the_block_into_its_panel_and_between_its_rows` is the regression, the smoke
+  test clicks the `boards` block and then the row one below it, and the old anchor's three tests were
+  rewritten to assert the new one.
+
 - **Boards landed**: a drawing belongs to a named board instead of to a screen. Three commits on top of
   `8b11963` (the sketch-WIP commit): `6d564a7` (the document is a map of boards; the file is version 4),
   `1fc6796` (per-output board, the rail's panel, the drawer's mode row), `3b51c6e` (the four CLI
@@ -519,9 +528,7 @@ no capabilities until a device exists.
 - The boards panel lists at most eight boards (`MAX_BOARD_ROWS`), because it is drawn inside the rail's
   fixed damage box; past eight, `sgraffito boards` still lists them all and `sgraffito board <name>`
   still reaches them. The board on screen can therefore fall outside the cap and the panel then states no
-  current board, and the four-pixel gap between a panel and the block that opened it (the drawer's too)
-  can close the panel if a pointer crosses it exactly: a slow diagonal move into the list needs a second
-  `C`. Board names are also not editable or removable.
+  current board. Board names are also not editable or removable.
 - While editing, the desktop is nearly hidden: the scrim is 90% opaque black, which is the point
   (the annotations are what to read) and is one constant if it ever reads as too much. It is also why
   the smoke test cannot see it — that run has no wallpaper client, so its backdrop is already black.

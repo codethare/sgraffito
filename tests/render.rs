@@ -1800,8 +1800,9 @@ fn the_drawer_opens_beside_the_rail_without_moving_it() {
         "the backdrop's switch is not on the rail while the drawer is closed"
     );
 
-    // Open, the switch is a row of the panel in the second column, above the row of the block that opened
-    // it: the panel never shares that block's band, which the block's own hover capsule uses.
+    // Open, the switch is a row of the panel in the second column, and exactly one row of that panel is
+    // level with the block that opened it — the row the corridor leads into, so the pointer can walk from
+    // the block straight onto the list.
     let band = toolbar_bounds(fw, fh);
     let column_x = band.x + 1.0 + 30.0 + 4.0 + 15.0;
     let mut more_row = None;
@@ -1819,18 +1820,18 @@ fn the_drawer_opens_beside_the_rail_without_moving_it() {
         .find(|y| renderer.toolbar_hit(&open, fw, fh, column_x, *y) == Some(ToolbarAction::Scrim))
         .expect("the panel's row is not reachable at all");
     assert!(
-        panel_row < more_row,
-        "the panel's row {panel_row} is not above the block's {more_row}"
+        (more_row..more_row + 30.0).contains(&panel_row),
+        "the panel's row {panel_row} is not level with the block's {more_row}"
     );
-    // The corridor reaches exactly to the panel's edge: one step left of the panel's first column is still
-    // the block, so the pointer can travel from the block into the panel without crossing a gap that owns
-    // nothing and would close it. Both ends come from the same layout.
+    // The corridor reaches exactly to the panel's edge: one step left of the panel's first column, on the
+    // block's own row, is still the block, so the pointer travels from the block into the panel without
+    // crossing a gap that owns nothing and would close it. Both ends come from the same layout.
     let panel_left = (1..band.w as u32)
         .map(|step| band.x + step as f32)
         .find(|x| renderer.toolbar_hit(&open, fw, fh, *x, panel_row) == Some(ToolbarAction::Scrim))
         .expect("the panel's left edge");
     assert_eq!(
-        renderer.toolbar_hit(&open, fw, fh, panel_left - 1.0, more_row),
+        renderer.toolbar_hit(&open, fw, fh, panel_left - 1.0, more_row + 5.0),
         Some(ToolbarAction::More)
     );
     // Nothing of the drawer is at the top of its column: the list hangs off the block, not the rail.
@@ -2423,26 +2424,27 @@ fn a_row_of_the_panel_can_be_clicked_with_the_pointer_on_the_block_that_opened_i
         .map(|step| step as f32)
         .find(|y| hit(&mut renderer, 15.0, *y) == Some(ToolbarAction::More))
         .expect("the more block is on the rail");
-    // The panel's row, found by looking above the block: this is the assertion. Before the fix there was no
-    // y at which the panel's control answered at all.
-    let row = (1..400)
-        .map(|step| more_row - step as f32)
-        .find(|y| *y > 0.0 && hit(&mut renderer, 60.0, *y) == Some(ToolbarAction::Scrim));
-    assert!(
-        row.is_some(),
-        "the panel's control is not reachable with the pointer on the block"
-    );
-    // The corridor is still the block: the row band of the block, out to the panel's left edge.
+    // The panel's control answers on the block's own row, past the corridor: this is the assertion. Before
+    // the fix the panel's rows all sat above this row, so the pointer left the block and hit nothing.
     assert_eq!(
-        hit(&mut renderer, 40.0, more_row),
+        hit(&mut renderer, 60.0, more_row + 5.0),
+        Some(ToolbarAction::Scrim),
+        "the panel's control is not reachable from the block's own row"
+    );
+    // The corridor is still the block: the same row band, out to the panel's left edge.
+    assert_eq!(
+        hit(&mut renderer, 20.0, more_row + 5.0),
         Some(ToolbarAction::More)
     );
-    // And the block's own row is clear of the panel, so the two never answer for the same point.
-    assert_ne!(
-        hit(&mut renderer, 60.0, more_row),
-        Some(ToolbarAction::Scrim),
-        "a panel row shares the block's band"
-    );
+    // And down the panel's own column, from the row level with the block to the end of the list, no point
+    // belongs to nothing: two 30 pt rows and the gap between them, so moving from one row to the next is
+    // staying on the list rather than closing it.
+    for dy in 0..2 * 30 + 4 {
+        assert!(
+            hit(&mut renderer, 60.0, more_row + dy as f32).is_some(),
+            "the panel has a hole {dy} below the row that is level with its block"
+        );
+    }
 }
 
 // --- the hand-drawn style ---------------------------------------------------------------------
@@ -3468,4 +3470,53 @@ fn the_boards_panel_paints_inside_the_rails_box() {
         painted += 1;
     }
     assert!(painted > 0, "nothing was drawn for the panel");
+}
+
+/// A menu nobody can walk into is not a menu. Moving the pointer out of the block that opened a panel and
+/// into the panel must never cross a point that belongs to nothing, and moving between two of its rows must
+/// not either: the first closes the panel, the second does the same one row in.
+#[test]
+fn the_pointer_can_walk_from_the_block_into_its_panel_and_between_its_rows() {
+    let (w, h) = (900.0f32, 1000.0f32);
+    let mut renderer = Renderer::new();
+    let rail = boards_rail(&[("Board 1", true), ("office", false)]);
+    let band = toolbar_bounds(w, h);
+    // The rail's own origin: the box starts one hairline and one pad left of the block column.
+    let base = band.x + 1.0 + 6.0;
+    let block_row = sweep_rail(&mut renderer, &rail, w, h, 20.0)
+        .iter()
+        .position(|hit| *hit == Some(ToolbarAction::Boards))
+        .expect("the boards block") as f32;
+    // The middle of the block's own band, and the panel's column.
+    let y = band.y + block_row + 15.0;
+    // The panel's own column: a block is 30 wide and the panel starts one gap past it.
+    let inside_panel = base + 34.0 + 10.0;
+    // 1. Sideways out of the block: the row that shares its band takes over where the block's box ends.
+    for x in 0..60 {
+        assert!(
+            renderer
+                .toolbar_hit(&rail, w, h, base + x as f32, y)
+                .is_some(),
+            "nothing is hit {x} past the rail's edge on the block's own row, so the panel closes"
+        );
+    }
+    // 2. And through the panel's own column, row after row, with no hole between them.
+    let hits: Vec<Option<ToolbarAction>> = (0..160)
+        .map(|dy| renderer.toolbar_hit(&rail, w, h, inside_panel, y - 80.0 + dy as f32))
+        .collect();
+    let first = hits
+        .iter()
+        .position(Option::is_some)
+        .expect("no row at all");
+    let last = hits
+        .iter()
+        .rposition(Option::is_some)
+        .expect("no row at all");
+    for (i, hit) in hits.iter().enumerate().take(last + 1).skip(first) {
+        assert!(
+            hit.is_some(),
+            "the panel has a hole at {} in its column, so moving between two rows closes it",
+            i as f32 - 80.0
+        );
+    }
 }
