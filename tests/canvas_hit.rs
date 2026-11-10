@@ -1,6 +1,4 @@
-use sgraffito::canvas::{
-    ERASER_THRESHOLD, ItemId, OutputAnnotations, PALETTE, Rect, Stroke, TextItem,
-};
+use sgraffito::canvas::{Board, ERASER_THRESHOLD, ItemId, PALETTE, Rect, Stroke, TextItem};
 use sgraffito::sketch::SKETCH_SLACK;
 
 fn line(y: f32, x0: f32, x1: f32) -> Stroke {
@@ -11,8 +9,8 @@ fn line(y: f32, x0: f32, x1: f32) -> Stroke {
     }
 }
 
-fn ann(strokes: Vec<Stroke>, texts: Vec<TextItem>) -> OutputAnnotations {
-    OutputAnnotations {
+fn ann(strokes: Vec<Stroke>, texts: Vec<TextItem>) -> Board {
+    Board {
         strokes,
         texts,
         shapes: vec![],
@@ -220,7 +218,7 @@ fn the_wander_is_room_for_painting_and_not_for_hitting() {
         width: 2.0,
         points: vec![[0.0, 0.0], [100.0, 0.0]],
     };
-    let a = OutputAnnotations {
+    let a = Board {
         strokes: vec![line],
         texts: vec![],
         shapes: vec![],
@@ -721,7 +719,7 @@ fn a_clicks_inside_a_rectangle_reaches_the_stroke_inside_it() {
     let rect = shape(ShapeKind::Rect, [100.0, 100.0], [300.0, 200.0]);
     let inside = line(150.0, 150.0, 250.0);
     let a = ann(vec![inside], vec![]);
-    let mut a = OutputAnnotations {
+    let mut a = Board {
         shapes: vec![rect],
         ..a
     };
@@ -768,7 +766,7 @@ fn a_marquee_takes_a_wholly_contained_shape_and_not_a_clipped_one() {
     let inside = shape(ShapeKind::Rect, [20.0, 20.0], [60.0, 50.0]);
     let clipped = shape(ShapeKind::Rect, [80.0, 20.0], [200.0, 50.0]);
     let clipped_bounds = clipped.bounds();
-    let a = OutputAnnotations {
+    let a = Board {
         strokes: vec![],
         texts: vec![],
         shapes: vec![inside, clipped],
@@ -810,7 +808,7 @@ fn a_transform_moves_both_points_of_a_shape_and_keeps_its_kind() {
 fn deleting_a_selection_removes_exactly_it() {
     // The bug this guards against: removing an earlier element shifts every later one, so a
     // selection holding two adjacent strokes would remove the wrong pair and leave one of them drawn.
-    let mut a = OutputAnnotations {
+    let mut a = Board {
         strokes: vec![
             stroke_at(0.0, 0.0),
             stroke_at(100.0, 0.0),
@@ -1113,7 +1111,7 @@ fn every_palette_colour_can_be_read_on_a_note() {
 
 #[test]
 fn a_note_is_hit_by_its_body_and_the_note_is_what_is_on_top() {
-    let mut a = OutputAnnotations {
+    let mut a = Board {
         strokes: vec![],
         texts: vec![],
         shapes: vec![],
@@ -1185,7 +1183,7 @@ fn a_note_moves_and_resizes_as_one_thing() {
     assert_eq!(scaled.w, sgraffito::canvas::NOTE_MIN_SIZE);
     assert_eq!(scaled.h, note.h * 3.0);
     // A marquee takes a note when it wholly contains it.
-    let a = OutputAnnotations {
+    let a = Board {
         strokes: vec![],
         texts: vec![],
         shapes: vec![],
@@ -1310,7 +1308,7 @@ fn a_note_keeps_the_press_point_as_a_corner_however_the_drag_turns() {
 #[test]
 fn a_colour_applies_to_every_element_the_selection_holds() {
     use sgraffito::canvas::{Note, ShapeKind};
-    let mut a = OutputAnnotations {
+    let mut a = Board {
         strokes: vec![line(40.0, 20.0, 60.0)],
         texts: vec![text(20.0, 80.0, "hello")],
         shapes: vec![shape(ShapeKind::Rect, [10.0, 120.0], [60.0, 160.0])],
@@ -1364,7 +1362,7 @@ fn a_colour_applies_to_every_element_the_selection_holds() {
 #[test]
 fn a_copy_leaves_the_original_in_place_and_keeps_every_index() {
     use sgraffito::canvas::{Note, ShapeKind};
-    let mut a = OutputAnnotations {
+    let mut a = Board {
         strokes: vec![line(10.0, 0.0, 40.0), line(60.0, 0.0, 90.0)],
         texts: vec![text(0.0, 100.0, "one")],
         shapes: vec![shape(ShapeKind::Rect, [0.0, 200.0], [40.0, 240.0])],
@@ -1466,7 +1464,7 @@ fn shift_scales_both_axes_by_one_factor() {
 
 #[test]
 fn the_selection_walk_visits_every_kind_in_document_order() {
-    let a = OutputAnnotations {
+    let a = Board {
         strokes: vec![line(10.0, 0.0, 5.0), line(20.0, 0.0, 5.0)],
         texts: vec![text(0.0, 0.0, "one")],
         shapes: vec![sgraffito::canvas::Shape {
@@ -1516,7 +1514,7 @@ fn the_selection_walk_visits_every_kind_in_document_order() {
 #[test]
 fn the_walk_wraps_backwards_and_steps_from_a_marquee() {
     use sgraffito::canvas::{Note, Shape, ShapeKind, cycle_selection};
-    let a = OutputAnnotations {
+    let a = Board {
         strokes: vec![line(10.0, 0.0, 5.0), line(20.0, 0.0, 5.0)],
         texts: vec![],
         shapes: vec![Shape {
@@ -1540,7 +1538,7 @@ fn the_walk_wraps_backwards_and_steps_from_a_marquee() {
         vec![ItemId::Shape(0)]
     );
     // An empty bucket names nothing, whichever direction it is walked.
-    let empty = OutputAnnotations::default();
+    let empty = Board::default();
     assert!(cycle_selection(&empty, &[], true).is_empty());
     assert!(cycle_selection(&empty, &[], false).is_empty());
 }
@@ -1570,7 +1568,7 @@ fn the_selection_frame_is_the_stored_geometry_and_not_the_ink() {
         width: 4.0,
         points: vec![[10.0, 20.0], [110.0, 20.0]],
     };
-    let a = OutputAnnotations {
+    let a = Board {
         strokes: vec![stroke.clone()],
         texts: vec![],
         shapes: vec![],

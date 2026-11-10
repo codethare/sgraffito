@@ -8,29 +8,39 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::canvas::{Doc, OutputAnnotations};
+use crate::canvas::{Board, Doc};
 
-/// The version this daemon writes. Version 1 had no `shapes` list, version 2 adds that, and version 3
-/// adds the `notes` list. All of them are
+/// The version this daemon writes. Version 1 had no `shapes` list, version 2 adds that, version 3
+/// adds the `notes` list, and version 4 keys the annotations by board name instead of output name and
+/// records the board picked last. All of them are
 /// read, because a version 1 file is a version 2 file with no shapes in it, and an older build
 /// reading a version 2 file would silently drop every shape on its next save — which is what the
 /// number is for.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 /// The oldest version whose files still load.
 pub const MIN_VERSION: u32 = 1;
 pub const DEBOUNCE: Duration = Duration::from_secs(1);
 pub const RETRY_DELAY: Duration = Duration::from_secs(1);
 
-#[derive(Serialize, Deserialize)]
+/// What is read. Both keyings are here: versions 1 to 3 hold the annotations under `outputs`, keyed by
+/// output name, and version 4 holds them under `boards`, keyed by board name — one key renamed, so the
+/// only change in the format is what its keys mean.
+#[derive(Deserialize)]
 struct File {
     version: u32,
-    outputs: BTreeMap<String, OutputAnnotations>,
+    #[serde(default)]
+    boards: BTreeMap<String, Board>,
+    #[serde(default)]
+    outputs: BTreeMap<String, Board>,
+    #[serde(default)]
+    active: String,
 }
 
 #[derive(Serialize)]
 struct FileRef<'a> {
     version: u32,
-    outputs: &'a BTreeMap<String, OutputAnnotations>,
+    boards: &'a BTreeMap<String, Board>,
+    active: &'a str,
 }
 
 /// Resolve the annotation path: `$XDG_DATA_HOME/sgraffito/annotations.json`, falling back to `$HOME/.local/share`.
@@ -65,7 +75,15 @@ pub fn load(path: &Path) -> Doc {
         // A supported older version loads; its missing fields already default. It is written back
         // in the current version the next time the daemon saves.
         Ok(file) if (MIN_VERSION..=VERSION).contains(&file.version) => Doc {
-            outputs: file.outputs,
+            // A file from before boards existed keys its annotations by output name; those keys become
+            // board names of their own, which is what lets an output that appears afterwards find the
+            // board named after it and show what it used to show.
+            boards: if file.boards.is_empty() {
+                file.outputs
+            } else {
+                file.boards
+            },
+            active: file.active,
         },
         Ok(file) => {
             backup(path, &format!("unsupported file version {}", file.version));
@@ -94,7 +112,8 @@ fn backup(path: &Path, reason: &str) {
 pub fn save(path: &Path, doc: &Doc) -> io::Result<()> {
     let file = FileRef {
         version: VERSION,
-        outputs: &doc.outputs,
+        boards: &doc.boards,
+        active: &doc.active,
     };
     let json = serde_json::to_vec_pretty(&file)?;
     if let Some(dir) = path.parent() {

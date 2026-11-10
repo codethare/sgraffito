@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use sgraffito::canvas::{Doc, OutputAnnotations, Shape, ShapeKind, Stroke, TextItem};
+use sgraffito::canvas::{Board, Doc, Shape, ShapeKind, Stroke, TextItem};
 use sgraffito::store::{self, Store};
 
 fn tmpdir(tag: &str) -> PathBuf {
@@ -13,9 +13,9 @@ fn tmpdir(tag: &str) -> PathBuf {
 
 fn sample() -> Doc {
     let mut doc = Doc::default();
-    doc.outputs.insert(
+    doc.boards.insert(
         "eDP-1".into(),
-        OutputAnnotations {
+        Board {
             strokes: vec![Stroke {
                 color: "#e01b24".into(),
                 width: 3.0,
@@ -67,16 +67,19 @@ fn round_trip_preserves_everything() {
 }
 
 #[test]
-fn saved_file_has_version_and_output_buckets() {
+fn saved_file_has_version_boards_and_the_picked_one() {
     let dir = tmpdir("schema");
     let p = dir.join("annotations.json");
-    store::save(&p, &sample()).unwrap();
+    let mut doc = sample();
+    doc.active = "eDP-1".into();
+    store::save(&p, &doc).unwrap();
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-    assert_eq!(v["version"], 3);
-    assert_eq!(v["outputs"]["eDP-1"]["strokes"][0]["points"][0][0], 12.0);
-    assert_eq!(v["outputs"]["eDP-1"]["texts"][0]["text"], "买牛奶"); // CJK survives the round trip
+    assert_eq!(v["version"], 4);
+    assert_eq!(v["active"], "eDP-1");
+    assert_eq!(v["boards"]["eDP-1"]["strokes"][0]["points"][0][0], 12.0);
+    assert_eq!(v["boards"]["eDP-1"]["texts"][0]["text"], "买牛奶"); // CJK survives the round trip
     // A shape is two points and a kind, however large it would be drawn: no samples, no box.
-    let shape = &v["outputs"]["eDP-1"]["shapes"][0];
+    let shape = &v["boards"]["eDP-1"]["shapes"][0];
     assert_eq!(shape["kind"], "arrow");
     assert_eq!(shape["from"], serde_json::json!([30.0, 400.0]));
     assert_eq!(shape["to"], serde_json::json!([180.0, 260.0]));
@@ -98,9 +101,9 @@ fn a_version_1_file_loads_and_is_not_backed_up() {
     )
     .unwrap();
     let doc = store::load(&p);
-    assert_eq!(doc.outputs["eDP-1"].strokes.len(), 1, "the strokes load");
+    assert_eq!(doc.boards["eDP-1"].strokes.len(), 1, "the strokes load");
     assert!(
-        doc.outputs["eDP-1"].shapes.is_empty(),
+        doc.boards["eDP-1"].shapes.is_empty(),
         "no shape is invented"
     );
     assert!(
@@ -115,10 +118,7 @@ fn a_shape_survives_a_round_trip() {
     let p = dir.join("annotations.json");
     store::save(&p, &sample()).unwrap();
     let back = store::load(&p);
-    assert_eq!(
-        back.outputs["eDP-1"].shapes,
-        sample().outputs["eDP-1"].shapes
-    );
+    assert_eq!(back.boards["eDP-1"].shapes, sample().boards["eDP-1"].shapes);
 }
 
 #[test]
@@ -205,4 +205,102 @@ fn failed_flush_stays_pending_for_retry() {
     s.mark_dirty(t0);
     assert!(s.flush(&sample()).is_err());
     assert!(s.due(Instant::now() + Duration::from_secs(2)));
+}
+
+/// A board created without a name takes the smallest number no board already holds, so creating boards
+/// never collides with one loaded from the file.
+#[test]
+fn a_new_board_takes_the_first_free_number() {
+    let mut doc = Doc::default();
+    doc.boards.insert("Board 1".into(), Board::default());
+    doc.boards.insert("Board 3".into(), Board::default());
+    assert_eq!(doc.new_board(), "Board 2");
+    assert!(doc.boards.contains_key("Board 2"));
+    assert_eq!(doc.new_board(), "Board 4");
+}
+
+/// The board picked last is what a screen that appears afterwards lands on: shutting the laptop and
+/// connecting a monitor has to show the drawing that was picked, not an empty one.
+#[test]
+fn a_new_output_adopts_the_board_picked_last() {
+    let mut doc = Doc::default();
+    doc.new_board();
+    let office = doc.new_board();
+    doc.active = office.clone();
+    assert_eq!(doc.adopt("eDP-1"), office);
+}
+
+/// A file written before boards existed names each bucket after its output, so the name match is what
+/// puts a two-screen setup back exactly as it was.
+#[test]
+fn a_migrated_document_puts_each_screen_back_on_its_own_board() {
+    let mut doc = Doc::default();
+    doc.boards.insert("eDP-1".into(), Board::default());
+    doc.boards.insert("DP-2".into(), Board::default());
+    assert_eq!(doc.active, "");
+    assert_eq!(doc.adopt("DP-2"), "DP-2");
+    assert_eq!(doc.adopt("eDP-1"), "eDP-1");
+}
+
+/// An output always gets a board, and adoption never writes the picked board, or the second screen
+/// would inherit the first one's drawing.
+#[test]
+fn an_output_always_gets_a_board() {
+    let mut doc = Doc::default();
+    assert_eq!(doc.adopt("eDP-1"), "Board 1");
+    assert!(doc.boards.contains_key("Board 1"));
+    assert_eq!(doc.active, "");
+
+    let mut doc = Doc::default();
+    doc.boards.insert("zeta".into(), Board::default());
+    assert_eq!(doc.adopt("eDP-1"), "zeta");
+    assert_eq!(doc.active, "");
+
+    let mut doc = Doc::default();
+    doc.boards.insert("a".into(), Board::default());
+    doc.active = "gone".into();
+    assert_eq!(doc.adopt("eDP-1"), "a");
+}
+
+/// The file an earlier release wrote keys its annotations by output name. Those become boards of the
+/// same name, so nothing is lost and no screen is emptied by the upgrade.
+#[test]
+fn a_version_3_file_becomes_boards() {
+    let dir = tmpdir("v3-boards");
+    let p = dir.join("annotations.json");
+    std::fs::write(
+        &p,
+        r##"{"version":3,"outputs":{"eDP-1":{"strokes":[{"color":"#e01b24","width":3.0,"points":[[1.0,2.0]]}],"texts":[]},"DP-2":{"notes":[]}}}"##,
+    )
+    .unwrap();
+    let mut doc = store::load(&p);
+    assert_eq!(doc.boards["eDP-1"].strokes.len(), 1, "the strokes load");
+    assert!(doc.boards.contains_key("DP-2"), "the other output's board");
+    assert_eq!(doc.active, "", "nothing was picked in a version 3 file");
+    assert!(
+        !dir.join("annotations.json.bak").exists(),
+        "it is not backed up"
+    );
+    assert_eq!(doc.adopt("DP-2"), "DP-2", "each screen keeps its own board");
+
+    // The next save is the current version.
+    store::save(&p, &doc).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+    assert_eq!(v["version"], 4);
+    assert!(v["boards"]["eDP-1"].is_object());
+}
+
+/// Which board was picked is content of the file: it is what a screen connected tomorrow lands on.
+#[test]
+fn the_picked_board_survives_the_round_trip() {
+    let dir = tmpdir("active");
+    let p = dir.join("annotations.json");
+    let mut doc = Doc::default();
+    doc.new_board();
+    let office = doc.new_board();
+    doc.active = office.clone();
+    store::save(&p, &doc).unwrap();
+    let mut back = store::load(&p);
+    assert_eq!(back.active, office);
+    assert_eq!(back.adopt("eDP-1"), office);
 }

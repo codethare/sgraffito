@@ -32,8 +32,8 @@ use crate::app::{
     App, BTN_LEFT, BTN_MIDDLE, Mode, PALETTE, Tool, ToolbarAction, log, read_selection, text_mime,
 };
 use crate::canvas::{
-    Caret, ERASER_THRESHOLD, OutputAnnotations, Rect, SELECT_HANDLE_HIT, ShapeKind, Stroke,
-    TextBuffer, ZOOM_STEP, constrained_drag, grab_at, selection_frame,
+    Board, Caret, ERASER_THRESHOLD, Rect, SELECT_HANDLE_HIT, ShapeKind, Stroke, TextBuffer,
+    ZOOM_STEP, constrained_drag, grab_at, selection_frame,
 };
 use crate::render::{drawer_stays_open, picks_from_drawer};
 
@@ -706,8 +706,8 @@ impl App {
                 return;
             };
             let bucket = out.bucket(key).into_owned();
-            let empty = OutputAnnotations::default();
-            let ann = self.doc.outputs.get(&bucket).unwrap_or(&empty);
+            let empty = Board::default();
+            let ann = self.doc.boards.get(&bucket).unwrap_or(&empty);
             out.overlay
                 .selection
                 .as_ref()
@@ -1032,7 +1032,7 @@ impl App {
                 {
                     changed = stroke.paint_bounds();
                     self.doc
-                        .outputs
+                        .boards
                         .entry(bucket.clone())
                         .or_default()
                         .strokes
@@ -1049,7 +1049,7 @@ impl App {
                         None => box_,
                     });
                     self.doc
-                        .outputs
+                        .boards
                         .entry(bucket.clone())
                         .or_default()
                         .shapes
@@ -1057,7 +1057,7 @@ impl App {
                 }
                 if tool == Tool::Eraser
                     && let Some([x, y]) = eraser
-                    && let Some(ann) = self.doc.outputs.get_mut(&bucket)
+                    && let Some(ann) = self.doc.boards.get_mut(&bucket)
                     && let Some(erased) = ann.erase(x, y, tolerance)
                 {
                     changed = Some(match changed {

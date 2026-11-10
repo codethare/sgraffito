@@ -2,8 +2,8 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use sgraffito::canvas::{
-    MOTION_QUALITY, OutputAnnotations, Overlay, Rect, Stroke, TextBuffer, TextItem, TextOverlay,
-    Tool, Toolbar, ToolbarAction, View,
+    Board, MOTION_QUALITY, Overlay, Rect, Stroke, TextBuffer, TextItem, TextOverlay, Tool, Toolbar,
+    ToolbarAction, View,
 };
 use sgraffito::render::{FrameCache, Renderer, toolbar_bounds, transient_bounds, transient_damage};
 use sgraffito::sketch;
@@ -39,14 +39,14 @@ fn line(y: f32, x0: f32, x1: f32, width: f32) -> Stroke {
     }
 }
 
-fn document(stroke_count: usize, width: f32, height: f32) -> OutputAnnotations {
+fn document(stroke_count: usize, width: f32, height: f32) -> Board {
     let strokes = (0..stroke_count)
         .map(|i| {
             let y = height * (i as f32 + 1.0) / (stroke_count + 1) as f32;
             line(y, width * 0.1, width * 0.9, 3.0)
         })
         .collect();
-    OutputAnnotations {
+    Board {
         strokes,
         texts: vec![TextItem {
             x: width * 0.1,
@@ -94,7 +94,7 @@ fn measure(
     logical_height: u32,
     scale: f32,
     view: View,
-    annotations: &OutputAnnotations,
+    annotations: &Board,
     overlay: &Overlay,
     damage: Option<Rect>,
     cold_raster: bool,
@@ -122,7 +122,7 @@ fn measure_at(
     logical_height: u32,
     scale: f32,
     view: View,
-    annotations: &OutputAnnotations,
+    annotations: &Board,
     overlay: &Overlay,
     damage: Option<Rect>,
     cold_raster: bool,
@@ -226,7 +226,7 @@ fn render_frame(
     width: u32,
     height: u32,
     scale: f32,
-    annotations: &OutputAnnotations,
+    annotations: &Board,
     overlay: &Overlay,
     damage: Option<Rect>,
     view: View,

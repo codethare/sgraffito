@@ -1,7 +1,7 @@
 use sgraffito::canvas::{
-    Doc, ERASER_THRESHOLD, ItemId, Note, OutputAnnotations, Overlay, PALETTE, Rect, Selection,
-    Shape, ShapeKind, Stroke, TextBuffer, TextItem, TextOverlay, Tool, Toolbar, ToolbarAction,
-    Transform, View,
+    Board, Doc, ERASER_THRESHOLD, ItemId, Note, Overlay, PALETTE, Rect, Selection, Shape,
+    ShapeKind, Stroke, TextBuffer, TextItem, TextOverlay, Tool, Toolbar, ToolbarAction, Transform,
+    View,
 };
 use sgraffito::render::{
     DAMAGE_SLACK, DamageRegion, FrameCache, Renderer, Screen, buffer_format, toolbar_bounds,
@@ -35,8 +35,8 @@ fn ink(buf: &[u8]) -> usize {
     buf.as_chunks::<4>().0.iter().filter(|p| p[3] != 0).count()
 }
 
-fn ann(strokes: Vec<Stroke>, texts: Vec<TextItem>) -> OutputAnnotations {
-    OutputAnnotations {
+fn ann(strokes: Vec<Stroke>, texts: Vec<TextItem>) -> Board {
+    Board {
         strokes,
         texts,
         shapes: vec![],
@@ -61,7 +61,7 @@ fn empty_doc_leaves_buffer_transparent() {
         H,
         1.0,
         View::default(),
-        &OutputAnnotations::default(),
+        &Board::default(),
         &Overlay::default(),
         None,
     );
@@ -146,7 +146,7 @@ fn overlay_in_progress_stroke_is_drawn() {
         H,
         1.0,
         View::default(),
-        &OutputAnnotations::default(),
+        &Board::default(),
         &overlay,
         None,
     );
@@ -166,7 +166,7 @@ fn overlay_eraser_marker_is_drawn() {
         H,
         1.0,
         View::default(),
-        &OutputAnnotations::default(),
+        &Board::default(),
         &overlay,
         None,
     );
@@ -199,7 +199,7 @@ fn overlay_text_box_draws_text_and_cursor() {
         H,
         1.0,
         View::default(),
-        &OutputAnnotations::default(),
+        &Board::default(),
         &overlay,
         None,
     );
@@ -234,7 +234,7 @@ fn the_caret_spans_the_whole_line_box() {
         h,
         1.0,
         View::default(),
-        &OutputAnnotations::default(),
+        &Board::default(),
         &overlay,
         None,
     );
@@ -276,7 +276,7 @@ fn preedit_renders_more_ink_than_committed_text_alone() {
         H,
         1.0,
         View::default(),
-        &OutputAnnotations::default(),
+        &Board::default(),
         &make(""),
         None,
     );
@@ -286,7 +286,7 @@ fn preedit_renders_more_ink_than_committed_text_alone() {
         H,
         1.0,
         View::default(),
-        &OutputAnnotations::default(),
+        &Board::default(),
         &make("ni"),
         None,
     );
@@ -356,14 +356,7 @@ fn single_sample_stroke_is_a_dot() {
 
 /// One frame exactly as the daemon composes it: the renderer fills the damaged region from the
 /// document cache, draws the overlays, then swaps the R and B bytes of that region.
-fn frame(
-    buf: &mut [u8],
-    w: u32,
-    h: u32,
-    ann: &OutputAnnotations,
-    overlay: &Overlay,
-    damage: Option<Rect>,
-) {
+fn frame(buf: &mut [u8], w: u32, h: u32, ann: &Board, overlay: &Overlay, damage: Option<Rect>) {
     let region = match damage {
         None => DamageRegion::All,
         Some(d) => DamageRegion::from_logical(d, 1.0, w, h),
@@ -403,7 +396,7 @@ fn dot(x: f32, y: f32) -> Overlay {
 
 #[test]
 fn toolbar_draws_ink_only_when_it_is_present() {
-    let doc = OutputAnnotations::default();
+    let doc = Board::default();
     let with = Overlay {
         toolbar: Some(toolbar(Tool::Text, "#33d17a", 18.0, None)),
         ..Default::default()
@@ -440,7 +433,7 @@ fn toolbar_is_a_left_edge_rail_at_the_optical_centre() {
         h,
         1.0,
         View::default(),
-        &OutputAnnotations::default(),
+        &Board::default(),
         &overlay,
         None,
     );
@@ -668,7 +661,7 @@ fn a_hovered_block_stretches_to_say_what_it_does() {
             h,
             1.0,
             View::default(),
-            &OutputAnnotations::default(),
+            &Board::default(),
             &overlay,
             None,
         );
@@ -709,7 +702,7 @@ fn the_eraser_cannot_reach_the_toolbar() {
     // The toolbar lives in the transient overlay, never in the document, so nothing at its
     // position is there to delete -- including the palette swatches and the tool blocks.
     let (w, h) = (1920.0f32, 1080.0f32);
-    let mut doc = OutputAnnotations::default();
+    let mut doc = Board::default();
     let band = toolbar_bounds(w, h);
     for y in [band.y + 20.0, band.y + band.h / 2.0] {
         assert!(doc.erase(band.x + 20.0, y, ERASER_THRESHOLD).is_none());
@@ -881,31 +874,10 @@ fn bounding_box_frame_with_a_toolbar_matches_a_whole_surface_frame() {
         Some(toolbar_bounds(w as f32, h as f32)),
     );
     let mut whole = buffer(w, h);
-    frame(
-        &mut whole,
-        w,
-        h,
-        &OutputAnnotations::default(),
-        &first,
-        None,
-    );
+    frame(&mut whole, w, h, &Board::default(), &first, None);
     let mut boxed = whole.clone();
-    frame(
-        &mut whole,
-        w,
-        h,
-        &OutputAnnotations::default(),
-        &second,
-        None,
-    );
-    frame(
-        &mut boxed,
-        w,
-        h,
-        &OutputAnnotations::default(),
-        &second,
-        Some(damage),
-    );
+    frame(&mut whole, w, h, &Board::default(), &second, None);
+    frame(&mut boxed, w, h, &Board::default(), &second, Some(damage));
     assert_eq!(whole, boxed);
 }
 
@@ -924,31 +896,10 @@ fn a_drag_far_from_the_toolbar_leaves_the_toolbar_pixels_alone() {
     let second = with(504.0, 504.0);
     let damage = transient_damage(transient_bounds(&first), transient_bounds(&second), None);
     let mut whole = buffer(w, h);
-    frame(
-        &mut whole,
-        w,
-        h,
-        &OutputAnnotations::default(),
-        &first,
-        None,
-    );
+    frame(&mut whole, w, h, &Board::default(), &first, None);
     let mut boxed = whole.clone();
-    frame(
-        &mut whole,
-        w,
-        h,
-        &OutputAnnotations::default(),
-        &second,
-        None,
-    );
-    frame(
-        &mut boxed,
-        w,
-        h,
-        &OutputAnnotations::default(),
-        &second,
-        Some(damage),
-    );
+    frame(&mut whole, w, h, &Board::default(), &second, None);
+    frame(&mut boxed, w, h, &Board::default(), &second, Some(damage));
     assert_eq!(whole, boxed);
 }
 
@@ -1018,7 +969,7 @@ fn long_text_damage_contains_everything_rasterised() {
 fn doc_strokes_of_other_outputs_are_not_drawn() {
     let mut buf = buffer(W, H);
     let mut doc = Doc::default();
-    doc.outputs
+    doc.boards
         .insert("eDP-1".into(), ann(vec![line(50.0, 20.0, 180.0)], vec![]));
     // Rendering an output reads only that output's bucket; an empty bucket means no annotations
     Renderer::new().render(
@@ -1027,7 +978,7 @@ fn doc_strokes_of_other_outputs_are_not_drawn() {
         H,
         1.0,
         View::default(),
-        &OutputAnnotations::default(),
+        &Board::default(),
         &Overlay::default(),
         None,
     );
@@ -1051,7 +1002,7 @@ fn rail_frame(w: u32, h: u32, wheel: &Toolbar, hover: Option<ToolbarAction>, gro
         h,
         1.0,
         View::default(),
-        &OutputAnnotations::default(),
+        &Board::default(),
         &overlay,
         None,
     );
@@ -1255,7 +1206,7 @@ fn edit_frame(w: u32, h: u32, text: &str, cursor: usize, preedit: &str) -> Vec<u
         h,
         1.0,
         View::default(),
-        &OutputAnnotations::default(),
+        &Board::default(),
         &overlay,
         None,
     );
@@ -1399,7 +1350,7 @@ fn the_rail_is_pinned_to_the_top_margin_when_it_cannot_be_centred() {
         short_h,
         1.0,
         View::default(),
-        &OutputAnnotations::default(),
+        &Board::default(),
         &overlay,
         None,
     );
@@ -1435,7 +1386,7 @@ fn the_rail_sits_on_a_plate() {
         h,
         1.0,
         View::default(),
-        &OutputAnnotations::default(),
+        &Board::default(),
         &overlay,
         None,
     );
@@ -1491,7 +1442,7 @@ fn the_rail_sits_on_a_plate() {
         h,
         1.0,
         View::default(),
-        &OutputAnnotations::default(),
+        &Board::default(),
         &Overlay {
             toolbar: Some(stretched),
             ..Default::default()
@@ -1534,7 +1485,7 @@ fn an_edit_mode_frame_is_painted_on_a_scrim() {
         h,
         1.0,
         View::default(),
-        &OutputAnnotations::default(),
+        &Board::default(),
         &edit,
         None,
     );
@@ -1545,7 +1496,7 @@ fn an_edit_mode_frame_is_painted_on_a_scrim() {
         h,
         1.0,
         View::default(),
-        &OutputAnnotations::default(),
+        &Board::default(),
         &locked,
         None,
     );
@@ -1580,7 +1531,7 @@ fn a_cached_frame_keeps_the_scrim_after_a_document_change() {
         toolbar: Some(rail),
         ..Default::default()
     };
-    let before = OutputAnnotations::default();
+    let before = Board::default();
     let mut after = before.clone();
     after.strokes = vec![Stroke {
         color: "#e01b24".into(),
@@ -1642,7 +1593,7 @@ fn a_panned_and_zoomed_frame_puts_the_drawing_where_the_view_says() {
     // The whole point of the view: a canvas point lands at the screen point the transform names, and
     // the rail stays exactly where it was, because it is a control rather than part of the drawing.
     let (w, h) = (400u32, 300u32);
-    let doc = OutputAnnotations {
+    let doc = Board {
         strokes: vec![Stroke {
             color: "#e01b24".into(),
             width: 4.0,
@@ -1689,7 +1640,7 @@ fn the_default_view_draws_what_no_view_drew() {
     // A frame at 1:1 with no pan has to be the frame this program drew before the view existed,
     // down to the byte: that is what keeps this change from moving a pixel it does not mean to.
     let (w, h) = (400u32, 300u32);
-    let doc = OutputAnnotations {
+    let doc = Board {
         strokes: vec![Stroke {
             color: "#e01b24".into(),
             width: 4.0,
@@ -1752,7 +1703,7 @@ fn a_note_draws_its_text_inside_its_square_and_nowhere_else() {
     empty.text = String::new();
     empty.h = note.h;
     let draw = |note: &Note| {
-        let ann = OutputAnnotations {
+        let ann = Board {
             strokes: vec![],
             texts: vec![],
             shapes: vec![],
@@ -1916,7 +1867,7 @@ fn the_backdrop_can_be_switched_off_and_on() {
             h,
             1.0,
             View::default(),
-            &OutputAnnotations::default(),
+            &Board::default(),
             overlay,
             None,
         );
@@ -1956,7 +1907,7 @@ fn the_backdrop_can_be_switched_off_and_on() {
         1.0,
         1.0,
         View::default(),
-        &OutputAnnotations::default(),
+        &Board::default(),
         &on,
         None,
         &mut cache,
@@ -1970,7 +1921,7 @@ fn the_backdrop_can_be_switched_off_and_on() {
         1.0,
         1.0,
         View::default(),
-        &OutputAnnotations::default(),
+        &Board::default(),
         &off,
         None,
         &mut cache,
@@ -2001,7 +1952,7 @@ fn a_note_being_typed_in_is_drawn_wrapped_while_the_typing_goes_on() {
     empty.h = note.h;
     // The note as the document holds it while the typing is going on: it still has no text, because the
     // text lives in the overlay's buffer until the edit ends.
-    let doc = |note: &Note| OutputAnnotations {
+    let doc = |note: &Note| Board {
         strokes: vec![],
         texts: vec![],
         shapes: vec![],
@@ -2017,7 +1968,7 @@ fn a_note_being_typed_in_is_drawn_wrapped_while_the_typing_goes_on() {
         }),
         ..Default::default()
     };
-    let draw = |ann: &OutputAnnotations, overlay: &Overlay| {
+    let draw = |ann: &Board, overlay: &Overlay| {
         let mut buf = buffer(w, h);
         Renderer::new().render(&mut buf, w, h, 1.0, view, ann, overlay, None);
         buf
@@ -2058,7 +2009,7 @@ fn a_note_being_typed_in_is_drawn_wrapped_while_the_typing_goes_on() {
         &mut cache,
         &[ItemId::Note(0)],
     );
-    let empty_frame = draw(&OutputAnnotations::default(), &Overlay::default());
+    let empty_frame = draw(&Board::default(), &Overlay::default());
     assert_eq!(
         only_raster, empty_frame,
         "the note under edit was left in the raster"
@@ -2077,7 +2028,7 @@ fn a_note_is_drawn_over_the_ink_that_crosses_it() {
         width: 6.0,
         points: vec![[40.0, 110.0], [300.0, 110.0]],
     };
-    let with_ink = OutputAnnotations {
+    let with_ink = Board {
         strokes: vec![stroke],
         texts: vec![],
         shapes: vec![],
@@ -2085,7 +2036,7 @@ fn a_note_is_drawn_over_the_ink_that_crosses_it() {
     };
     let mut inkless = with_ink.clone();
     inkless.strokes.clear();
-    let draw = |ann: &OutputAnnotations| {
+    let draw = |ann: &Board| {
         let mut buf = buffer(w, h);
         Renderer::new().render(&mut buf, w, h, 1.0, view, ann, &Overlay::default(), None);
         buf
@@ -2132,7 +2083,7 @@ fn the_date_stays_inside_the_note_at_every_zoom() {
         let note = Note::new(80.0, 60.0, PALETTE[1], "2026/10/14".into());
         let mut dateless = note.clone();
         dateless.created = String::new();
-        let with_date = OutputAnnotations {
+        let with_date = Board {
             strokes: vec![],
             texts: vec![],
             shapes: vec![],
@@ -2140,7 +2091,7 @@ fn the_date_stays_inside_the_note_at_every_zoom() {
         };
         let mut without = with_date.clone();
         without.notes = vec![dateless];
-        let draw = |ann: &OutputAnnotations| {
+        let draw = |ann: &Board| {
             let mut buf = buffer(w, h);
             Renderer::new().render(&mut buf, w, h, 1.0, view, ann, &Overlay::default(), None);
             buf
@@ -2181,16 +2132,7 @@ fn a_note_being_dragged_out_is_filled_and_not_only_outlined() {
         ..Default::default()
     };
     let mut buf = buffer(w, h);
-    Renderer::new().render(
-        &mut buf,
-        w,
-        h,
-        1.0,
-        view,
-        &OutputAnnotations::default(),
-        &overlay,
-        None,
-    );
+    Renderer::new().render(&mut buf, w, h, 1.0, view, &Board::default(), &overlay, None);
     let px = |x: u32, y: u32| {
         let p = buf.chunks(4).nth((y * w + x) as usize).unwrap();
         (p[0], p[1], p[2], p[3])
@@ -2232,7 +2174,7 @@ fn a_note_dragged_left_leaves_no_trail_in_its_damage_box() {
             1.0,
             1.0,
             view,
-            &OutputAnnotations::default(),
+            &Board::default(),
             &far,
             None,
             &mut cache,
@@ -2245,23 +2187,14 @@ fn a_note_dragged_left_leaves_no_trail_in_its_damage_box() {
             1.0,
             1.0,
             view,
-            &OutputAnnotations::default(),
+            &Board::default(),
             &near,
             Some(damage),
             &mut cache,
             &[],
         );
         let mut full = buffer(w, h);
-        Renderer::new().render(
-            &mut full,
-            w,
-            h,
-            1.0,
-            view,
-            &OutputAnnotations::default(),
-            &near,
-            None,
-        );
+        Renderer::new().render(&mut full, w, h, 1.0, view, &Board::default(), &near, None);
         let mut spots: Vec<(u32, u32)> = Vec::new();
         for (i, (a, b)) in buf.chunks(4).zip(full.chunks(4)).enumerate() {
             if a != b {
@@ -2322,7 +2255,7 @@ fn a_note_dragged_out_and_back_leaves_no_trail() {
             1.0,
             1.0,
             view,
-            &OutputAnnotations::default(),
+            &Board::default(),
             &overlay,
             Some(damage),
             &mut cache,
@@ -2338,7 +2271,7 @@ fn a_note_dragged_out_and_back_leaves_no_trail() {
         h,
         1.0,
         view,
-        &OutputAnnotations::default(),
+        &Board::default(),
         &last_overlay,
         None,
     );
@@ -2377,7 +2310,7 @@ fn switching_the_backdrop_repaints_the_whole_surface() {
             1.0,
             1.0,
             view,
-            &OutputAnnotations::default(),
+            &Board::default(),
             &Overlay {
                 toolbar: Some(rail(scrim)),
                 ..Default::default()
@@ -2417,7 +2350,7 @@ fn hovering_the_more_block_paints_the_drawer_list_inside_the_rails_box() {
             h,
             1.0,
             view,
-            &OutputAnnotations::default(),
+            &Board::default(),
             &Overlay {
                 toolbar: Some(t),
                 ..Default::default()
@@ -2538,7 +2471,7 @@ fn a_stroke_is_drawn_as_a_hand_drawn_mark() {
 #[test]
 fn a_shape_is_drawn_as_a_hand_drawn_outline() {
     let (w, h) = (240u32, 160u32);
-    let doc = OutputAnnotations {
+    let doc = Board {
         strokes: vec![],
         texts: vec![],
         shapes: vec![Shape {
@@ -2565,8 +2498,8 @@ fn a_shape_is_drawn_as_a_hand_drawn_outline() {
 }
 
 /// One shape, alone on the surface, drawn exactly as the daemon draws a committed document.
-fn sole_shape(shape: Shape) -> OutputAnnotations {
-    OutputAnnotations {
+fn sole_shape(shape: Shape) -> Board {
+    Board {
         strokes: vec![],
         texts: vec![],
         shapes: vec![shape],
@@ -2587,7 +2520,7 @@ fn rect_shape(from: [f32; 2], to: [f32; 2]) -> Shape {
 #[test]
 fn sketched_ink_stays_inside_the_paint_box() {
     let (w, h) = (320u32, 320u32);
-    let mut cases: Vec<(OutputAnnotations, Rect)> = vec![
+    let mut cases: Vec<(Board, Rect)> = vec![
         (
             ann(vec![line(150.0, 40.0, 280.0)], vec![]),
             line(150.0, 40.0, 280.0).paint_bounds().unwrap(),
@@ -2718,7 +2651,7 @@ fn a_moved_sketched_shape_leaves_no_trail() {
 #[test]
 fn a_damaged_frame_of_a_sketched_document_matches_a_whole_surface_one() {
     let (w, h) = (300u32, 240u32);
-    let doc = OutputAnnotations {
+    let doc = Board {
         strokes: vec![line(120.0, 30.0, 270.0)],
         texts: vec![],
         shapes: vec![rect_shape([50.0, 50.0], [150.0, 120.0])],
@@ -2751,7 +2684,7 @@ fn a_second_renderer_draws_the_same_sketch() {
     // The style is derived from the element, not from a stream that runs across frames, so a restart
     // cannot change a drawing.
     let (w, h) = (300u32, 200u32);
-    let doc = OutputAnnotations {
+    let doc = Board {
         strokes: vec![line(60.0, 30.0, 260.0)],
         texts: vec![],
         shapes: vec![rect_shape([40.0, 90.0], [180.0, 170.0])],
@@ -2808,7 +2741,7 @@ fn a_note_keeps_its_exact_square() {
         text: "buy milk".into(),
         created: "2026/10/14".into(),
     };
-    let doc = OutputAnnotations {
+    let doc = Board {
         strokes: vec![line(20.0, 20.0, 380.0)],
         texts: vec![],
         shapes: vec![rect_shape([260.0, 240.0], [380.0, 340.0])],
@@ -2870,7 +2803,7 @@ fn the_interface_over_a_sketched_document_is_exact() {
         eraser: Some([60.0, 40.0]),
         ..Default::default()
     };
-    let owned = |doc: &OutputAnnotations| {
+    let owned = |doc: &Board| {
         // Straight from the renderer, without the swap a shm buffer gets, so the accent's own bytes
         // are the ones compared.
         let mut buf = buffer(w, h);
@@ -2899,7 +2832,7 @@ fn removing_an_element_does_not_redraw_the_others() {
     let (w, h) = (400u32, 220u32);
     let first = line(50.0, 40.0, 360.0);
     let second = line(140.0, 40.0, 360.0);
-    let render = |doc: &OutputAnnotations| {
+    let render = |doc: &Board| {
         let mut buf = buffer(w, h);
         Renderer::new().render(
             &mut buf,
@@ -2929,13 +2862,7 @@ fn removing_an_element_does_not_redraw_the_others() {
 
 /// How much of an element's ink lies beyond the exact outline it stores, as a fraction of its ink.
 /// A figure drawn exactly scores ~0; a hand-drawn trace puts a good share of its ink outside.
-fn outside_the_outline(
-    doc: &OutputAnnotations,
-    outline: &[[f32; 2]],
-    reach: f32,
-    w: u32,
-    h: u32,
-) -> f32 {
+fn outside_the_outline(doc: &Board, outline: &[[f32; 2]], reach: f32, w: u32, h: u32) -> f32 {
     let mut buf = buffer(w, h);
     frame(&mut buf, w, h, doc, &Overlay::default(), None);
     let (mut ink, mut out) = (0usize, 0usize);
@@ -3007,7 +2934,7 @@ fn cached(
     w: u32,
     h: u32,
     view: View,
-    doc: &OutputAnnotations,
+    doc: &Board,
     damage: Option<Rect>,
 ) {
     renderer.render_with_cache(
@@ -3026,8 +2953,8 @@ fn cached(
 }
 
 /// A document with a stroke and a text box, so a frame has one of each to draw.
-fn cached_document() -> OutputAnnotations {
-    OutputAnnotations {
+fn cached_document() -> Board {
+    Board {
         strokes: vec![line(50.0, 20.0, 180.0)],
         texts: vec![TextItem {
             x: 20.0,
@@ -3274,7 +3201,7 @@ fn a_coarse_frame_keeps_the_drawing_where_the_full_one_puts_it() {
     use sgraffito::canvas::MOTION_QUALITY;
 
     let (w, h) = (300u32, 240u32);
-    let doc = OutputAnnotations {
+    let doc = Board {
         strokes: vec![line(120.0, 30.0, 270.0)],
         texts: vec![],
         shapes: vec![rect_shape([50.0, 50.0], [150.0, 120.0])],
@@ -3329,7 +3256,7 @@ fn a_full_resolution_frame_after_a_coarse_one_is_crisp_again() {
     use sgraffito::canvas::MOTION_QUALITY;
 
     let (w, h) = (300u32, 240u32);
-    let doc = OutputAnnotations {
+    let doc = Board {
         strokes: vec![line(120.0, 30.0, 270.0)],
         texts: vec![],
         shapes: vec![],

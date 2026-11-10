@@ -42,8 +42,8 @@ use wayland_client::{
 };
 
 use crate::canvas::{
-    Doc, ERASER_THRESHOLD, Gesture, Grab, Handle, ItemId, Motion, Note, OutputAnnotations, Overlay,
-    Press, Rect, Selection, Shape, ShapeKind, TEXT_SIZE_MAX, TEXT_SIZE_MIN, TextBuffer, TextItem,
+    Board, Doc, ERASER_THRESHOLD, Gesture, Grab, Handle, ItemId, Motion, Note, Overlay, Press,
+    Rect, Selection, Shape, ShapeKind, TEXT_SIZE_MAX, TEXT_SIZE_MIN, TextBuffer, TextItem,
     TextOverlay, Toolbar, Transform, View, ZOOM_STEP, Zoom, date_stamp, marquee_select, note_drag,
     nudge_delta, selection_bounds, selection_frame, selection_press, snap_square,
 };
@@ -647,8 +647,8 @@ impl App {
             .as_ref()
             .map(|s| s.items.clone())
             .unwrap_or_default();
-        let empty = OutputAnnotations::default();
-        let ann = self.doc.outputs.get(&bucket).unwrap_or(&empty);
+        let empty = Board::default();
+        let ann = self.doc.boards.get(&bucket).unwrap_or(&empty);
         let items = crate::canvas::cycle_selection(ann, &held, forward);
         self.set_selection(key, items, None);
     }
@@ -724,7 +724,7 @@ impl App {
                 // the origin of the estimate is not necessarily inside it for a wide script.
                 let Some(box_) = self
                     .doc
-                    .outputs
+                    .boards
                     .get(&bucket)
                     .and_then(|ann| ann.texts.get(index))
                     .map(TextItem::paint_bounds)
@@ -975,7 +975,7 @@ impl App {
                 });
             }
             self.doc
-                .outputs
+                .boards
                 .entry(bucket)
                 .or_default()
                 .strokes
@@ -988,7 +988,7 @@ impl App {
                 None => box_,
             });
             self.doc
-                .outputs
+                .boards
                 .entry(bucket)
                 .or_default()
                 .shapes
@@ -1037,8 +1037,8 @@ impl App {
             };
             let view = out.view;
             let bucket = out.bucket(key).into_owned();
-            let empty = OutputAnnotations::default();
-            let ann = self.doc.outputs.get(&bucket).unwrap_or(&empty);
+            let empty = Board::default();
+            let ann = self.doc.boards.get(&bucket).unwrap_or(&empty);
             let held = out
                 .overlay
                 .selection
@@ -1156,7 +1156,7 @@ impl App {
         let bucket = out.bucket(key).into_owned();
         let Some((copies, box_)) = self
             .doc
-            .outputs
+            .boards
             .get_mut(&bucket)
             .map(|ann| ann.duplicate(&originals))
         else {
@@ -1189,7 +1189,7 @@ impl App {
         let bucket = out.bucket(dup.key).into_owned();
         let removed = self
             .doc
-            .outputs
+            .boards
             .get_mut(&bucket)
             .and_then(|ann| ann.remove(&dup.copies));
         self.set_selection(dup.key, dup.originals, None);
@@ -1433,7 +1433,7 @@ impl App {
         for (key, bucket, items) in held {
             if let Some(box_) = self
                 .doc
-                .outputs
+                .boards
                 .get_mut(&bucket)
                 .and_then(|ann| ann.remove(&items))
             {
@@ -1504,8 +1504,8 @@ impl App {
             .map(|out| out.bucket(key).into_owned());
         let items = match bucket {
             Some(bucket) => {
-                let empty = OutputAnnotations::default();
-                let ann = self.doc.outputs.get(&bucket).unwrap_or(&empty);
+                let empty = Board::default();
+                let ann = self.doc.boards.get(&bucket).unwrap_or(&empty);
                 marquee_select(ann, marquee)
             }
             None => Vec::new(),
@@ -1529,7 +1529,7 @@ impl App {
         };
         let (items, bucket) = (selection.items.clone(), out.bucket(key).into_owned());
         let mut box_: Option<Rect> = None;
-        if let Some(ann) = self.doc.outputs.get_mut(&bucket) {
+        if let Some(ann) = self.doc.boards.get_mut(&bucket) {
             for id in &items {
                 let changed = match *id {
                     ItemId::Stroke(i) if i < ann.strokes.len() => {
@@ -1590,7 +1590,7 @@ impl App {
         if let Some(screen) = screen {
             let notes: Vec<Note> = self
                 .doc
-                .outputs
+                .boards
                 .get(&bucket)
                 .map(|ann| {
                     items
@@ -1610,7 +1610,7 @@ impl App {
                 }
                 if let Some(slot) = self
                     .doc
-                    .outputs
+                    .boards
                     .get_mut(&bucket)
                     .and_then(|ann| ann.notes.iter_mut().find(|n| n.bounds() == note.bounds()))
                 {
@@ -1654,7 +1654,7 @@ impl App {
         for (key, bucket, items) in held {
             if let Some(box_) = self
                 .doc
-                .outputs
+                .boards
                 .get_mut(&bucket)
                 .and_then(|ann| ann.recolour(&items, color))
             {
@@ -1695,7 +1695,7 @@ impl App {
             if let Some(index) = edit.note {
                 let note = self
                     .doc
-                    .outputs
+                    .boards
                     .get(&bucket)
                     .and_then(|ann| ann.notes.get(index))
                     .cloned();
@@ -1705,7 +1705,7 @@ impl App {
                 // An empty note stays: an empty sticky is a sticky, and it is what the user dragged
                 // out. Dropping it made a note the user had just placed vanish the moment they
                 // started the next one, which reads as the note having failed to be created.
-                if let Some(ann) = self.doc.outputs.get_mut(&bucket) {
+                if let Some(ann) = self.doc.boards.get_mut(&bucket) {
                     let needed =
                         self.renderer
                             .wrapped_text_height(&text, &note, Screen { scale, view });
@@ -1737,7 +1737,7 @@ impl App {
                 Some(pending) => pending.union(box_),
                 None => box_,
             });
-            let ann = self.doc.outputs.entry(bucket).or_default();
+            let ann = self.doc.boards.entry(bucket).or_default();
             match edit.index {
                 Some(idx) if idx < ann.texts.len() => ann.texts[idx] = item,
                 _ => ann.texts.push(item),
@@ -1764,7 +1764,7 @@ impl App {
         // The click is tested against the text the renderer measures, not against the font-size
         // estimate the eraser uses: that estimate is 0.6 em per character, which is too narrow
         // for CJK, so clicking such a glyph used to start a new box instead of editing it.
-        let existing = self.doc.outputs.get(bucket.as_ref()).and_then(|ann| {
+        let existing = self.doc.boards.get(bucket.as_ref()).and_then(|ann| {
             ann.texts.iter().position(|t| {
                 self.renderer
                     .text_edit_bounds(
@@ -1782,7 +1782,7 @@ impl App {
         // top of it.
         let on_note = self
             .doc
-            .outputs
+            .boards
             .get(bucket.as_ref())
             .and_then(|ann| ann.notes.iter().position(|n| n.bounds().contains(x, y)));
         if let Some(index) = on_note {
@@ -1791,7 +1791,7 @@ impl App {
         }
         let (item, index) = match existing {
             Some(idx) => (
-                self.doc.outputs[bucket.as_ref()].texts[idx].clone(),
+                self.doc.boards[bucket.as_ref()].texts[idx].clone(),
                 Some(idx),
             ),
             None => (
@@ -1873,7 +1873,7 @@ impl App {
         };
         let Some(note) = self
             .doc
-            .outputs
+            .boards
             .get(&bucket)
             .and_then(|ann| ann.notes.get(index))
             .cloned()
@@ -1884,7 +1884,7 @@ impl App {
             .renderer
             .wrapped_text_height(&text, &note, Screen { scale, view });
         let updated = note.grown_for(needed);
-        if let Some(ann) = self.doc.outputs.get_mut(&bucket)
+        if let Some(ann) = self.doc.boards.get_mut(&bucket)
             && let Some(slot) = ann.notes.get_mut(index)
         {
             *slot = updated.clone();
@@ -1906,7 +1906,7 @@ impl App {
         let bucket = out.bucket(id).into_owned();
         let existing = self
             .doc
-            .outputs
+            .boards
             .get(&bucket)
             .and_then(|ann| ann.notes.iter().position(|n| n.bounds().contains(x, y)));
         // An existing note is entered; a new one is dragged out and only becomes content on the
@@ -1980,7 +1980,7 @@ impl App {
         let bucket = out.bucket(*key).into_owned();
         let box_ = note.bounds();
         let index = {
-            let ann = self.doc.outputs.entry(bucket).or_default();
+            let ann = self.doc.boards.entry(bucket).or_default();
             ann.notes.push(note);
             ann.notes.len() - 1
         };
@@ -2002,7 +2002,7 @@ impl App {
         let bucket = out.bucket(id).into_owned();
         let Some(note) = self
             .doc
-            .outputs
+            .boards
             .get(&bucket)
             .and_then(|ann| ann.notes.get(index))
             .cloned()
@@ -2054,7 +2054,7 @@ impl App {
                 // dropped: writing it would put back what this command just removed.
                 self.gesture = None;
                 self.cancel_transients();
-                self.doc.outputs.clear();
+                self.doc.boards.clear();
                 self.invalidate_text_caches();
                 self.mark_all_dirty();
                 let _ = self.connection.flush();
@@ -2274,8 +2274,8 @@ impl App {
         let handle_hit = crate::canvas::SELECT_HANDLE_HIT;
         let transient = transient_bounds(&out.overlay).map(|b| view.screen_rect(b));
         let bucket = out.bucket(id);
-        let empty = OutputAnnotations::default();
-        let ann = self.doc.outputs.get(bucket.as_ref()).unwrap_or(&empty);
+        let empty = Board::default();
+        let ann = self.doc.boards.get(bucket.as_ref()).unwrap_or(&empty);
         // The frame and its handles are not document elements, so they are only ever drawn live; the
         // box they occupy is what the frame that repaints them has to damage. The handles are
         // interface-sized, so the frame is mapped first and grown on screen.

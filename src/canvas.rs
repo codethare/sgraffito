@@ -347,7 +347,7 @@ pub enum ItemId {
 
 /// Annotations belonging to a single output.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct OutputAnnotations {
+pub struct Board {
     #[serde(default)]
     pub strokes: Vec<Stroke>,
     #[serde(default)]
@@ -358,7 +358,7 @@ pub struct OutputAnnotations {
     pub notes: Vec<Note>,
 }
 
-impl OutputAnnotations {
+impl Board {
     /// Eraser hit test: text boxes win over everything, then the nearest stroke or shape within the
     /// threshold. A shape is hit by its outline, never from inside it, so a rectangle's interior
     /// keeps belonging to whatever is drawn inside it.
@@ -882,7 +882,7 @@ pub enum Press {
 /// marquee drift away from the pointer the moment the view is panned or zoomed, which is what this
 /// signature exists to prevent.
 pub fn selection_press(
-    ann: &OutputAnnotations,
+    ann: &Board,
     held: &[ItemId],
     view: View,
     screen: [f32; 2],
@@ -1463,7 +1463,7 @@ pub fn note_drag(origin: [f32; 2], at: [f32; 2]) -> Option<Rect> {
 /// The box an element occupies, which is what the frame and the marquee measure. A text box
 /// contributes its conservative estimate rather than its ink, so a frame errs outside the drawn
 /// glyphs instead of cutting through them.
-pub fn item_bounds(ann: &OutputAnnotations, id: ItemId) -> Option<Rect> {
+pub fn item_bounds(ann: &Board, id: ItemId) -> Option<Rect> {
     match id {
         ItemId::Stroke(i) => ann.strokes.get(i)?.bounds(),
         ItemId::Text(i) => ann.texts.get(i).map(TextItem::paint_bounds),
@@ -1476,7 +1476,7 @@ pub fn item_bounds(ann: &OutputAnnotations, id: ItemId) -> Option<Rect> {
 /// would leave them, so the frame follows a drag. `None` when nothing held is still in the
 /// document.
 pub fn selection_frame(
-    ann: &OutputAnnotations,
+    ann: &Board,
     items: &[ItemId],
     transform: Option<Transform>,
 ) -> Option<Rect> {
@@ -1534,7 +1534,7 @@ pub fn selection_bounds(frame: Rect, hit: f32) -> Rect {
 
 /// The elements a marquee catches: those whose whole box is inside it, so an element that only
 /// crosses the marquee is left alone. Text boxes first, then strokes, each in document order.
-pub fn marquee_select(ann: &OutputAnnotations, marquee: Rect) -> Vec<ItemId> {
+pub fn marquee_select(ann: &Board, marquee: Rect) -> Vec<ItemId> {
     let inside = |b: Rect| {
         b.x >= marquee.x
             && b.y >= marquee.y
@@ -1565,7 +1565,7 @@ pub fn marquee_select(ann: &OutputAnnotations, marquee: Rect) -> Vec<ItemId> {
 
 /// Every element a bucket holds, in the order the keyboard walks them: one kind after another, each in
 /// document order. The order a keyboard step and a marquee walk are the same one.
-pub fn items_in_order(ann: &OutputAnnotations) -> Vec<ItemId> {
+pub fn items_in_order(ann: &Board) -> Vec<ItemId> {
     let mut ids: Vec<ItemId> = (0..ann.strokes.len()).map(ItemId::Stroke).collect();
     ids.extend((0..ann.texts.len()).map(ItemId::Text));
     ids.extend((0..ann.shapes.len()).map(ItemId::Shape));
@@ -1585,7 +1585,7 @@ pub fn nudge_delta(dx: i32, dy: i32, far: bool, zoom: f32) -> [f32; 2] {
 /// The one element `Tab` or `Shift+Tab` moves the selection to: the element after the first one held,
 /// wrapping at both ends, so a walk always ends up holding exactly one thing. With nothing held `Tab`
 /// takes the first element and `Shift+Tab` the last, and an empty bucket names nothing.
-pub fn cycle_selection(ann: &OutputAnnotations, held: &[ItemId], forward: bool) -> Vec<ItemId> {
+pub fn cycle_selection(ann: &Board, held: &[ItemId], forward: bool) -> Vec<ItemId> {
     let ids = items_in_order(ann);
     if ids.is_empty() {
         return Vec::new();
@@ -1623,11 +1623,67 @@ fn segment_dist_squared(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
     dist_squared(p, [a[0] + t * abx, a[1] + t * aby])
 }
 
-/// Annotations of all outputs, grouped by output name.
+/// The document: every board by name, and the board the user picked last. A board belongs to no
+/// screen — any number of screens may show one — which is what lets a drawing survive the monitor it
+/// was made on being closed.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Doc {
     #[serde(default)]
-    pub outputs: BTreeMap<String, OutputAnnotations>,
+    pub boards: BTreeMap<String, Board>,
+    /// The name of the board the user picked last, or empty when nothing has been picked since the file
+    /// was written. A screen that appears afterwards lands on it, which is what makes "pick it on the
+    /// laptop, read it on the monitor tomorrow" work.
+    #[serde(default)]
+    pub active: String,
+}
+
+/// What an unnamed board is called, before its number.
+pub const BOARD_PREFIX: &str = "Board ";
+
+impl Doc {
+    pub fn board(&self, name: &str) -> Option<&Board> {
+        self.boards.get(name)
+    }
+
+    pub fn board_mut(&mut self, name: &str) -> Option<&mut Board> {
+        self.boards.get_mut(name)
+    }
+
+    /// Every board's name, in name order.
+    pub fn names(&self) -> impl Iterator<Item = &String> {
+        self.boards.keys()
+    }
+
+    /// Create an empty board named `Board N` for the smallest `N` no board holds, without selecting it.
+    /// The smallest free number is what keeps creating from colliding with a board loaded from the file.
+    pub fn new_board(&mut self) -> String {
+        let mut n = 1;
+        loop {
+            let name = format!("{BOARD_PREFIX}{n}");
+            if !self.boards.contains_key(&name) {
+                self.boards.insert(name.clone(), Board::default());
+                return name;
+            }
+            n += 1;
+        }
+    }
+
+    /// Which board an output that has just appeared shows: the board picked last, else the board named
+    /// after that output (which is the name a file written before boards existed stored its bucket
+    /// under, so a two-screen setup comes back exactly as it was), else the first board, else a fresh one.
+    /// It never writes [`Doc::active`]: a second screen must not inherit the first one's drawing.
+    pub fn adopt(&mut self, output: &str) -> String {
+        if self.boards.contains_key(&self.active) {
+            return self.active.clone();
+        }
+        if self.boards.contains_key(output) {
+            return output.to_string();
+        }
+        if let Some(first) = self.boards.keys().next() {
+            return first.clone();
+        }
+        self.new_board()
+    }
 }
 
 /// Transient edit-time state: rendered only in edit mode, never persisted.

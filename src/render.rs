@@ -12,7 +12,7 @@ use tiny_skia::{
 use wayland_client::protocol::wl_shm::Format;
 
 use crate::canvas::{
-    Handle, ItemId, NOTE_DATE_SIZE, NOTE_RADIUS, Note, OutputAnnotations, Overlay, PALETTE, Rect,
+    Board, Handle, ItemId, NOTE_DATE_SIZE, NOTE_RADIUS, Note, Overlay, PALETTE, Rect,
     SELECT_HANDLE, SELECT_ROTATE_GAP, Shape, ShapeKind, Stroke, TextItem, TextOverlay, Tool,
     Toolbar, ToolbarAction, View, parse_hex, rect_of, rotate_handle, selection_frame,
 };
@@ -597,7 +597,7 @@ impl Renderer {
         height: u32,
         scale: f32,
         view: View,
-        ann: &OutputAnnotations,
+        ann: &Board,
         overlay: &Overlay,
         damage: Option<Rect>,
     ) {
@@ -632,7 +632,7 @@ impl Renderer {
         // that would rebuild the raster anyway, and it leaves the raster absent.
         quality: f32,
         view: View,
-        ann: &OutputAnnotations,
+        ann: &Board,
         overlay: &Overlay,
         damage: Option<Rect>,
         cache: &mut FrameCache,
@@ -812,7 +812,7 @@ impl Renderer {
     fn draw_document(
         &mut self,
         pixmap: &mut PixmapMut,
-        ann: &OutputAnnotations,
+        ann: &Board,
         screen: Screen,
         text: &mut TextLayoutCache,
         skip: &[ItemId],
@@ -876,7 +876,7 @@ impl Renderer {
         &mut self,
         target: &mut PixmapMut,
         coarse: &mut Option<Pixmap>,
-        ann: &OutputAnnotations,
+        ann: &Board,
         screen: Screen,
         text: &mut TextLayoutCache,
         skip: &[ItemId],
@@ -2858,7 +2858,7 @@ mod tests {
     fn render_cached(
         renderer: &mut Renderer,
         cache: &mut FrameCache,
-        annotations: &OutputAnnotations,
+        annotations: &Board,
         buffer: &mut [u8],
     ) {
         renderer.render_with_cache(
@@ -2878,8 +2878,8 @@ mod tests {
 
     /// A document with a stroke and a text item, so a frame has something of both kinds to fill
     /// in from the cache.
-    fn document() -> OutputAnnotations {
-        OutputAnnotations {
+    fn document() -> Board {
+        Board {
             strokes: vec![Stroke {
                 color: "#e01b24".into(),
                 width: 4.0,
@@ -2895,7 +2895,7 @@ mod tests {
     fn warm_text_cache_matches_cold_text_cache() {
         let mut renderer = Renderer::new();
         let mut cache = FrameCache::default();
-        let annotations = OutputAnnotations {
+        let annotations = Board {
             strokes: vec![],
             texts: vec![text_item("cached text")],
             shapes: vec![],
@@ -2913,7 +2913,7 @@ mod tests {
     fn render_damaged(
         renderer: &mut Renderer,
         cache: &mut FrameCache,
-        annotations: &OutputAnnotations,
+        annotations: &Board,
         buffer: &mut [u8],
     ) {
         renderer.render_with_cache(
@@ -3026,7 +3026,7 @@ mod tests {
         // `App::doc_changed` does for the whole output.
         let mut renderer = Renderer::new();
         let mut cache = FrameCache::default();
-        let mut annotations = OutputAnnotations {
+        let mut annotations = Board {
             strokes: vec![],
             texts: vec![text_item("before")],
             shapes: vec![],
@@ -3047,7 +3047,7 @@ mod tests {
     #[test]
     fn warm_toolbar_cache_matches_cold_toolbar_render() {
         let mut renderer = Renderer::new();
-        let annotations = OutputAnnotations::default();
+        let annotations = Board::default();
         let overlay = Overlay {
             toolbar: Some(Toolbar {
                 tool: Tool::Pen,
@@ -3088,7 +3088,7 @@ mod tests {
     #[test]
     fn localized_new_text_uses_the_same_safe_damage_path() {
         let mut renderer = Renderer::new();
-        let annotations = OutputAnnotations::default();
+        let annotations = Board::default();
         let item = text_item("new text");
         let overlay = Overlay {
             text: Some(TextOverlay {
@@ -3133,7 +3133,7 @@ mod tests {
     #[test]
     fn localized_text_edit_skips_the_stale_document_text() {
         let mut renderer = Renderer::new();
-        let old_document = OutputAnnotations {
+        let old_document = Board {
             strokes: vec![],
             texts: vec![text_item("before")],
             shapes: vec![],
@@ -3184,7 +3184,7 @@ mod tests {
             100,
             1.0,
             View::default(),
-            &OutputAnnotations::default(),
+            &Board::default(),
             &expected_overlay,
             None,
         );
@@ -3308,7 +3308,7 @@ mod tests {
             to: [160.0, 80.0],
         };
         let mut renderer = Renderer::new();
-        let stored = OutputAnnotations {
+        let stored = Board {
             strokes: vec![],
             texts: vec![],
             shapes: vec![shape.clone()],
@@ -3414,7 +3414,7 @@ mod tests {
                 hd,
                 scale,
                 View::default(),
-                &OutputAnnotations::default(),
+                &Board::default(),
                 &Overlay {
                     toolbar: Some(rail),
                     ..Default::default()
