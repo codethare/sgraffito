@@ -5,6 +5,38 @@ and plate. `CLAUDE.md` is the behaviour contract and the source of truth; this f
 behind, so a new session can start without re-deriving it. English, like the rest of the repository;
 the user writes in Chinese and expects Chinese in chat, English in the artifacts.
 
+## State right now (2026-11-10)
+
+- **Boards landed**: a drawing belongs to a named board instead of to a screen. Three commits on top of
+  `8b11963` (the sketch-WIP commit): `6d564a7` (the document is a map of boards; the file is version 4),
+  `1fc6796` (per-output board, the rail's panel, the drawer's mode row), `3b51c6e` (the four CLI
+  commands, smoke and docs) and `02f65cba` (the review's fixes). The plan is
+  `openspec/changes/boards/` — 4/4 artifacts, every task ticked, `openspec validate --strict` valid.
+  `openspec archive boards` will refuse its `MODIFIED` delta for the same pre-existing reason every
+  change in this repository does: `openspec/specs/` is empty, so no target spec exists yet.
+- What the user gets: every output shows one board; `C` in the rail opens a panel of the document's
+  boards (the one on screen accent-filled, `new board` last) and `F` in the drawer switches between
+  "every screen shares one board" and "each screen picks its own"; `sgraffito boards`,
+  `sgraffito board <name>`, `sgraffito board new [name]` and `sgraffito share on|off` do the same from a
+  key binding, which is the only path while locked. A version 1–3 file loads with its per-output buckets
+  as boards of the same names, so an upgrade moves nothing. A switch writes nothing; creating a board
+  does.
+- **Two traps cost real time** and are recorded where they bite: (1) a `wl_output` name is often *not*
+  known when its surface is created — the smoke test's scale-2 output caught both outputs adopting the
+  first board — so adoption re-runs when the name arrives (`Doc::readopt`) and only while nobody has
+  picked a board for that output (`Output::board_picked`); (2) `scripts/smoke.sh` was driving whatever
+  binary was at `target/debug/sgraffito`, and a stale one made two of my own verification runs agree
+  with code that was not in the tree. The script now builds it first.
+- **Verified**: `cargo fmt --check`, `cargo clippy --all-targets` (0 warnings), `cargo test` 249 passed,
+  `scripts/smoke.sh` PASS on headless sway with two outputs, one at scale 2 — covering the v3 migration,
+  `clear` keeping the board names, the four commands, and `Esc` closing the panel (that last stage fails
+  on the unfixed build, checked both ways).
+- **Unverified**: clicking a board in the panel and watching another output follow on real hardware, and
+  a per-screen setup being picked again after a restart (only `active` is stored). Both are in the
+  README's unverified paragraph.
+- The sketch work below the first boards commit (`src/sketch.rs`, `examples/vis_shapes.rs`) is not mine
+  and was left in place.
+
 ## State right now (2026-11-09)
 
 - **Pan and zoom were made cheap enough to be smooth** at 2K and 4K, and the change is planned in
@@ -484,6 +516,12 @@ no capabilities until a device exists.
   would mirror the selection is clamped instead, because a mirrored text box cannot be drawn.
 - The frame and the marquee are drawn in `TOOLBAR_ACCENT` as hairlines and capsules, with no fill of
   their own, so the interface gained no third shape or colour.
+- The boards panel lists at most eight boards (`MAX_BOARD_ROWS`), because it is drawn inside the rail's
+  fixed damage box; past eight, `sgraffito boards` still lists them all and `sgraffito board <name>`
+  still reaches them. The board on screen can therefore fall outside the cap and the panel then states no
+  current board, and the four-pixel gap between a panel and the block that opened it (the drawer's too)
+  can close the panel if a pointer crosses it exactly: a slow diagonal move into the list needs a second
+  `C`. Board names are also not editable or removable.
 - While editing, the desktop is nearly hidden: the scrim is 90% opaque black, which is the point
   (the annotations are what to read) and is one constant if it ever reads as too much. It is also why
   the smoke test cannot see it — that run has no wallpaper client, so its backdrop is already black.
