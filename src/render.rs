@@ -390,17 +390,98 @@ fn fitted_blocks(toolbar: &Toolbar, surface: f32) -> (Vec<Block>, Vec<Block>) {
     (rail, overflow)
 }
 
+/// How many rows of a panel fit an output. A row past the edge can be neither clicked nor repainted, and a
+/// short output folds the rail's overflow into a drawer that is easily taller than the rail itself, so the
+/// panel keeps the rows nearest its block and the rest stay on their keys.
+fn panel_room(surface: f32) -> usize {
+    let usable = (surface - 2.0 * TOOLBAR_MARGIN - 2.0 * TOOLBAR_PAD).max(0.0);
+    ((usable / (TOOLBAR_BLOCK + TOOLBAR_GAP)) as usize).max(1)
+}
+
+/// The row of the block that opened the panel, in the rail's own coordinates: walking the column is how the
+/// panel is anchored, and both the frame and the box the rail declares have to walk it the same way.
+fn owner_row(rail: &[Block], owner: ToolbarAction) -> Option<f32> {
+    let mut y = TOOLBAR_PAD;
+    for block in rail {
+        if block.action == Some(owner) {
+            return Some(y);
+        }
+        y += TOOLBAR_BLOCK + block.gap;
+    }
+    None
+}
+
+/// The rail and its open panel on one output, decided once: the fitted column, the panel's own rows and plate,
+/// and the extent the two reach together — what the frame paints, what the hit test accepts and what a frame
+/// that repaints only the rail damages. Pure: no text is measured here, so a damage box can be worked out
+/// without drawing, and the frame and the box cannot disagree about how much there is.
+struct RailLayout {
+    /// The rail's own blocks: the candidates that fit, then the foot.
+    rail: Vec<Block>,
+    /// The controls the rail had no room for, in the rail's order.
+    overflow: Vec<Block>,
+    /// Height of the rail's column.
+    column: f32,
+    /// The open panel's owner, its rows and its plate, when one is open.
+    panel: Option<(ToolbarAction, Vec<Block>, Rect)>,
+    /// How far the rail and its panel reach, from the rail's own origin.
+    height: f32,
+}
+
+fn rail_layout(toolbar: &Toolbar, surface: (f32, f32)) -> RailLayout {
+    let (rail, overflow) = fitted_blocks(toolbar, surface.1);
+    let column = column_of(&rail);
+    let Some((owner, rows)) = open_panel(toolbar, &overflow, panel_room(surface.1)) else {
+        return RailLayout {
+            rail,
+            overflow,
+            column,
+            panel: None,
+            height: column,
+        };
+    };
+    let rows_h = rows
+        .iter()
+        .map(|block| TOOLBAR_BLOCK + block.gap)
+        .sum::<f32>()
+        - rows.first().map_or(0.0, |block| block.gap);
+    let owner_y = owner_row(&rail, owner).unwrap_or(TOOLBAR_PAD);
+    // One row is level with the block that opened the panel and the rest grow away from it: down the column
+    // while they fit, up when they do not.
+    let top = if owner_y + rows_h <= column - TOOLBAR_PAD {
+        owner_y
+    } else {
+        (owner_y + TOOLBAR_BLOCK - rows_h).max(TOOLBAR_PAD)
+    };
+    let plate = Rect {
+        x: TOOLBAR_DRAWER_X - TOOLBAR_PAD,
+        y: top - TOOLBAR_PAD,
+        w: TOOLBAR_RESERVE - TOOLBAR_DRAWER_X + TOOLBAR_PAD,
+        h: rows_h + 2.0 * TOOLBAR_PAD,
+    };
+    let height = (plate.y + plate.h).max(column);
+    RailLayout {
+        rail,
+        overflow,
+        column,
+        panel: Some((owner, rows, plate)),
+        height,
+    }
+}
+
 /// The rail's column on an output of this height: what the fitted blocks need. The plate, the hit boxes, the
 /// panels anchored to the foot and the box a rail-only frame damages are all placed from this one number.
 pub fn rail_column(toolbar: &Toolbar, surface: f32) -> f32 {
-    column_of(&fitted_blocks(toolbar, surface).0)
+    rail_layout(toolbar, (0.0, surface)).column
 }
 
-/// The rail's blocks and its open panel's rows, in the order they are laid out. The panel is the drawer's or
-/// the boards' own list, and the drawer's holds the controls the rail had no room for.
-fn toolbar_blocks(toolbar: &Toolbar, surface: f32) -> Vec<Block> {
-    let (mut blocks, overflow) = fitted_blocks(toolbar, surface);
-    if let Some((_, rows)) = open_panel(toolbar, &overflow) {
+/// The rail's blocks and its open panel's rows, in the order they are laid out: the list the tests walk, and the
+/// shape the layout gives a frame.
+#[cfg(test)]
+fn toolbar_blocks(toolbar: &Toolbar, height: f32) -> Vec<Block> {
+    let layout = rail_layout(toolbar, (0.0, height));
+    let mut blocks = layout.rail;
+    if let Some((_, rows, _)) = layout.panel {
         blocks.extend(rows);
     }
     blocks
@@ -417,14 +498,24 @@ pub const DRAWER: [ToolbarAction; 2] = [ToolbarAction::Scrim, ToolbarAction::Sha
 pub const MAX_BOARD_ROWS: usize = 8;
 
 /// The panel that is open, and the block that opened it: one panel at a time, so one owner and one list.
-fn open_panel(toolbar: &Toolbar, overflow: &[Block]) -> Option<(ToolbarAction, Vec<Block>)> {
-    if toolbar.boards_open {
+fn open_panel(
+    toolbar: &Toolbar,
+    overflow: &[Block],
+    room: usize,
+) -> Option<(ToolbarAction, Vec<Block>)> {
+    let rows = if toolbar.boards_open {
         Some((ToolbarAction::Boards, board_rows(toolbar)))
     } else if toolbar.more {
         Some((ToolbarAction::More, drawer_blocks(toolbar, overflow)))
     } else {
         None
-    }
+    };
+    rows.map(|(owner, mut rows)| {
+        // The rows nearest the block are the ones worth keeping: the row level with it is the last when the
+        // panel grows up and the first when it grows down, so the tail is what goes.
+        rows.truncate(room.max(1));
+        (owner, rows)
+    })
 }
 
 /// Whether applying `action` is picking something out of a panel, which closes it: a list is opened to
@@ -1347,7 +1438,7 @@ impl Renderer {
         let pill = self.cached_toolbar_pill(toolbar, (width, height))?;
         let (ox, oy) = toolbar_origin(height, pill.column);
         let (column_x, column_y) = (x - ox, y - oy);
-        if column_x < 0.0 || column_y < 0.0 || column_y >= pill.column {
+        if column_x < 0.0 || column_y < 0.0 || column_y >= pill.height {
             return None;
         }
         pill.hits
@@ -1389,50 +1480,47 @@ impl Renderer {
     /// block is a square, and a block only stretches when its meaning fits the room the damage
     /// accounting reserves for the rail.
     fn toolbar_pill(&mut self, toolbar: &Toolbar, surface: (f32, f32)) -> ToolbarPill {
-        let (surface, height) = surface;
+        let surface_pair = surface;
+        let surface = surface.0;
         let ceiling = toolbar_ceiling(surface);
-        let (rail, overflow) = fitted_blocks(toolbar, height);
-        let column = column_of(&rail);
+        let layout = rail_layout(toolbar, surface_pair);
+        let RailLayout {
+            rail,
+            overflow,
+            column,
+            panel,
+            height: reach,
+        } = layout;
         let mut controls = Vec::new();
         let mut hits = Vec::new();
         // The drawer is the `more` block's own list, so its column starts on that block's row and grows
         // upwards when the rows below would not hold it — the way a menu at the bottom of a window opens
         // upwards. Starting at the top of the column instead left a control the rail has no room for
         // sitting far from the block that owns it, with nothing saying the two belong together.
-        let open = open_panel(toolbar, &overflow);
-        let owner = open.as_ref().map(|(owner, _)| *owner);
-        let panel_open = open.is_some();
-        let residents: Vec<Block> = open
-            .as_ref()
-            .map_or_else(Vec::new, |(_, rows)| rows.clone());
-        let residents_h = residents
-            .iter()
-            .map(|block| TOOLBAR_BLOCK + block.gap)
-            .sum::<f32>()
-            - residents.first().map_or(0.0, |block| block.gap);
-        // One row of the panel is level with the block that opened it, and the rest grow away from it:
-        // down the column while they fit, up when they do not. Level, because the corridor the block's
-        // hit box builds leads sideways — into a row, not into an empty strip a row above the block, which
-        // is what closed the panel on the pointer the moment it left the block. One `panel_top` for the
-        // rows and for the plate, so the two cannot drift apart.
-        let panel_top = |owner_y: f32| {
-            if owner_y + residents_h <= column - TOOLBAR_PAD {
-                owner_y
-            } else {
-                (owner_y + TOOLBAR_BLOCK - residents_h).max(TOOLBAR_PAD)
-            }
-        };
-        let mut owner_y: Option<f32> = None;
-        let mut panel: Option<Rect> = None;
+        let owner = panel.as_ref().map(|(owner, _, _)| *owner);
+        // The panel's rows and its plate both come from the layout, where one row is level with the block that
+        // opened it and the rest grow away from it. Placing them here as well is how the rows and the plate
+        // drifted apart by a row.
+        let plate = panel.as_ref().map(|(_, _, plate)| *plate);
         // One row counter per column: the drawer is a second column, so a block in it starts at the
         // top of its own column and leaves the rail's height alone.
         let mut y = [TOOLBAR_PAD; 2];
-        for block in toolbar_blocks(toolbar, height) {
+        let blocks: Vec<Block> = rail
+            .iter()
+            .cloned()
+            .chain(
+                panel
+                    .as_ref()
+                    .map(|(_, rows, _)| rows.clone())
+                    .unwrap_or_default(),
+            )
+            .collect();
+        for block in blocks {
             let column = block.column as usize;
             if column == 1
-                && let Some(row) = owner_y
+                && let Some(plate) = plate
             {
-                y[column] = y[column].max(panel_top(row));
+                y[column] = y[column].max(plate.y + TOOLBAR_PAD);
             }
             let x = block.column as f32 * TOOLBAR_DRAWER_X;
             let gap = block.gap;
@@ -1485,19 +1573,6 @@ impl Renderer {
                     action,
                 ));
             }
-            if block.column == 1 && panel.is_none() && panel_open {
-                // The plate's own box, from the same `y[1]` the rows are laid out at: what is painted and
-                // what is hit are one geometry.
-                panel = Some(Rect {
-                    x: TOOLBAR_DRAWER_X - TOOLBAR_PAD,
-                    y: y[1] - TOOLBAR_PAD,
-                    w: TOOLBAR_RESERVE - TOOLBAR_DRAWER_X + TOOLBAR_PAD,
-                    h: residents_h + 2.0 * TOOLBAR_PAD,
-                });
-            }
-            if block.action == owner {
-                owner_y = Some(y[column]);
-            }
             controls.push(Control {
                 block,
                 y: y[column],
@@ -1529,11 +1604,13 @@ impl Renderer {
         for index in rail_rows..hits.len().saturating_sub(1) {
             hits[index].0.h = hits[index + 1].0.y - hits[index].0.y;
         }
+        let height = reach;
         ToolbarPill {
             controls,
             hits,
-            panel,
+            panel: plate,
             column,
+            height,
             overflow,
         }
     }
@@ -2013,6 +2090,9 @@ struct ToolbarPill {
     /// Height of the rail's own column on this output, which the frame, the hit test and the box a rail-only
     /// frame damages all place themselves from.
     column: f32,
+    /// Everything the rail and its open panel reach, from the rail's own origin: what the frame paints, what
+    /// the hit test accepts and what a rail-only frame damages.
+    height: f32,
     /// The controls the rail had no room for: the drawer lists them after its own rows.
     overflow: Vec<Block>,
 }
@@ -2048,8 +2128,8 @@ fn toolbar_origin(height: f32, column: f32) -> (f32, f32) {
 /// accounting reserves the widest block `toolbar_pill` will build, as a strip on the left of the
 /// output; the strip only joins a damage box that reaches it.
 pub fn toolbar_bounds(toolbar: &Toolbar, width: f32, height: f32) -> Rect {
-    let column = rail_column(toolbar, height);
-    let (x, y) = toolbar_origin(height, column);
+    let layout = rail_layout(toolbar, (width, height));
+    let (x, y) = toolbar_origin(height, layout.column);
     Rect {
         // The plate reaches a pad outside the blocks horizontally and starts at the column's own top,
         // which already carries that padding — and the hairline edge is stroked around a path, so it
@@ -2060,7 +2140,7 @@ pub fn toolbar_bounds(toolbar: &Toolbar, width: f32, height: f32) -> Rect {
         y: y - TOOLBAR_HAIRLINE,
         w: (width - 2.0 * TOOLBAR_MARGIN).clamp(0.0, TOOLBAR_RESERVE)
             + 2.0 * (TOOLBAR_PAD + TOOLBAR_HAIRLINE),
-        h: column + 2.0 * TOOLBAR_HAIRLINE,
+        h: layout.height + 2.0 * TOOLBAR_HAIRLINE,
     }
 }
 

@@ -3571,3 +3571,60 @@ fn a_folded_tool_is_reached_through_the_drawer() {
         "the note is on the rail and in the drawer at once"
     );
 }
+
+/// A short output folds its whole overflow into the drawer, and that drawer is the one thing in this layout
+/// that can outgrow both the rail and the output: nineteen folded controls would be a twenty-one-row panel,
+/// which on a 400-pixel output is a panel taller than the screen. Every row it draws must therefore be inside
+/// the output, inside the box the rail declares for damage accounting, and hit as its own control — a row that
+/// is painted but not clickable, or clickable but never repainted, is worse than one that is not there.
+#[test]
+fn a_panel_draws_only_rows_that_are_inside_the_output_and_clickable() {
+    let (w, h) = (900u32, 400u32);
+    let mut rail = toolbar(Tool::Pen, PALETTE[0], 3.0, None);
+    rail.more = true;
+    // No backdrop: with it on every pixel of the surface is the scrim and the test would measure that.
+    rail.scrim = false;
+    let mut buf = buffer(w, h);
+    Renderer::new().render(
+        &mut buf,
+        w,
+        h,
+        1.0,
+        View::default(),
+        &Board::default(),
+        &Overlay {
+            toolbar: Some(rail.clone()),
+            ..Default::default()
+        },
+        None,
+    );
+    let band = toolbar_bounds(&rail, w as f32, h as f32);
+    assert!(
+        band.y + band.h <= h as f32,
+        "the box itself leaves the output: {band:?}"
+    );
+    let mut renderer = Renderer::new();
+    // The panel's own column, one block right of the rail's.
+    let column_x = band.x + 1.0 + 40.0;
+    let painted: Vec<u32> = (0..h)
+        .filter(|y| (50..300).any(|x| alpha(&buf, w, x, *y) > 0))
+        .collect();
+    let (first, last) = (
+        *painted.first().expect("the drawer drew nothing") as f32,
+        *painted.last().expect("the drawer drew nothing") as f32,
+    );
+    assert!(
+        last < band.y + band.h,
+        "the panel paints down to {last}, past its box ({band:?})"
+    );
+    // The plate carries `TOOLBAR_PAD` above its first row and below its last, and those pixels belong to no
+    // row: everything between them is a row, gap included.
+    for y in (first as u32 + 6)..(last as u32 - 6) {
+        assert!(
+            renderer
+                .toolbar_hit(&rail, w as f32, h as f32, column_x, y as f32 + 0.5)
+                .is_some(),
+            "the panel paints {y} and nothing is hit there"
+        );
+    }
+}
