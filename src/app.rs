@@ -1,6 +1,5 @@
 //! Wayland glue: layer surface lifecycle, mode switching, frame submission.
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
@@ -42,8 +41,8 @@ use wayland_client::{
 };
 
 use crate::canvas::{
-    Board, Doc, ERASER_THRESHOLD, Gesture, Grab, Handle, ItemId, Motion, Note, Overlay, Press,
-    Rect, Selection, Shape, ShapeKind, TEXT_SIZE_MAX, TEXT_SIZE_MIN, TextBuffer, TextItem,
+    Board, BoardRow, Doc, ERASER_THRESHOLD, Gesture, Grab, Handle, ItemId, Motion, Note, Overlay,
+    Press, Rect, Selection, Shape, ShapeKind, TEXT_SIZE_MAX, TEXT_SIZE_MIN, TextBuffer, TextItem,
     TextOverlay, Toolbar, Transform, View, ZOOM_STEP, Zoom, date_stamp, marquee_select, note_drag,
     nudge_delta, selection_bounds, selection_frame, selection_press, snap_square,
 };
@@ -138,6 +137,9 @@ pub struct Output {
     output: wl_output::WlOutput,
     /// The `wl_output` name; it may only arrive after the surface was created.
     name: String,
+    /// The board this output shows. It is the document's key for everything drawn here, which is what
+    /// lets two outputs read one board and lets a board outlive the output that was showing it.
+    board: String,
     surface: wl_surface::WlSurface,
     layer: LayerSurface,
     width: u32,
@@ -188,13 +190,9 @@ impl Output {
         self.motion.quality()
     }
 
-    /// Key used for annotations; falls back to `output-<id>` until the name arrives.
-    pub(crate) fn bucket(&self, id: u32) -> Cow<'_, str> {
-        if self.name.is_empty() {
-            Cow::Owned(format!("output-{id}"))
-        } else {
-            Cow::Borrowed(&self.name)
-        }
+    /// The board this output shows, which is what the document is read through.
+    pub(crate) fn board(&self) -> &str {
+        &self.board
     }
 }
 
@@ -287,6 +285,12 @@ pub struct App {
     /// Whether edit mode paints the backdrop. A preference about reading, so it is not persisted and a
     /// new session starts with it on.
     pub(crate) scrim: bool,
+    /// Whether every screen shows the board picked on any of them, or each picks its own. Session state
+    /// for the same reason: it is a choice about how this sitting reads. Per screen is the default, so
+    /// an upgrade moves nobody's drawing.
+    pub(crate) shared: bool,
+    /// Whether the rail's boards panel is open. One panel at a time: opening it closes the drawer.
+    pub(crate) boards_open: bool,
     /// The pan gesture in flight: where the pointer was, so a motion event pans by its own delta. A pan
     /// is not a document change, so nothing about it is in the document, in the file, or something
     /// `Esc` has to commit or abandon.
@@ -371,6 +375,8 @@ impl App {
             keyboard_focus: None,
             dirty: false,
             exit: false,
+            shared: false,
+            boards_open: false,
             text_input_manager: None,
             text_input: None,
             text_input_enabled: false,
@@ -459,7 +465,7 @@ impl App {
         // annotation lands scale times too far out and is clipped.
         let scale = output_scale(self.output_state.info(&output).as_ref());
         surface.set_buffer_scale(scale as i32);
-        let toolbar = self.current_toolbar();
+        let toolbar = self.current_toolbar(key_of(&output));
         let layer = self.layer_shell.create_layer_surface(
             &self.qh,
             surface.clone(),
@@ -479,11 +485,17 @@ impl App {
             "layer surface created for output {}",
             if name.is_empty() { "<unnamed>" } else { &name }
         ));
+        // Which board this output shows, decided once: the board picked last, or the one named after
+        // this output (which is what a file written before boards existed stored its bucket as), or a
+        // fresh one. A name that arrives later does not move the output: a stroke drawn meanwhile
+        // belongs to the board it was drawn on, and the old fallback bucket lost exactly that stroke.
+        let board = self.doc.adopt(&name);
         self.outputs.insert(
             key_of(&output),
             Output {
                 output,
                 name,
+                board,
                 surface,
                 layer,
                 width: 0,
@@ -540,9 +552,10 @@ impl App {
             let Some(old) = self.outputs.remove(&key) else {
                 continue;
             };
-            let (was_configured, name, view, output) = (
+            let (was_configured, name, board, view, output) = (
                 old.configured,
                 old.name.clone(),
+                old.board.clone(),
                 old.view,
                 old.output.clone(),
             );
@@ -551,6 +564,9 @@ impl App {
             if let Some(out) = self.outputs.get_mut(&key) {
                 out.configured = was_configured;
                 out.name = name;
+                // The board this output was showing is what it goes on showing: a new surface adopts a
+                // board for a screen that has just appeared, and this is not that.
+                out.board = board;
                 // The view is where the user was looking, and recreating a surface is not a reason to
                 // send them back to the origin.
                 out.view = view;
@@ -564,19 +580,33 @@ impl App {
         self.sync_cursor();
     }
 
-    /// The edit-mode toolbar of the current mode, tool, colour and size.
-    fn current_toolbar(&self) -> Option<Toolbar> {
+    /// The edit-mode toolbar of the current mode, tool, colour and size, for one output: the boards
+    /// panel marks the board *that* output shows, and in per-screen mode two rails show two boards.
+    fn current_toolbar(&self, key: u32) -> Option<Toolbar> {
         match self.mode {
             Mode::Locked => None,
-            Mode::Edit => Some(Toolbar {
-                tool: self.tool,
-                color: PALETTE[self.color_idx],
-                size: self.active_size(),
-                hover: self.toolbar_hover,
-                grow: self.toolbar_grow(Instant::now()),
-                more: self.more,
-                scrim: self.scrim,
-            }),
+            Mode::Edit => {
+                let board = self.outputs.get(&key).map(|out| out.board.as_str());
+                Some(Toolbar {
+                    tool: self.tool,
+                    color: PALETTE[self.color_idx],
+                    size: self.active_size(),
+                    hover: self.toolbar_hover,
+                    grow: self.toolbar_grow(Instant::now()),
+                    more: self.more,
+                    boards_open: self.boards_open,
+                    boards: self
+                        .doc
+                        .names()
+                        .map(|name| BoardRow {
+                            name: name.clone(),
+                            current: Some(name.as_str()) == board,
+                        })
+                        .collect(),
+                    shared: self.shared,
+                    scrim: self.scrim,
+                })
+            }
         }
     }
 
@@ -632,7 +662,7 @@ impl App {
         }
     }
 
-    /// `Tab`/`Shift+Tab`: put the selection on the next or the previous element of the bucket. A gesture in
+    /// `Tab`/`Shift+Tab`: put the selection on the next or the previous element of the board_name. A gesture in
     /// flight is committed first, or its transform would be written onto a selection that no longer holds
     /// the elements it was dragging.
     fn cycle_selection(&mut self, key: u32, forward: bool) {
@@ -640,7 +670,7 @@ impl App {
         let Some(out) = self.outputs.get(&key) else {
             return;
         };
-        let bucket = out.bucket(key).into_owned();
+        let board_name = out.board().to_string();
         let held = out
             .overlay
             .selection
@@ -648,7 +678,7 @@ impl App {
             .map(|s| s.items.clone())
             .unwrap_or_default();
         let empty = Board::default();
-        let ann = self.doc.boards.get(&bucket).unwrap_or(&empty);
+        let ann = self.doc.boards.get(&board_name).unwrap_or(&empty);
         let items = crate::canvas::cycle_selection(ann, &held, forward);
         self.set_selection(key, items, None);
     }
@@ -719,13 +749,13 @@ impl App {
                 let Some(out) = self.outputs.get(&key) else {
                     return;
                 };
-                let bucket = out.bucket(key).into_owned();
+                let board_name = out.board().to_string();
                 // A point inside the box the renderer measured, which is what a click on it would pass:
                 // the origin of the estimate is not necessarily inside it for a wide script.
                 let Some(box_) = self
                     .doc
                     .boards
-                    .get(&bucket)
+                    .get(&board_name)
                     .and_then(|ann| ann.texts.get(index))
                     .map(TextItem::paint_bounds)
                 else {
@@ -750,10 +780,41 @@ impl App {
         if self.more == open {
             return;
         }
+        // One panel at a time: the rail declares one panel box, and two plates on screen would be two
+        // lists the pointer could not be said to be reading from.
+        self.boards_open = false;
         self.more = open;
         self.toolbar_hover = None;
         self.toolbar_hover_since = None;
         self.refresh_toolbar();
+    }
+
+    /// Open or close the boards panel, closing the drawer with it for the reason `set_more` closes this one.
+    pub(crate) fn set_boards(&mut self, open: bool) {
+        if self.boards_open == open {
+            return;
+        }
+        self.more = false;
+        self.boards_open = open;
+        self.toolbar_hover = None;
+        self.toolbar_hover_since = None;
+        self.refresh_toolbar();
+    }
+
+    pub(crate) fn toggle_boards(&mut self) {
+        self.set_boards(!self.boards_open);
+    }
+
+    /// The block that owns the open panel, if any: its hit box is the corridor the pointer travels
+    /// through to reach the panel's rows, and `None` means no panel is open.
+    pub(crate) fn panel_owner(&self) -> Option<ToolbarAction> {
+        if self.boards_open {
+            Some(ToolbarAction::Boards)
+        } else if self.more {
+            Some(ToolbarAction::More)
+        } else {
+            None
+        }
     }
 
     /// Switch the edit-mode backdrop. It is a preference about reading, not content: the document and the
@@ -771,14 +832,84 @@ impl App {
         self.mark_all_dirty();
     }
 
+    /// Put one board on the screens the mode says: every one of them when the screens share a board,
+    /// else only the output the pick came from. `acting` is `None` for the command line, which has no
+    /// output to act on — and in locked mode no output has the keyboard — so it moves them all.
+    ///
+    /// A switch changes no annotation: it finishes the text edit and the drawing in hand (both belong to
+    /// the board being left), abandons a gesture, which has not reached the document yet, and drops every
+    /// moved output's raster. It never schedules a write.
+    pub(crate) fn switch_board(&mut self, acting: Option<u32>, name: &str) -> bool {
+        if !self.doc.boards.contains_key(name) {
+            return false;
+        }
+        self.end_text_edit();
+        self.commit_transient_drawing();
+        let keys: Vec<u32> = match (self.shared, acting) {
+            (false, Some(key)) => vec![key],
+            _ => self.outputs.keys().copied().collect(),
+        };
+        for key in keys {
+            self.cancel_transient(key);
+            let Some(out) = self.outputs.get_mut(&key) else {
+                continue;
+            };
+            if out.board == name {
+                continue;
+            }
+            out.board = name.to_string();
+            out.cache.invalidate();
+            out.dirty = true;
+            out.pending = None;
+        }
+        self.doc.active = name.to_string();
+        self.dirty = true;
+        log(&format!("board switched to {name}"));
+        self.refresh_toolbar();
+        true
+    }
+
+    /// Create a board and show it. This *is* a document change — the board is content, and one that is
+    /// not written is gone tomorrow — so unlike a switch it schedules the write.
+    pub(crate) fn new_board(&mut self, acting: Option<u32>) -> String {
+        let name = self.doc.new_board();
+        self.store.mark_dirty(Instant::now());
+        self.switch_board(acting, &name);
+        // A brand-new board has nothing in it, and the raster of the board it replaced is already gone.
+        name
+    }
+
+    /// Turn the shared mode on or off. On adopts the focused output's board on every output — that is the
+    /// drawing in front of the person switching, and the keyboard is where the pointer's picks act too —
+    /// falling back to the first output when the compositor has given the keyboard to nobody. Off changes
+    /// no board: the screens are equal at that instant and may diverge afterwards.
+    pub(crate) fn toggle_shared(&mut self) {
+        let board = self
+            .keyboard_focus
+            .and_then(|key| self.outputs.get(&key))
+            .or_else(|| self.outputs.values().next())
+            .map(|out| out.board.clone());
+        self.shared = !self.shared;
+        // `switch_board` reads the mode to decide who moves, so the mode is set first: switched on, the
+        // pick then reaches every screen.
+        if let (true, Some(board)) = (self.shared, board) {
+            self.switch_board(None, &board);
+            return;
+        }
+        self.refresh_toolbar();
+    }
+
     /// Push the current toolbar into every output's transient overlay. The rail lives in the
     /// left strip and the document does not change with it, so its box is the only thing the
     /// next frame has to damage; the rest of the surface comes back from the document raster.
     fn refresh_toolbar(&mut self) {
-        let toolbar = self.current_toolbar();
-        for out in self.outputs.values_mut() {
-            out.overlay.toolbar = toolbar;
-            out.toolbar_dirty = true;
+        let keys: Vec<u32> = self.outputs.keys().copied().collect();
+        for key in keys {
+            let toolbar = self.current_toolbar(key);
+            if let Some(out) = self.outputs.get_mut(&key) {
+                out.overlay.toolbar = toolbar;
+                out.toolbar_dirty = true;
+            }
         }
         self.dirty = true;
     }
@@ -788,10 +919,13 @@ impl App {
     /// is fixed while editing, so the frame can damage just that box instead of the whole
     /// surface.
     pub(crate) fn refresh_toolbar_hover(&mut self) {
-        let toolbar = self.current_toolbar();
-        for out in self.outputs.values_mut() {
-            out.overlay.toolbar = toolbar;
-            out.toolbar_dirty = true;
+        let keys: Vec<u32> = self.outputs.keys().copied().collect();
+        for key in keys {
+            let toolbar = self.current_toolbar(key);
+            if let Some(out) = self.outputs.get_mut(&key) {
+                out.overlay.toolbar = toolbar;
+                out.toolbar_dirty = true;
+            }
         }
         self.dirty = true;
     }
@@ -812,7 +946,8 @@ impl App {
     /// The toolbar control under a pointer position on an output, if any.
     pub(crate) fn toolbar_hit(&mut self, key: &u32, x: f32, y: f32) -> Option<ToolbarAction> {
         let out = self.outputs.get(key)?;
-        let (toolbar, width, height) = (out.overlay.toolbar?, out.width as f32, out.height as f32);
+        let toolbar = out.overlay.toolbar.clone()?;
+        let (width, height) = (out.width as f32, out.height as f32);
         self.renderer.toolbar_hit(&toolbar, width, height, x, y)
     }
 
@@ -944,13 +1079,13 @@ impl App {
         for (key, out) in self.outputs.iter_mut() {
             if let Some(stroke) = out.overlay.stroke.take() {
                 if !stroke.points.is_empty() {
-                    pending.push((*key, out.bucket(*key).into_owned(), stroke));
+                    pending.push((*key, out.board().to_string(), stroke));
                 }
                 overlay_changed = true;
             }
             if let Some(shape) = out.overlay.shape.take() {
                 if !shape.is_empty() {
-                    shapes.push((*key, out.bucket(*key).into_owned(), shape));
+                    shapes.push((*key, out.board().to_string(), shape));
                 }
                 overlay_changed = true;
             }
@@ -967,7 +1102,7 @@ impl App {
             .unwrap_or_default();
         let mut committed_box: Option<Rect> = None;
         let committed = !pending.is_empty() || !shapes.is_empty();
-        for (_, bucket, stroke) in pending {
+        for (_, board_name, stroke) in pending {
             if let Some(box_) = stroke.paint_bounds() {
                 committed_box = Some(match committed_box {
                     Some(pending) => pending.union(box_),
@@ -976,12 +1111,12 @@ impl App {
             }
             self.doc
                 .boards
-                .entry(bucket)
+                .entry(board_name)
                 .or_default()
                 .strokes
                 .push(stroke);
         }
-        for (_, bucket, shape) in shapes {
+        for (_, board_name, shape) in shapes {
             let box_ = shape.paint_bounds();
             committed_box = Some(match committed_box {
                 Some(pending) => pending.union(box_),
@@ -989,7 +1124,7 @@ impl App {
             });
             self.doc
                 .boards
-                .entry(bucket)
+                .entry(board_name)
                 .or_default()
                 .shapes
                 .push(shape);
@@ -1036,9 +1171,9 @@ impl App {
                 return;
             };
             let view = out.view;
-            let bucket = out.bucket(key).into_owned();
+            let board_name = out.board().to_string();
             let empty = Board::default();
-            let ann = self.doc.boards.get(&bucket).unwrap_or(&empty);
+            let ann = self.doc.boards.get(&board_name).unwrap_or(&empty);
             let held = out
                 .overlay
                 .selection
@@ -1153,11 +1288,11 @@ impl App {
         };
         let originals = selection.items.clone();
         let transform = selection.transform;
-        let bucket = out.bucket(key).into_owned();
+        let board_name = out.board().to_string();
         let Some((copies, box_)) = self
             .doc
             .boards
-            .get_mut(&bucket)
+            .get_mut(&board_name)
             .map(|ann| ann.duplicate(&originals))
         else {
             return;
@@ -1186,11 +1321,11 @@ impl App {
         let Some(out) = self.outputs.get(&dup.key) else {
             return false;
         };
-        let bucket = out.bucket(dup.key).into_owned();
+        let board_name = out.board().to_string();
         let removed = self
             .doc
             .boards
-            .get_mut(&bucket)
+            .get_mut(&board_name)
             .and_then(|ann| ann.remove(&dup.copies));
         self.set_selection(dup.key, dup.originals, None);
         if let Some(box_) = removed {
@@ -1426,15 +1561,15 @@ impl App {
                 out.overlay
                     .selection
                     .as_ref()
-                    .map(|s| (*key, out.bucket(*key).into_owned(), s.items.clone()))
+                    .map(|s| (*key, out.board().to_string(), s.items.clone()))
             })
             .collect();
         let mut removed = Vec::new();
-        for (key, bucket, items) in held {
+        for (key, board_name, items) in held {
             if let Some(box_) = self
                 .doc
                 .boards
-                .get_mut(&bucket)
+                .get_mut(&board_name)
                 .and_then(|ann| ann.remove(&items))
             {
                 removed.push((key, box_));
@@ -1498,14 +1633,11 @@ impl App {
                 None => return,
             }
         };
-        let bucket = self
-            .outputs
-            .get(&key)
-            .map(|out| out.bucket(key).into_owned());
-        let items = match bucket {
-            Some(bucket) => {
+        let board_name = self.outputs.get(&key).map(|out| out.board().to_string());
+        let items = match board_name {
+            Some(board_name) => {
                 let empty = Board::default();
-                let ann = self.doc.boards.get(&bucket).unwrap_or(&empty);
+                let ann = self.doc.boards.get(&board_name).unwrap_or(&empty);
                 marquee_select(ann, marquee)
             }
             None => Vec::new(),
@@ -1527,9 +1659,9 @@ impl App {
         let Some(transform) = selection.transform else {
             return;
         };
-        let (items, bucket) = (selection.items.clone(), out.bucket(key).into_owned());
+        let (items, board_name) = (selection.items.clone(), out.board().to_string());
         let mut box_: Option<Rect> = None;
-        if let Some(ann) = self.doc.boards.get_mut(&bucket) {
+        if let Some(ann) = self.doc.boards.get_mut(&board_name) {
             for id in &items {
                 let changed = match *id {
                     ItemId::Stroke(i) if i < ann.strokes.len() => {
@@ -1591,7 +1723,7 @@ impl App {
             let notes: Vec<Note> = self
                 .doc
                 .boards
-                .get(&bucket)
+                .get(&board_name)
                 .map(|ann| {
                     items
                         .iter()
@@ -1611,7 +1743,7 @@ impl App {
                 if let Some(slot) = self
                     .doc
                     .boards
-                    .get_mut(&bucket)
+                    .get_mut(&board_name)
                     .and_then(|ann| ann.notes.iter_mut().find(|n| n.bounds() == note.bounds()))
                 {
                     slot.h = h;
@@ -1647,15 +1779,15 @@ impl App {
                 out.overlay
                     .selection
                     .as_ref()
-                    .map(|s| (*key, out.bucket(*key).into_owned(), s.items.clone()))
+                    .map(|s| (*key, out.board().to_string(), s.items.clone()))
             })
             .collect();
         let mut changed = Vec::new();
-        for (key, bucket, items) in held {
+        for (key, board_name, items) in held {
             if let Some(box_) = self
                 .doc
                 .boards
-                .get_mut(&bucket)
+                .get_mut(&board_name)
                 .and_then(|ann| ann.recolour(&items, color))
             {
                 changed.push((key, box_));
@@ -1671,7 +1803,6 @@ impl App {
         let mut changed = false;
         let keys: Vec<u32> = self.outputs.keys().copied().collect();
         for key in keys {
-            let id = key;
             let Some(out) = self.outputs.get_mut(&key) else {
                 continue;
             };
@@ -1688,7 +1819,7 @@ impl App {
             // The cached box is screen-space and the item's own is canvas, so the union is taken on
             // screen: mixing them would damage the wrong region at any zoom but 1:1.
             let view = out.view;
-            let (scale, bucket) = (out.scale, out.bucket(id).into_owned());
+            let (scale, board_name) = (out.scale, out.board().to_string());
             let mut box_ = previous.unwrap_or_default();
             // A note being edited is content: its text goes back into the note, with the height the
             // wrapped text needs, and a note left empty is dropped as an empty text box is.
@@ -1696,7 +1827,7 @@ impl App {
                 let note = self
                     .doc
                     .boards
-                    .get(&bucket)
+                    .get(&board_name)
                     .and_then(|ann| ann.notes.get(index))
                     .cloned();
                 let Some(mut note) = note else { continue };
@@ -1705,7 +1836,7 @@ impl App {
                 // An empty note stays: an empty sticky is a sticky, and it is what the user dragged
                 // out. Dropping it made a note the user had just placed vanish the moment they
                 // started the next one, which reads as the note having failed to be created.
-                if let Some(ann) = self.doc.boards.get_mut(&bucket) {
+                if let Some(ann) = self.doc.boards.get_mut(&board_name) {
                     let needed =
                         self.renderer
                             .wrapped_text_height(&text, &note, Screen { scale, view });
@@ -1737,7 +1868,7 @@ impl App {
                 Some(pending) => pending.union(box_),
                 None => box_,
             });
-            let ann = self.doc.boards.entry(bucket).or_default();
+            let ann = self.doc.boards.entry(board_name).or_default();
             match edit.index {
                 Some(idx) if idx < ann.texts.len() => ann.texts[idx] = item,
                 _ => ann.texts.push(item),
@@ -1755,16 +1886,15 @@ impl App {
     }
 
     pub(crate) fn begin_text_edit(&mut self, key: &u32, x: f32, y: f32) {
-        let id = *key;
         let Some(out) = self.outputs.get(key) else {
             return;
         };
-        let bucket = out.bucket(id);
+        let board_name = out.board();
         let scale = out.scale;
         // The click is tested against the text the renderer measures, not against the font-size
         // estimate the eraser uses: that estimate is 0.6 em per character, which is too narrow
         // for CJK, so clicking such a glyph used to start a new box instead of editing it.
-        let existing = self.doc.boards.get(bucket.as_ref()).and_then(|ann| {
+        let existing = self.doc.boards.get(board_name).and_then(|ann| {
             ann.texts.iter().position(|t| {
                 self.renderer
                     .text_edit_bounds(
@@ -1783,17 +1913,14 @@ impl App {
         let on_note = self
             .doc
             .boards
-            .get(bucket.as_ref())
+            .get(board_name)
             .and_then(|ann| ann.notes.iter().position(|n| n.bounds().contains(x, y)));
         if let Some(index) = on_note {
             self.enter_note(key, index);
             return;
         }
         let (item, index) = match existing {
-            Some(idx) => (
-                self.doc.boards[bucket.as_ref()].texts[idx].clone(),
-                Some(idx),
-            ),
+            Some(idx) => (self.doc.boards[board_name].texts[idx].clone(), Some(idx)),
             None => (
                 TextItem {
                     x,
@@ -1864,17 +1991,13 @@ impl App {
         let Some((key, index, scale, view, text)) = job else {
             return;
         };
-        let Some(bucket) = self
-            .outputs
-            .get(&key)
-            .map(|out| out.bucket(key).into_owned())
-        else {
+        let Some(board_name) = self.outputs.get(&key).map(|out| out.board().to_string()) else {
             return;
         };
         let Some(note) = self
             .doc
             .boards
-            .get(&bucket)
+            .get(&board_name)
             .and_then(|ann| ann.notes.get(index))
             .cloned()
         else {
@@ -1884,7 +2007,7 @@ impl App {
             .renderer
             .wrapped_text_height(&text, &note, Screen { scale, view });
         let updated = note.grown_for(needed);
-        if let Some(ann) = self.doc.boards.get_mut(&bucket)
+        if let Some(ann) = self.doc.boards.get_mut(&board_name)
             && let Some(slot) = ann.notes.get_mut(index)
         {
             *slot = updated.clone();
@@ -1899,15 +2022,14 @@ impl App {
     /// Create a note at a point and put the caret in it, or enter the note that is already there: a
     /// press on an existing note must not stack another one on top of it.
     pub(crate) fn begin_note(&mut self, key: &u32, x: f32, y: f32) {
-        let id = *key;
         let Some(out) = self.outputs.get(key) else {
             return;
         };
-        let bucket = out.bucket(id).into_owned();
+        let board_name = out.board().to_string();
         let existing = self
             .doc
             .boards
-            .get(&bucket)
+            .get(&board_name)
             .and_then(|ann| ann.notes.iter().position(|n| n.bounds().contains(x, y)));
         // An existing note is entered; a new one is dragged out and only becomes content on the
         // release, so that a drag decides its size the way the shape tools' drags decide theirs.
@@ -1977,10 +2099,10 @@ impl App {
             return;
         };
         out.transient_dirty = true;
-        let bucket = out.bucket(*key).into_owned();
+        let board_name = out.board().to_string();
         let box_ = note.bounds();
         let index = {
-            let ann = self.doc.boards.entry(bucket).or_default();
+            let ann = self.doc.boards.entry(board_name).or_default();
             ann.notes.push(note);
             ann.notes.len() - 1
         };
@@ -1995,15 +2117,14 @@ impl App {
     /// Edit a note's text through the same overlay a text box uses, with the overlay naming the note so
     /// that the caret, the preedit, the input method and the commit all know where the text belongs.
     fn enter_note(&mut self, key: &u32, index: usize) {
-        let id = *key;
         let Some(out) = self.outputs.get(key) else {
             return;
         };
-        let bucket = out.bucket(id).into_owned();
+        let board_name = out.board().to_string();
         let Some(note) = self
             .doc
             .boards
-            .get(&bucket)
+            .get(&board_name)
             .and_then(|ann| ann.notes.get(index))
             .cloned()
         else {
@@ -2148,7 +2269,7 @@ impl App {
         if !self.outputs.contains_key(&key) {
             self.create_surface(output.clone());
         }
-        // Some compositor updates briefly omit the name; do not regress a known bucket to the
+        // Some compositor updates briefly omit the name; do not regress a known board_name to the
         // temporary id-based fallback and repaint the wrong annotations.
         let name = if reported_name.is_empty() {
             self.outputs
@@ -2160,7 +2281,7 @@ impl App {
         };
         let name_changed = self.outputs.get(&key).is_some_and(|out| out.name != name);
         if name_changed {
-            // Finish under the old bucket before changing the name used by the document.
+            // Finish under the old board_name before changing the name used by the document.
             self.end_text_edit();
             self.invalidate_text_caches();
         }
@@ -2209,7 +2330,6 @@ impl App {
     }
 
     fn draw_output(&mut self, key: &u32) {
-        let id = *key;
         let (format, swap) = self.shm_format();
         let Some(out) = self.outputs.get_mut(key) else {
             return;
@@ -2273,9 +2393,9 @@ impl App {
         // The handles are interface lengths: on screen they are the constants themselves.
         let handle_hit = crate::canvas::SELECT_HANDLE_HIT;
         let transient = transient_bounds(&out.overlay).map(|b| view.screen_rect(b));
-        let bucket = out.bucket(id);
+        let board_name = out.board();
         let empty = Board::default();
-        let ann = self.doc.boards.get(bucket.as_ref()).unwrap_or(&empty);
+        let ann = self.doc.boards.get(board_name).unwrap_or(&empty);
         // The frame and its handles are not document elements, so they are only ever drawn live; the
         // box they occupy is what the frame that repaints them has to damage. The handles are
         // interface-sized, so the frame is mapped first and grown on screen.

@@ -35,7 +35,7 @@ use crate::canvas::{
     Board, Caret, ERASER_THRESHOLD, Rect, SELECT_HANDLE_HIT, ShapeKind, Stroke, TextBuffer,
     ZOOM_STEP, constrained_drag, grab_at, selection_frame,
 };
-use crate::render::{drawer_stays_open, picks_from_drawer};
+use crate::render::{panel_stays_open, picks_from_panel};
 
 /// The input method's own log, off unless `SGRAFFITO_IM_TRACE` is set: a commit that does not appear is a
 /// question about which batch the compositor sent, and the answer has to come from the session where it
@@ -177,12 +177,15 @@ pub fn tool_for_keysym(keysym: Keysym) -> Option<Tool> {
     }
 }
 
-/// `M` opens and closes the drawer, `B` switches the backdrop. Mapped like the other keys, so a control
-/// in the drawer teaches its key exactly as a rail block does.
+/// `M` opens and closes the drawer, `B` switches the backdrop, `C` the boards panel and `F` the mode in
+/// which the screens share one board. Mapped like the other keys, so a control in a panel teaches its key
+/// exactly as a rail block does.
 pub fn panel_action_for_keysym(keysym: Keysym) -> Option<ToolbarAction> {
     match keysym {
         Keysym::m | Keysym::M => Some(ToolbarAction::More),
         Keysym::b | Keysym::B => Some(ToolbarAction::Scrim),
+        Keysym::c | Keysym::C => Some(ToolbarAction::Boards),
+        Keysym::f | Keysym::F => Some(ToolbarAction::Shared),
         _ => None,
     }
 }
@@ -361,7 +364,9 @@ impl KeyboardHandler for App {
         } else if let Some(dir) = size_step_for_keysym(event.keysym) {
             self.nudge_size(dir);
         } else if let Some(action) = panel_action_for_keysym(event.keysym) {
-            self.apply_toolbar_action(action);
+            // A key acts on the output the compositor gave the keyboard to, the same output the canvas
+            // keys move and the rail's clicks land on.
+            self.apply_toolbar_action(self.keyboard_focus, action);
         } else if let Some(nav) = nav_action(event.keysym, self.shift) {
             self.nav_key(nav);
         }
@@ -705,9 +710,9 @@ impl App {
             let Some(out) = self.outputs.get(&key) else {
                 return;
             };
-            let bucket = out.bucket(key).into_owned();
+            let board_name = out.board().to_string();
             let empty = Board::default();
-            let ann = self.doc.boards.get(&bucket).unwrap_or(&empty);
+            let ann = self.doc.boards.get(&board_name).unwrap_or(&empty);
             out.overlay
                 .selection
                 .as_ref()
@@ -760,7 +765,7 @@ impl App {
             return;
         }
         if let Some(action) = self.toolbar_hit(key, x, y) {
-            self.apply_toolbar_action(action);
+            self.apply_toolbar_action(Some(*key), action);
             return;
         }
         // A press anywhere else is a press outside the menu, and clicking outside a menu dismisses it. This
@@ -770,6 +775,7 @@ impl App {
         // open — and `Esc` then went to the edit, because a focused box handles `Esc` before the rail does, so
         // the first `Esc` ended the edit and left the menu up.
         self.set_more(false);
+        self.set_boards(false);
         // A pan owns the pointer while it runs: nothing else may start under it.
         if self.panning() {
             return;
@@ -908,8 +914,11 @@ impl App {
         // controls, so it never sits open beside the rail while the pointer is somewhere else. The hover is
         // worked out against the layout the frame drew, which is the open one, so the rail's own blocks are
         // still where the pointer saw them.
-        if self.more && !drawer_stays_open(hover) {
+        if let Some(owner) = self.panel_owner()
+            && !panel_stays_open(hover, Some(owner))
+        {
             self.set_more(false);
+            self.set_boards(false);
         }
         if hover != self.toolbar_hover {
             self.toolbar_hover = hover;
@@ -928,7 +937,7 @@ impl App {
     /// Apply a toolbar click through the entry points the keys use, so a click and its key
     /// cannot diverge in clamping or bounds. `Esc` is the same two-stage key it is on the
     /// keyboard: the first click finishes the text box being edited, the next one locks.
-    fn apply_toolbar_action(&mut self, action: ToolbarAction) {
+    fn apply_toolbar_action(&mut self, acting: Option<u32>, action: ToolbarAction) {
         if action == ToolbarAction::Lock {
             if self.focused_edit().is_some() {
                 self.end_text_edit();
@@ -946,13 +955,27 @@ impl App {
             ToolbarAction::SizeStep(dir) => self.nudge_size(dir),
             ToolbarAction::More => self.toggle_more(),
             ToolbarAction::Scrim => self.toggle_scrim(),
+            ToolbarAction::Boards => self.toggle_boards(),
+            ToolbarAction::Shared => self.toggle_shared(),
+            // The panel's rows are the document's boards in name order, which is the order the rail was
+            // drawn from, so an index names the same board it was drawn as.
+            ToolbarAction::Board(index) => {
+                let picked = self.doc.names().nth(index).cloned();
+                if let Some(name) = picked {
+                    self.switch_board(acting, &name);
+                }
+            }
+            ToolbarAction::NewBoard => {
+                self.new_board(acting);
+            }
             ToolbarAction::Lock => {}
         }
         // One click on something in the drawer both does the thing and puts the list away, the way a menu
         // closes after its item is chosen. A rail block needs no rule here: the pointer reached it, so the
         // drawer had already closed on the way.
-        if picks_from_drawer(action) {
+        if picks_from_panel(action) {
             self.set_more(false);
+            self.set_boards(false);
         }
     }
 
@@ -1006,8 +1029,7 @@ impl App {
 
     fn pointer_release(&mut self, key: &u32) {
         let tool = self.tool;
-        let id = *key;
-        let bucket = self.outputs.get(key).map(|o| o.bucket(id).into_owned());
+        let board_name = self.outputs.get(key).map(|o| o.board().to_string());
         // The eraser's radius is what the pointer aims with, so it is a screen length expressed in
         // the document's own units.
         let tolerance = self
@@ -1018,7 +1040,7 @@ impl App {
         // What this gesture changed, so the frame that reports it can damage just that box: a
         // committed stroke, the element the eraser removed, or both.
         let mut changed: Option<Rect> = None;
-        if let Some(bucket) = bucket {
+        if let Some(board_name) = board_name {
             let transient = self.outputs.get_mut(key).map(|out| {
                 (
                     out.overlay.stroke.take(),
@@ -1033,7 +1055,7 @@ impl App {
                     changed = stroke.paint_bounds();
                     self.doc
                         .boards
-                        .entry(bucket.clone())
+                        .entry(board_name.clone())
                         .or_default()
                         .strokes
                         .push(stroke);
@@ -1050,14 +1072,14 @@ impl App {
                     });
                     self.doc
                         .boards
-                        .entry(bucket.clone())
+                        .entry(board_name.clone())
                         .or_default()
                         .shapes
                         .push(shape);
                 }
                 if tool == Tool::Eraser
                     && let Some([x, y]) = eraser
-                    && let Some(ann) = self.doc.boards.get_mut(&bucket)
+                    && let Some(ann) = self.doc.boards.get_mut(&board_name)
                     && let Some(erased) = ann.erase(x, y, tolerance)
                 {
                     changed = Some(match changed {
@@ -1068,7 +1090,7 @@ impl App {
             }
         }
         match changed {
-            Some(box_) => self.doc_changed_at(id, box_),
+            Some(box_) => self.doc_changed_at(*key, box_),
             // The eraser marker was showing and is gone, with nothing erased.
             None => self.dirty = true,
         }
@@ -1082,7 +1104,7 @@ impl App {
             self.commit_note(key);
         }
         // A gesture the pointer was dragging ends here, and is written into the document.
-        self.release_selection(id);
+        self.release_selection(*key);
         // A pan the left button was holding — the hand tool's — ends with the button, or the pointer
         // would go on panning the canvas as it moves with no button down at all.
         self.end_pan();

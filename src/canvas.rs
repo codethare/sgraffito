@@ -124,8 +124,9 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 }
 
 /// The tool the next gesture uses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tool {
+    #[default]
     Pen,
     Eraser,
     Text,
@@ -155,6 +156,14 @@ pub enum ToolbarAction {
     More,
     /// Switch the edit-mode backdrop off and on.
     Scrim,
+    /// Open or close the panel of boards.
+    Boards,
+    /// Pick the board at this index of the panel's list.
+    Board(usize),
+    /// Create a board and pick it.
+    NewBoard,
+    /// Switch between every screen sharing one board and each screen picking its own.
+    Shared,
 }
 
 impl Tool {
@@ -1709,9 +1718,16 @@ pub struct Overlay {
     pub marquee: Option<Rect>,
 }
 
+/// One board as the rail's panel states it: its name, and whether this output is showing it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BoardRow {
+    pub name: String,
+    pub current: bool,
+}
+
 /// What the edit-mode toolbar shows: the active tool, the active colour, the active size in
 /// logical pixels, and the block the pointer is on, if any.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Toolbar {
     pub tool: Tool,
     /// `#rrggbb`, one of `PALETTE`.
@@ -1726,6 +1742,14 @@ pub struct Toolbar {
     /// Whether the drawer of rarely used controls is open. It changes which controls exist, not the
     /// rail's own height, so it is rail state like the tool and the colour.
     pub more: bool,
+    /// Whether the panel of boards is open. Only one panel is open at a time.
+    pub boards_open: bool,
+    /// The boards the panel lists, in name order, with the one this output shows marked. Carried in the
+    /// rail's own value because the panel's rows are document names: the layout, the hit test and the
+    /// cache all read one value rather than three functions taking the list beside the rail.
+    pub boards: Vec<BoardRow>,
+    /// Whether every screen shows the board picked on any of them.
+    pub shared: bool,
     /// Whether the edit-mode backdrop is painted. A preference rather than content: it decides how the
     /// surface reads, and the raster is keyed by it so a frame cannot hold the other state.
     pub scrim: bool,

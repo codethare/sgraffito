@@ -429,3 +429,22 @@ fn a_focused_text_box_keeps_its_own_keys() {
     );
     assert_eq!(edit_action(Keysym::Tab, false, false), EditAction::Local);
 }
+
+/// The boards panel and the mode that shares one board across screens have their own keys, and neither
+/// collides with a tool, a colour or a size.
+#[test]
+fn the_boards_panel_and_the_shared_mode_have_their_own_keys() {
+    use sgraffito::canvas::ToolbarAction;
+    use sgraffito::input::panel_action_for_keysym;
+    for (keysym, action) in [
+        (Keysym::c, ToolbarAction::Boards),
+        (Keysym::C, ToolbarAction::Boards),
+        (Keysym::f, ToolbarAction::Shared),
+        (Keysym::F, ToolbarAction::Shared),
+    ] {
+        assert_eq!(panel_action_for_keysym(keysym), Some(action));
+        assert_eq!(tool_for_keysym(keysym), None);
+        assert_eq!(color_for_keysym(keysym), None);
+        assert_eq!(size_step_for_keysym(keysym), None);
+    }
+}

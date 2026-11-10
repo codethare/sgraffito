@@ -1,5 +1,5 @@
 use sgraffito::canvas::{
-    Board, Doc, ERASER_THRESHOLD, ItemId, Note, Overlay, PALETTE, Rect, Selection, Shape,
+    Board, BoardRow, Doc, ERASER_THRESHOLD, ItemId, Note, Overlay, PALETTE, Rect, Selection, Shape,
     ShapeKind, Stroke, TextBuffer, TextItem, TextOverlay, Tool, Toolbar, ToolbarAction, Transform,
     View,
 };
@@ -374,6 +374,9 @@ fn toolbar(tool: Tool, color: &'static str, size: f32, hover: Option<ToolbarActi
         hover,
         grow: 1.0,
         more: false,
+        boards_open: false,
+        boards: Vec::new(),
+        shared: false,
         scrim: true,
     }
 }
@@ -421,7 +424,9 @@ fn toolbar_draws_ink_only_when_it_is_present() {
 
 #[test]
 fn toolbar_is_a_left_edge_rail_at_the_optical_centre() {
-    let (w, h) = (640u32, 900u32);
+    // Tall enough that the rail is centred rather than pinned: the column is about 780 logical pixels,
+    // so 900 no longer leaves the margin above it that the optical centre needs.
+    let (w, h) = (640u32, 1000u32);
     let mut buf = buffer(w, h);
     let overlay = Overlay {
         toolbar: Some(toolbar(Tool::Pen, "#33d17a", 3.0, None)),
@@ -572,9 +577,10 @@ fn every_block_of_the_rail_is_reachable_and_no_row_is_a_gap() {
         ToolbarAction::Lock,
         "Esc is not last"
     );
-    // Twenty clickable blocks: five colours, eleven tools, `[`, `]`, the drawer's block and `Esc`. The
-    // size readout is drawn between the two size keys but owned by `[`, so it is not one of them.
-    assert_eq!(actions.len(), 20, "a drawn block cannot be hit");
+    // Twenty-one clickable blocks: five colours, eleven tools, `[`, `]`, the boards' block, the drawer's
+    // block and `Esc`. The size readout is drawn between the two size keys but owned by `[`, so it is not
+    // one of them.
+    assert_eq!(actions.len(), 21, "a drawn block cannot be hit");
     // Outside the rail the toolbar takes nothing: those presses are drawing gestures.
     let band = toolbar_bounds(w, h);
     assert_eq!(
@@ -615,7 +621,7 @@ fn a_hovered_block_stretches_to_say_what_it_does() {
 
     let hovered = Toolbar {
         hover: Some(ToolbarAction::Color(0)),
-        ..rail
+        ..rail.clone()
     };
     // Stretched, the block owns the capsule it unfurled: a press there is still the toolbar's,
     // which is what keeps the pointer on the block while it reads the meaning.
@@ -635,7 +641,7 @@ fn a_hovered_block_stretches_to_say_what_it_does() {
     // A block only stretches while its meaning fits what the damage accounting reserves.
     let narrow = Toolbar {
         hover: Some(ToolbarAction::Color(0)),
-        ..rail
+        ..rail.clone()
     };
     assert_eq!(
         renderer.toolbar_hit(&narrow, fw, fh, beyond, row),
@@ -652,7 +658,10 @@ fn a_hovered_block_stretches_to_say_what_it_does() {
     let draw = |hover| {
         let mut buf = buffer(w, h);
         let overlay = Overlay {
-            toolbar: Some(Toolbar { hover, ..rail }),
+            toolbar: Some(Toolbar {
+                hover,
+                ..rail.clone()
+            }),
             ..Default::default()
         };
         Renderer::new().render(
@@ -861,11 +870,11 @@ fn bounding_box_frame_with_a_toolbar_matches_a_whole_surface_frame() {
     let rail = rail();
     // On the rail's own row: the damage box has to grow over the whole rail and repaint it.
     let first = Overlay {
-        toolbar: Some(rail),
+        toolbar: Some(rail.clone()),
         ..dot(140.0, 300.0)
     };
     let second = Overlay {
-        toolbar: Some(rail),
+        toolbar: Some(rail.clone()),
         ..dot(144.0, 304.0)
     };
     let damage = transient_damage(
@@ -889,7 +898,7 @@ fn a_drag_far_from_the_toolbar_leaves_the_toolbar_pixels_alone() {
     let (w, h) = (1024u32, 600u32);
     let rail = rail();
     let with = |x: f32, y: f32| Overlay {
-        toolbar: Some(rail),
+        toolbar: Some(rail.clone()),
         ..dot(x, y)
     };
     let first = with(500.0, 500.0);
@@ -992,7 +1001,7 @@ fn rail_frame(w: u32, h: u32, wheel: &Toolbar, hover: Option<ToolbarAction>, gro
         toolbar: Some(Toolbar {
             hover,
             grow,
-            ..*wheel
+            ..wheel.clone()
         }),
         ..Default::default()
     };
@@ -1094,7 +1103,7 @@ fn the_pop_out_edge_uncovers_the_label() {
         let wheel_open = Toolbar {
             hover: Some(text),
             grow,
-            ..wheel
+            ..wheel.clone()
         };
         assert_eq!(
             renderer.toolbar_hit(&wheel_open, fw, fh, ox + 100.0, row as f32),
@@ -1377,7 +1386,7 @@ fn the_rail_sits_on_a_plate() {
     let mut renderer = Renderer::new();
     let rail = rail();
     let overlay = Overlay {
-        toolbar: Some(rail),
+        toolbar: Some(rail.clone()),
         ..Default::default()
     };
     renderer.render(
@@ -1474,7 +1483,7 @@ fn an_edit_mode_frame_is_painted_on_a_scrim() {
     let mut editor = Renderer::new();
     let rail = rail();
     let edit = Overlay {
-        toolbar: Some(rail),
+        toolbar: Some(rail.clone()),
         ..Default::default()
     };
     let locked = Overlay::default();
@@ -1528,7 +1537,7 @@ fn a_cached_frame_keeps_the_scrim_after_a_document_change() {
     let mut cache = FrameCache::default();
     let rail = rail();
     let overlay = Overlay {
-        toolbar: Some(rail),
+        toolbar: Some(rail.clone()),
         ..Default::default()
     };
     let before = Board::default();
@@ -1609,7 +1618,7 @@ fn a_panned_and_zoomed_frame_puts_the_drawing_where_the_view_says() {
     };
     let rail = rail();
     let overlay = Overlay {
-        toolbar: Some(rail),
+        toolbar: Some(rail.clone()),
         ..Default::default()
     };
     let mut buf = buffer(w, h);
@@ -1763,7 +1772,7 @@ fn the_drawer_opens_beside_the_rail_without_moving_it() {
     let closed = rail();
     let open = Toolbar {
         more: true,
-        ..closed
+        ..closed.clone()
     };
     // The rail's height and its declared box are unchanged by the drawer.
     let (a, b) = (toolbar_bounds(fw, fh), toolbar_bounds(fw, fh));
@@ -2338,8 +2347,8 @@ fn switching_the_backdrop_repaints_the_whole_surface() {
 
 #[test]
 fn hovering_the_more_block_paints_the_drawer_list_inside_the_rails_box() {
-    // Tall enough for the whole rail: the `more` block is near its bottom.
-    let (w, h) = (600u32, 820u32);
+    // Tall enough for the whole rail and the legend under it: the `more` block is near its bottom.
+    let (w, h) = (600u32, 900u32);
     let view = View::default();
     let rail = |hover: Option<ToolbarAction>| toolbar(Tool::Pen, PALETTE[0], 3.0, hover);
     let draw = |t: Toolbar| {
@@ -2400,6 +2409,9 @@ fn a_row_of_the_panel_can_be_clicked_with_the_pointer_on_the_block_that_opened_i
         hover: Some(ToolbarAction::More),
         grow: 1.0,
         more: true,
+        boards_open: false,
+        boards: Vec::new(),
+        shared: false,
         scrim: true,
     };
     let mut renderer = Renderer::new();
@@ -3310,4 +3322,149 @@ fn a_full_resolution_frame_after_a_coarse_one_is_crisp_again() {
     );
     assert_eq!(landed, reference, "the settle frame kept the coarse pixels");
     assert_ne!(coarse, landed, "the coarse frame drew at full resolution");
+}
+
+/// A rail with the boards panel open on the given boards, as the daemon builds it for one output.
+fn boards_rail(boards: &[(&str, bool)]) -> Toolbar {
+    Toolbar {
+        boards_open: true,
+        boards: boards
+            .iter()
+            .map(|(name, current)| BoardRow {
+                name: (*name).to_string(),
+                current: *current,
+            })
+            .collect(),
+        ..toolbar(Tool::Pen, PALETTE[0], 3.0, None)
+    }
+}
+
+/// The panel is the document's boards and nothing else: one row per board, the one this output shows
+/// marked, and the row that creates one last.
+#[test]
+fn the_boards_panel_states_the_documents_boards() {
+    let (w, h) = (900.0f32, 1000.0f32);
+    let mut renderer = Renderer::new();
+    let rail = boards_rail(&[("Board 1", false), ("office", true)]);
+    // Sweeping the panel's column top to bottom gives its rows in the order they are drawn.
+    let sweep = sweep_rail(&mut renderer, &rail, w, h, 40.0);
+    let mut rows: Vec<ToolbarAction> = Vec::new();
+    for action in sweep.into_iter().flatten() {
+        if !rows.contains(&action) {
+            rows.push(action);
+        }
+    }
+    assert_eq!(
+        rows,
+        vec![
+            ToolbarAction::Board(0),
+            ToolbarAction::Board(1),
+            ToolbarAction::NewBoard
+        ],
+        "the panel's rows are not its boards and the row that creates one"
+    );
+}
+
+/// A row of the panel is hit as the board it lists, and the board on screen is the one the panel marks.
+#[test]
+fn a_board_row_is_hit_as_that_board() {
+    let (w, h) = (900.0f32, 1000.0f32);
+    let mut renderer = Renderer::new();
+    let rail = boards_rail(&[("Board 1", false), ("office", true)]);
+    let index = |renderer: &mut Renderer, action: ToolbarAction| {
+        let sweep = sweep_rail(renderer, &rail, w, h, 40.0);
+        sweep.iter().position(|hit| *hit == Some(action))
+    };
+    let (first, second) = (
+        index(&mut renderer, ToolbarAction::Board(0)).expect("the first board's row"),
+        index(&mut renderer, ToolbarAction::Board(1)).expect("the second board's row"),
+    );
+    assert!(second > first, "the rows are not in the document's order");
+}
+
+/// The pointer travels from the block into the panel without crossing a region that is nobody's, and no
+/// rail hit box reaches into the panel: the rail's boxes are tested first, and one that reached a row
+/// would make that row unclickable.
+#[test]
+fn the_boards_block_and_its_panel_meet_without_a_gap_or_an_overlap() {
+    let (w, h) = (900.0f32, 1000.0f32);
+    let mut renderer = Renderer::new();
+    let rail = boards_rail(&[("Board 1", true), ("office", false)]);
+    let band = toolbar_bounds(w, h);
+    // The rail's own origin: the box starts one hairline and one pad left of the block column.
+    let base = band.x + 1.0 + 6.0;
+    // The rail's own column for the block, the panel's column for its rows.
+    let rail_sweep = sweep_rail(&mut renderer, &rail, w, h, 20.0);
+    let panel_sweep = sweep_rail(&mut renderer, &rail, w, h, 40.0);
+    let row_of = |sweep: &[Option<ToolbarAction>], action: ToolbarAction| {
+        sweep
+            .iter()
+            .position(|hit| *hit == Some(action))
+            .unwrap_or_else(|| panic!("{action:?} is not on the rail")) as f32
+    };
+    let (block_y, first_row_y) = (
+        band.y + row_of(&rail_sweep, ToolbarAction::Boards) + 0.5,
+        band.y + row_of(&panel_sweep, ToolbarAction::Board(0)) + 0.5,
+    );
+    // The corridor: the block's own row reaches exactly to the panel's column, so the pointer is on the
+    // block until it is on the panel's own column.
+    for x in 0..32 {
+        assert_eq!(
+            renderer.toolbar_hit(&rail, w, h, base + x as f32, block_y),
+            Some(ToolbarAction::Boards),
+            "the corridor has a hole at {x} on the block's row"
+        );
+    }
+    // And the row is still the row once the pointer is in the panel's own column.
+    for x in 34..60 {
+        assert_eq!(
+            renderer.toolbar_hit(&rail, w, h, base + x as f32, first_row_y),
+            Some(ToolbarAction::Board(0)),
+            "the row was taken from the panel at {x}"
+        );
+    }
+}
+
+/// The panel is inside the box the rail declares, or a frame that repaints only the rail leaves its
+/// pixels behind.
+#[test]
+fn the_boards_panel_paints_inside_the_rails_box() {
+    let (w, h) = (900u32, 1000u32);
+    let view = View::default();
+    let draw = |rail: &Toolbar| {
+        let mut buf = buffer(w, h);
+        Renderer::new().render(
+            &mut buf,
+            w,
+            h,
+            1.0,
+            view,
+            &Board::default(),
+            &Overlay {
+                toolbar: Some(rail.clone()),
+                ..Default::default()
+            },
+            None,
+        );
+        buf
+    };
+    let open = draw(&boards_rail(&[("Board 1", true), ("office", false)]));
+    let shut = draw(&Toolbar {
+        boards_open: false,
+        ..boards_rail(&[("Board 1", true), ("office", false)])
+    });
+    let box_ = toolbar_bounds(w as f32, h as f32);
+    let mut painted = 0;
+    for (i, (a, b)) in open.chunks(4).zip(shut.chunks(4)).enumerate() {
+        if a == b {
+            continue;
+        }
+        let (x, y) = ((i as u32 % w) as f32, (i as u32 / w) as f32);
+        assert!(
+            box_.contains(x, y),
+            "the panel painted at {x},{y}, outside the box"
+        );
+        painted += 1;
+    }
+    assert!(painted > 0, "nothing was drawn for the panel");
 }

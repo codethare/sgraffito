@@ -251,6 +251,9 @@ fn render_frame(
 fn rail_state() -> Toolbar {
     Toolbar {
         more: false,
+        boards_open: false,
+        boards: Vec::new(),
+        shared: false,
         scrim: true,
         tool: Tool::Pen,
         color: "#e01b24",

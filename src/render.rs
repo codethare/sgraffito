@@ -53,13 +53,16 @@ const ICON_INSET: f32 = 7.0;
 /// Widest stretched block the damage accounting reserves room for, and the ceiling a label has
 /// to fit: the width of a block depends on the font, so the damage reserves this strip instead
 /// of the drawn rail. The strip is damaged whenever the rail changes, and joins a transient
-/// damage box that reaches it.
-const TOOLBAR_RESERVE: f32 = 224.0;
-/// Height of the whole column: twenty-one blocks, seventeen gaps inside the groups and three between
+/// damage box that reaches it. It also holds the line the `more` block shows while the pointer is
+/// on it, which names the drawer's controls — two of them now, so the room is the first control's
+/// phrase plus the second's, and a phrase that does not fit is not drawn rather than drawn outside
+/// the box.
+const TOOLBAR_RESERVE: f32 = 320.0;
+/// Height of the whole column: twenty-two blocks, seventeen gaps inside the groups and four between
 /// them, all fixed, so the column's height never depends on the font, unlike the width a stretched block
-/// takes. The drawer is a second column and adds nothing to this.
+/// takes. The panels are a second column and add nothing to this.
 const TOOLBAR_COLUMN: f32 =
-    2.0 * TOOLBAR_PAD + 21.0 * TOOLBAR_BLOCK + 17.0 * TOOLBAR_GAP + 3.0 * TOOLBAR_GROUP_GAP;
+    2.0 * TOOLBAR_PAD + 22.0 * TOOLBAR_BLOCK + 17.0 * TOOLBAR_GAP + 4.0 * TOOLBAR_GROUP_GAP;
 /// How far the drawer's column starts from the rail's.
 const TOOLBAR_DRAWER_X: f32 = TOOLBAR_BLOCK + TOOLBAR_GAP;
 const TOOLBAR_CACHE_CAP: usize = 16;
@@ -122,6 +125,12 @@ enum Icon {
     Note,
     More,
     Scrim,
+    /// The boards panel's block, and a board in its list.
+    Board,
+    /// `new board`.
+    Plus,
+    /// Every screen sharing one board.
+    Shared,
 }
 
 /// What a canvas coordinate has to be multiplied by to become a device pixel: the output's scale, and
@@ -200,6 +209,9 @@ fn key_of(action: ToolbarAction) -> &'static str {
         ToolbarAction::Tool(tool) => tool.key(),
         ToolbarAction::More => "M",
         ToolbarAction::Scrim => "B",
+        // The panel's own rows are picks out of the list the block opens, so they name that block's key.
+        ToolbarAction::Boards | ToolbarAction::Board(_) | ToolbarAction::NewBoard => "C",
+        ToolbarAction::Shared => "F",
         ToolbarAction::Color(index) => ["1", "2", "3", "4", "5"].get(index).copied().unwrap_or("?"),
         ToolbarAction::SizeStep(dir) => {
             if dir < 0.0 {
@@ -289,6 +301,18 @@ fn toolbar_blocks(toolbar: &Toolbar) -> Vec<Block> {
         active: false,
         gap: TOOLBAR_GROUP_GAP,
     });
+    // Boards are their own group: what is drawn on the wallpaper is one thing, which document it belongs
+    // to another, so the block that lists them sits apart from the tools rather than among them.
+    blocks.push(Block {
+        mark: Mark::Icon(Icon::Board),
+        column: 0,
+        label: labelled(ToolbarAction::Boards, "boards"),
+        action: Some(ToolbarAction::Boards),
+        // No state mark while its panel is open, for the same reason `more` takes none: the panel is that
+        // state, and a second signal would put two accented blocks on the screen at once.
+        active: false,
+        gap: TOOLBAR_GROUP_GAP,
+    });
     // The block that opens the drawer sits at the foot of the rail and before `Esc`, so the rail's
     // order and its "Esc is last" property are unchanged.
     blocks.push(Block {
@@ -312,10 +336,11 @@ fn toolbar_blocks(toolbar: &Toolbar) -> Vec<Block> {
         active: false,
         gap: 0.0,
     });
-    // The drawer: a second column for the controls that are not used often. Its own height is whatever
-    // its residents need, so the rail's height is the same whether it is open or closed.
-    if toolbar.more {
-        blocks.extend(drawer_blocks(toolbar));
+    // The open panel: a second column for the controls that are not used often, or for the document's
+    // boards. Its own height is whatever its rows need, so the rail's height is the same whether it is
+    // open or closed — and `TOOLBAR_COLUMN` never depends on how many boards there are.
+    if let Some((_, rows)) = open_panel(toolbar) {
+        blocks.extend(rows);
     }
     blocks
 }
@@ -323,26 +348,45 @@ fn toolbar_blocks(toolbar: &Toolbar) -> Vec<Block> {
 /// The controls the drawer holds: the rail has no room for them, so they live in the list the `more`
 /// block opens. This is the one list of who they are — `drawer_blocks` is what they look like — so the
 /// rules that open and close the drawer cannot disagree with what it shows.
-pub const DRAWER: [ToolbarAction; 1] = [ToolbarAction::Scrim];
+pub const DRAWER: [ToolbarAction; 2] = [ToolbarAction::Scrim, ToolbarAction::Shared];
 
-/// Whether applying `action` is picking something out of the drawer, which closes it: a list is opened to
-/// pick from, not to look at.
-pub fn picks_from_drawer(action: ToolbarAction) -> bool {
-    DRAWER.contains(&action)
+/// How many boards the panel lists before the rest are only reachable from the command line. The rail
+/// declares a fixed box for damage accounting and a frame that repaints only the rail has to repaint the
+/// whole panel inside it, so the panel cannot grow with the document.
+pub const MAX_BOARD_ROWS: usize = 8;
+
+/// The panel that is open, and the block that opened it: one panel at a time, so one owner and one list.
+fn open_panel(toolbar: &Toolbar) -> Option<(ToolbarAction, Vec<Block>)> {
+    if toolbar.boards_open {
+        Some((ToolbarAction::Boards, board_rows(toolbar)))
+    } else if toolbar.more {
+        Some((ToolbarAction::More, drawer_blocks(toolbar)))
+    } else {
+        None
+    }
 }
 
-/// Whether the drawer stays open with the pointer on `hover`: on the block that opened it, or on one of
-/// its own controls. Anywhere else — including off the rail entirely — closes it, so the list never sits
-/// open beside the rail while the pointer is somewhere else.
-pub fn drawer_stays_open(hover: Option<ToolbarAction>) -> bool {
-    hover == Some(ToolbarAction::More) || hover.is_some_and(picks_from_drawer)
+/// Whether applying `action` is picking something out of a panel, which closes it: a list is opened to
+/// pick from, not to look at.
+pub fn picks_from_panel(action: ToolbarAction) -> bool {
+    DRAWER.contains(&action) || matches!(action, ToolbarAction::Board(_) | ToolbarAction::NewBoard)
+}
+
+/// Whether the open panel stays open with the pointer on `hover`: on the block that opened it, or on one
+/// of its own rows. Anywhere else — including off the rail entirely — closes it, so a list never sits open
+/// beside the rail while the pointer is somewhere else.
+pub fn panel_stays_open(hover: Option<ToolbarAction>, owner: Option<ToolbarAction>) -> bool {
+    match owner {
+        Some(owner) => hover == Some(owner) || hover.is_some_and(picks_from_panel),
+        None => false,
+    }
 }
 
 /// The drawer's residents: the controls the rail has no room for. Their own height is what the drawer's
 /// column is, and this one list is what the drawer shows, what the `more` block says is in there, and what
 /// the rules that open and close it are built from.
 fn drawer_blocks(toolbar: &Toolbar) -> Vec<Block> {
-    DRAWER
+    let rows: Vec<Block> = DRAWER
         .iter()
         .filter_map(|action| match action {
             ToolbarAction::Scrim => Some(Block {
@@ -358,11 +402,56 @@ fn drawer_blocks(toolbar: &Toolbar) -> Vec<Block> {
                 ),
                 action: Some(*action),
                 active: toolbar.scrim,
-                gap: 0.0,
+                gap: TOOLBAR_GAP,
+            }),
+            ToolbarAction::Shared => Some(Block {
+                mark: Mark::Icon(Icon::Shared),
+                column: 1,
+                label: labelled(
+                    *action,
+                    if toolbar.shared {
+                        "boards: every screen"
+                    } else {
+                        "boards: this screen"
+                    },
+                ),
+                action: Some(*action),
+                active: toolbar.shared,
+                gap: TOOLBAR_GAP,
             }),
             _ => None,
         })
-        .collect()
+        .collect();
+    rows
+}
+
+/// The boards panel's rows: one per board stating its name, the board this output shows accent-filled,
+/// and `new board` last. A board row says its name and no key: every one of them is picked from the list
+/// the `boards` block opened, so a key on the row would repeat the block's own.
+fn board_rows(toolbar: &Toolbar) -> Vec<Block> {
+    let mut rows: Vec<Block> = toolbar
+        .boards
+        .iter()
+        .take(MAX_BOARD_ROWS)
+        .enumerate()
+        .map(|(index, board)| Block {
+            mark: Mark::Icon(Icon::Board),
+            column: 1,
+            label: board.name.clone(),
+            action: Some(ToolbarAction::Board(index)),
+            active: board.current,
+            gap: TOOLBAR_GAP,
+        })
+        .collect();
+    rows.push(Block {
+        mark: Mark::Icon(Icon::Plus),
+        column: 1,
+        label: "new board".into(),
+        action: Some(ToolbarAction::NewBoard),
+        active: false,
+        gap: TOOLBAR_GAP,
+    });
+    rows
 }
 
 /// What the `more` block reports while the pointer is on it: what is in the drawer, or `None` while the
@@ -1138,6 +1227,11 @@ impl Renderer {
             if control.stretched
                 && control.block.action == Some(ToolbarAction::More)
                 && let Some(legend) = drawer_legend(toolbar)
+                // The legend is not a block's label, so it carries the same ceiling by hand: a line wider
+                // than the room the rail declares would be left behind by a frame that repaints only the
+                // rail, which is what the box is for.
+                && self.text_width(&legend, TOOLBAR_TEXT_SIZE)
+                    <= toolbar_ceiling(pixmap.width() as f32 / scale) - TOOLBAR_DRAWER_X
             {
                 let item = toolbar_text(
                     ox + TOOLBAR_DRAWER_X,
@@ -1203,7 +1297,7 @@ impl Renderer {
             self.toolbar_cache.remove(0);
         }
         self.toolbar_cache.push(CachedToolbar {
-            toolbar: *toolbar,
+            toolbar: toolbar.clone(),
             surface,
             pill: pill.clone(),
         });
@@ -1214,14 +1308,17 @@ impl Renderer {
     /// block is a square, and a block only stretches when its meaning fits the room the damage
     /// accounting reserves for the rail.
     fn toolbar_pill(&mut self, toolbar: &Toolbar, surface: f32) -> ToolbarPill {
-        let ceiling = (surface - 2.0 * TOOLBAR_MARGIN).min(TOOLBAR_RESERVE);
+        let ceiling = toolbar_ceiling(surface);
         let mut controls = Vec::new();
         let mut hits = Vec::new();
         // The drawer is the `more` block's own list, so its column starts on that block's row and grows
         // upwards when the rows below would not hold it — the way a menu at the bottom of a window opens
         // upwards. Starting at the top of the column instead left a control the rail has no room for
         // sitting far from the block that owns it, with nothing saying the two belong together.
-        let residents: Vec<Block> = drawer_blocks(toolbar);
+        let open = open_panel(toolbar);
+        let owner = open.as_ref().map(|(owner, _)| *owner);
+        let panel_open = open.is_some();
+        let residents: Vec<Block> = open.map_or_else(Vec::new, |(_, rows)| rows);
         let residents_h = residents
             .iter()
             .map(|block| TOOLBAR_BLOCK + block.gap)
@@ -1232,8 +1329,8 @@ impl Renderer {
         // the panel starts at the top of the column and grows down, which is the one case where it can
         // reach the block's row. One `panel_top` for both the rows below and the corridor's box, so the two
         // cannot drift apart.
-        let panel_top = |more_y: f32| (more_y - TOOLBAR_GAP - residents_h).max(TOOLBAR_PAD);
-        let mut more_y: Option<f32> = None;
+        let panel_top = |owner_y: f32| (owner_y - TOOLBAR_GAP - residents_h).max(TOOLBAR_PAD);
+        let mut owner_y: Option<f32> = None;
         let mut panel: Option<Rect> = None;
         // One row counter per column: the drawer is a second column, so a block in it starts at the
         // top of its own column and leaves the rail's height alone.
@@ -1241,7 +1338,7 @@ impl Renderer {
         for block in toolbar_blocks(toolbar) {
             let column = block.column as usize;
             if column == 1
-                && let Some(row) = more_y
+                && let Some(row) = owner_y
             {
                 y[column] = y[column].max(panel_top(row));
             }
@@ -1275,7 +1372,7 @@ impl Renderer {
                 // crossing a region that owns nothing and would close the panel on the way. It stops at
                 // that edge because a hit box reaching into the panel would win over the panel's rows:
                 // the rail's boxes are the ones tested first.
-                let w = if toolbar.more && action == ToolbarAction::More {
+                let w = if owner == Some(action) {
                     TOOLBAR_DRAWER_X
                 } else {
                     width
@@ -1290,7 +1387,7 @@ impl Renderer {
                     action,
                 ));
             }
-            if block.column == 1 && panel.is_none() {
+            if block.column == 1 && panel.is_none() && panel_open {
                 // The plate's own box, from the same `y[1]` the rows are laid out at: what is painted and
                 // what is hit are one geometry.
                 panel = Some(Rect {
@@ -1300,8 +1397,8 @@ impl Renderer {
                     h: residents_h + 2.0 * TOOLBAR_PAD,
                 });
             }
-            if block.action == Some(ToolbarAction::More) {
-                more_y = Some(y[column]);
+            if block.action == owner {
+                owner_y = Some(y[column]);
             }
             controls.push(Control {
                 block,
@@ -1780,6 +1877,9 @@ fn same_layout(a: &Toolbar, b: &Toolbar) -> bool {
         && a.size == b.size
         && a.hover == b.hover
         && a.more == b.more
+        && a.boards_open == b.boards_open
+        && a.boards == b.boards
+        && a.shared == b.shared
         && a.scrim == b.scrim
 }
 
@@ -1814,6 +1914,12 @@ fn toolbar_text(x: f32, top: f32, height: f32, size: f32, color: &str, text: &st
         size,
         text: text.into(),
     }
+}
+
+/// The room a stretched block may take, from the rail's own edge: bounded by the output's width and by the
+/// reserve the damage accounting holds, so nothing the rail draws reaches past the box it declares.
+fn toolbar_ceiling(surface: f32) -> f32 {
+    (surface - 2.0 * TOOLBAR_MARGIN).min(TOOLBAR_RESERVE)
 }
 
 /// Where the rail sits on an output of this logical height: `TOOLBAR_MARGIN` from the left edge,
@@ -2201,6 +2307,44 @@ fn draw_icon(pixmap: &mut PixmapMut, icon: Icon, square: Rect, scale: f32, color
             path.line_to(x + arm, y + top);
             path.cubic_to(x + arm, y + arc, x + w - arm, y + arc, x + w - arm, y + top);
             path.line_to(x + w - arm, y + h * 0.45);
+        }
+        Icon::Board => {
+            // Two plates, one behind the other: a drawing that is not the screen it is shown on.
+            for (dx, dy) in [(0.0, 0.3), (0.3, 0.0)] {
+                if let Some(plate) = rounded_rect_path(
+                    Rect {
+                        x: x + w * dx * 0.6,
+                        y: y + h * dy * 0.6,
+                        w: w * 0.7,
+                        h: h * 0.7,
+                    },
+                    2.0 * scale,
+                ) {
+                    path.push_path(&plate);
+                }
+            }
+        }
+        Icon::Plus => {
+            path.move_to(x + w / 2.0, y + h * 0.2);
+            path.line_to(x + w / 2.0, y + h * 0.8);
+            path.move_to(x + w * 0.2, y + h / 2.0);
+            path.line_to(x + w * 0.8, y + h / 2.0);
+        }
+        Icon::Shared => {
+            // The same plate side by side with itself: one board on two screens.
+            for dx in [0.0, 0.44] {
+                if let Some(plate) = rounded_rect_path(
+                    Rect {
+                        x: x + w * dx,
+                        y: y + h * 0.15,
+                        w: w * 0.56,
+                        h: h * 0.7,
+                    },
+                    2.0 * scale,
+                ) {
+                    path.push_path(&plate);
+                }
+            }
         }
         // Drawn by the branches above.
         Icon::Pen
@@ -2609,16 +2753,25 @@ mod tests {
         }
         // Picking one of them closes the drawer; picking anything else leaves the rule out of it.
         for action in DRAWER {
-            assert!(picks_from_drawer(action));
+            assert!(picks_from_panel(action));
         }
-        assert!(!picks_from_drawer(ToolbarAction::More));
-        assert!(!picks_from_drawer(ToolbarAction::Tool(Tool::Pen)));
+        assert!(!picks_from_panel(ToolbarAction::More));
+        assert!(!picks_from_panel(ToolbarAction::Tool(Tool::Pen)));
         // And it stays open only while the pointer is on the block or on its own controls.
-        assert!(drawer_stays_open(Some(ToolbarAction::More)));
-        assert!(drawer_stays_open(Some(DRAWER[0])));
-        assert!(!drawer_stays_open(None));
-        assert!(!drawer_stays_open(Some(ToolbarAction::Tool(Tool::Pen))));
-        assert!(!drawer_stays_open(Some(ToolbarAction::Color(0))));
+        assert!(panel_stays_open(
+            Some(ToolbarAction::More),
+            Some(ToolbarAction::More)
+        ));
+        assert!(panel_stays_open(Some(DRAWER[0]), Some(ToolbarAction::More)));
+        assert!(!panel_stays_open(None, Some(ToolbarAction::More)));
+        assert!(!panel_stays_open(
+            Some(ToolbarAction::Tool(Tool::Pen)),
+            Some(ToolbarAction::More)
+        ));
+        assert!(!panel_stays_open(
+            Some(ToolbarAction::Color(0)),
+            Some(ToolbarAction::More)
+        ));
     }
 
     /// The panel hangs off the block that opens it and never shares that block's band, and its plate is the
@@ -2724,18 +2877,52 @@ mod tests {
         );
     }
 
+    /// The panel lists at most what the rail's box can hold, and always the row that creates a board:
+    /// the damage box is fixed, so a document with a hundred boards cannot grow the panel past it.
     #[test]
-    fn zz_dump_rail_rows() {
-        let mut renderer = Renderer::new();
-        let pill = renderer.toolbar_pill(&crate::render::tests::rail_for_legend(), 900.0);
-        for control in &pill.controls {
-            if control.block.column == 0
-                && let Some(action) = control.block.action
-            {
-                eprintln!("ROW {:?} y={} width={}", action, control.y, control.width);
-            }
-        }
-        eprintln!("COLUMN {}", TOOLBAR_COLUMN);
+    fn the_boards_panel_is_capped() {
+        let toolbar = Toolbar {
+            boards_open: true,
+            boards: (0..MAX_BOARD_ROWS + 4)
+                .map(|i| crate::canvas::BoardRow {
+                    name: format!("board {i}"),
+                    current: i == 0,
+                })
+                .collect(),
+            ..crate::render::tests::rail_for_legend()
+        };
+        let rows = board_rows(&toolbar);
+        assert_eq!(rows.len(), MAX_BOARD_ROWS + 1);
+        assert_eq!(
+            rows.last().and_then(|row| row.action),
+            Some(ToolbarAction::NewBoard),
+            "the row that creates a board is the one that must survive the cap"
+        );
+        assert_eq!(rows[0].action, Some(ToolbarAction::Board(0)));
+        assert!(rows[0].active, "the board on screen is marked");
+    }
+
+    /// A different list of boards is a different rail: reusing the previous layout would draw the panel
+    /// with the rows of a board that is no longer there, and make those rows unclickable.
+    #[test]
+    fn a_changed_board_list_is_a_different_layout() {
+        let rail = |name: &str, open: bool| Toolbar {
+            boards_open: open,
+            boards: vec![crate::canvas::BoardRow {
+                name: name.into(),
+                current: true,
+            }],
+            ..crate::render::tests::rail_for_legend()
+        };
+        assert!(same_layout(&rail("office", true), &rail("office", true)));
+        assert!(
+            !same_layout(&rail("office", true), &rail("desk", true)),
+            "a renamed list reused the layout"
+        );
+        assert!(
+            !same_layout(&rail("office", true), &rail("office", false)),
+            "a shut panel reused the open one's layout"
+        );
     }
 
     /// The `more` block reports the drawer's own controls, and only while the drawer is shut: its one
@@ -2772,6 +2959,9 @@ mod tests {
             hover: None,
             grow: 0.0,
             more: false,
+            boards_open: false,
+            boards: Vec::new(),
+            shared: false,
             scrim: true,
         }
     }
@@ -3056,6 +3246,9 @@ mod tests {
                 hover: None,
                 grow: 1.0,
                 more: false,
+                boards_open: false,
+                boards: Vec::new(),
+                shared: false,
                 scrim: true,
             }),
             ..Default::default()
@@ -3392,6 +3585,9 @@ mod tests {
             hover: None,
             grow: 1.0,
             more: false,
+            boards_open: false,
+            boards: Vec::new(),
+            shared: false,
             scrim: true,
         }
     }
@@ -3402,6 +3598,7 @@ mod tests {
         // 30 pt block with a 1.5 pt stroke has to carry ink at both.
         let rail = rail_state();
         for scale in [1.0, 2.0] {
+            let rail = rail.clone();
             // Logical size, and the device buffer the renderer is given for it.
             let (w, h) = (640.0, 1600.0);
             let (wd, hd) = ((w * scale) as u32, (h * scale) as u32);
@@ -3445,7 +3642,7 @@ mod tests {
                 assert!(ink > 0, "{icon:?} drew nothing at scale {scale}");
             }
             assert_eq!(
-                icons, 15,
+                icons, 16,
                 "every function has an icon, and only functions do"
             );
         }
@@ -3519,10 +3716,12 @@ mod tests {
             "H" => Some(Keysym::H),
             "N" => Some(Keysym::N),
             "M" => Some(Keysym::M),
+            "C" => Some(Keysym::C),
+            "F" => Some(Keysym::F),
             _ => None,
         };
         let blocks = toolbar_blocks(&rail_state());
-        assert_eq!(blocks.len(), 21);
+        assert_eq!(blocks.len(), 22);
         let mut stated = 0;
         for block in &blocks {
             let Some(action) = block.action else {
@@ -3550,11 +3749,22 @@ mod tests {
                 ToolbarAction::Scrim => {
                     panel_action_for_keysym(keysym) == Some(ToolbarAction::Scrim)
                 }
+                ToolbarAction::Boards => {
+                    panel_action_for_keysym(keysym) == Some(ToolbarAction::Boards)
+                }
+                ToolbarAction::Shared => {
+                    panel_action_for_keysym(keysym) == Some(ToolbarAction::Shared)
+                }
+                // A row of the boards panel states its name and no key: it is picked from the list the
+                // `boards` block opened, and that block carries the key.
+                ToolbarAction::Board(_) | ToolbarAction::NewBoard => {
+                    keysym == Keysym::C || keysym == Keysym::c
+                }
             };
             assert!(applies, "'{}' names a key that does not do it", block.label);
         }
-        // Twenty blocks apply something: five colours, eleven tools, two size steps, the drawer's
-        // control and lock. The backdrop's switch is in the drawer, which is closed in this rail.
-        assert_eq!(stated, 20);
+        // Twenty-one blocks apply something: five colours, eleven tools, two size steps, boards, the
+        // drawer's control and lock. Both panel switches are in the drawer, which is closed in this rail.
+        assert_eq!(stated, 21);
     }
 }
