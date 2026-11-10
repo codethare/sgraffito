@@ -96,13 +96,16 @@ const LINE_HEIGHT_SCALE: f32 = 1.2;
 
 /// What a block shows on its face. Exactly one of these is set: an icon of what the control does, a
 /// colour, or a value. A colour chip and the size readout are not functions, so they carry no icon.
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum Mark {
     Icon(Icon),
     /// Palette index of a colour chip.
     Swatch(usize),
     /// A value as a bare number.
     Value(String),
+    /// Nothing on its face: a row of names has nothing to show but the name, and a repeated glyph beside
+    /// every one of them is an icon the reader has to identify before they can read the list.
+    None,
 }
 
 /// The rail's icon set. Every one is drawn as geometry, never as a glyph: a symbol font is a
@@ -227,6 +230,18 @@ fn key_of(action: ToolbarAction) -> &'static str {
 /// What a block says when the pointer is on it, ending with the key that applies the same thing.
 fn labelled(action: ToolbarAction, what: &str) -> String {
     format!("{what} ({})", key_of(action))
+}
+
+/// Where a block's text starts, relative to the rail's origin: after that block's own square and the gap, and
+/// — for a row of names, which has no square — a pad inside its own capsule. It used to be measured from the
+/// rail's own edge whatever column the block was in, so a panel row's text began inside its own icon and the
+/// icon covered the first glyphs of every name in the list.
+fn label_x(column_x: f32, bare: bool) -> f32 {
+    if bare {
+        column_x + TOOLBAR_LABEL_PAD
+    } else {
+        column_x + TOOLBAR_BLOCK + TOOLBAR_LABEL_GAP
+    }
 }
 
 /// The blocks of the rail, top to bottom: the palette, the tools, the size control and `Esc`.
@@ -435,7 +450,7 @@ fn board_rows(toolbar: &Toolbar) -> Vec<Block> {
         .take(MAX_BOARD_ROWS)
         .enumerate()
         .map(|(index, board)| Block {
-            mark: Mark::Icon(Icon::Board),
+            mark: Mark::None,
             column: 1,
             label: board.name.clone(),
             action: Some(ToolbarAction::Board(index)),
@@ -502,7 +517,7 @@ pub(crate) struct BaseLayer {
     key: Option<BaseKey>,
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 struct BaseKey {
     width: u32,
     height: u32,
@@ -1095,7 +1110,10 @@ impl Renderer {
         // transition only moves the capsule's trailing edge and the text that edge uncovers.
         let grow = toolbar.grow.clamp(0.0, 1.0);
         for control in &pill.controls {
-            let width = if control.stretched {
+            // Only a rail block's capsule opens under the pointer. A row of a panel states its name at rest,
+            // so it is always at its own width: animating it made every row of an open list grow again
+            // whenever the pointer moved from one row to the next.
+            let width = if control.stretched && control.block.column == 0 {
                 TOOLBAR_BLOCK + (control.width - TOOLBAR_BLOCK) * grow
             } else {
                 control.width
@@ -1193,13 +1211,14 @@ impl Renderer {
                                 None,
                             );
                         }
-                        Mark::Swatch(_) => {}
+                        Mark::Swatch(_) | Mark::None => {}
                     }
                 }
             }
-            if control.stretched && width > TOOLBAR_BLOCK + TOOLBAR_LABEL_GAP {
+            let bare = control.block.mark == Mark::None;
+            if (control.stretched || bare) && !control.block.label.is_empty() {
                 let item = toolbar_text(
-                    ox + TOOLBAR_BLOCK + TOOLBAR_LABEL_GAP,
+                    ox + label_x(column_x, bare),
                     oy + control.y,
                     TOOLBAR_BLOCK,
                     TOOLBAR_TEXT_SIZE,
@@ -1216,7 +1235,9 @@ impl Renderer {
                         view: View::default(),
                     },
                     None,
-                    Some(ox + width),
+                    // The clip that uncovers the text as the capsule opens is measured from the block's own
+                    // column too, or a panel row's name is cut off 34 points before the end of its capsule.
+                    Some(ox + column_x + width),
                     None,
                 );
             }
@@ -1355,6 +1376,7 @@ impl Renderer {
             // drawer states its name and key whether or not the pointer is on it: a menu row is read and
             // chosen between, and a row that has to be hovered before it can be read has to be probed.
             let labelled = hovered || block.column == 1;
+            let bare = block.mark == Mark::None;
             let label = labelled.then(|| self.text_width(&block.label, TOOLBAR_TEXT_SIZE));
             // A row of the drawer starts a column to the right, so it has that much less of the reserve to
             // reach into: the reserve is the room a control may take from the rail's own edge, and
@@ -1365,6 +1387,11 @@ impl Renderer {
                 ceiling - TOOLBAR_DRAWER_X
             };
             let width = match label {
+                // A row of names has no square, so its capsule is the text and a pad on each side: the
+                // text is centred in the control rather than pushed against one end of it.
+                Some(label) if bare && label + 2.0 * TOOLBAR_LABEL_PAD <= ceiling => {
+                    label + 2.0 * TOOLBAR_LABEL_PAD
+                }
                 Some(label)
                     if TOOLBAR_BLOCK + TOOLBAR_LABEL_GAP + label + TOOLBAR_LABEL_PAD <= ceiling =>
                 {
@@ -2935,6 +2962,45 @@ mod tests {
         assert!(
             !same_layout(&rail("office", true), &rail("office", false)),
             "a shut panel reused the open one's layout"
+        );
+    }
+
+    /// A row of names states the name and nothing else: a glyph repeated beside every board is an icon the
+    /// reader has to identify before they can read the list, and it was covering the first glyphs of the
+    /// name besides. The row that creates a board keeps its plus, which does say what it does.
+    #[test]
+    fn a_row_of_boards_states_its_name_and_no_icon() {
+        let toolbar = Toolbar {
+            boards_open: true,
+            boards: vec![crate::canvas::BoardRow {
+                name: "office".into(),
+                current: true,
+            }],
+            ..crate::render::tests::rail_for_legend()
+        };
+        let rows = board_rows(&toolbar);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].mark, Mark::None, "a board row draws an icon");
+        assert_eq!(
+            rows[1].mark,
+            Mark::Icon(Icon::Plus),
+            "the row that creates a board lost its plus"
+        );
+    }
+
+    /// A block's text starts after that block's own square — in the panel's column too, where measuring from
+    /// the rail's own edge put every name inside its icon — and a row of names, which has no square, starts
+    /// a pad inside its own capsule so the name is centred in it.
+    #[test]
+    fn a_labels_text_starts_after_its_own_block() {
+        assert_eq!(label_x(0.0, false), TOOLBAR_BLOCK + TOOLBAR_LABEL_GAP);
+        assert!(
+            label_x(TOOLBAR_DRAWER_X, false) >= TOOLBAR_DRAWER_X + TOOLBAR_BLOCK,
+            "a panel row's text starts inside its own square"
+        );
+        assert_eq!(
+            label_x(TOOLBAR_DRAWER_X, true),
+            TOOLBAR_DRAWER_X + TOOLBAR_LABEL_PAD
         );
     }
 
