@@ -33,15 +33,25 @@ const USAGE: &str = "\
 sgraffito — doodle and sticky notes on the Wayland wallpaper layer
 
 Usage:
-  sgraffito daemon    run the daemon in the foreground (start it from your compositor)
-  sgraffito toggle    switch between locked and edit mode
-  sgraffito edit      enter edit mode
-  sgraffito lock      go back to the locked mode
-  sgraffito clear     erase every annotation
+  sgraffito daemon             run the daemon in the foreground (start it from your compositor)
+  sgraffito toggle             switch between locked and edit mode
+  sgraffito edit               enter edit mode
+  sgraffito lock               go back to the locked mode
+  sgraffito clear              erase every annotation
+  sgraffito boards             list the boards, marking the one picked last
+  sgraffito board <name>       show a board on every screen
+  sgraffito board new [name]   create a board and show it
+  sgraffito share on|off       one board for every screen, or one board per screen
+
+Boards are what a drawing belongs to, so a drawing made on one screen is still there when only
+another one is connected: `sgraffito board office` before leaving the desk, and the laptop shows the
+office board next time it starts. The rail's `boards` block (C) picks a board in edit mode, and the
+drawer's `boards: every screen` row (F) decides whether a pick moves one screen or all of them.
 
 Compositor key binding example (sway):
   bindsym $mod+d exec sgraffito toggle
   bindsym $mod+Shift+d exec sgraffito clear
+  bindsym $mod+o exec sgraffito board office
 ";
 
 fn main() -> ExitCode {
@@ -52,6 +62,10 @@ fn main() -> ExitCode {
         Some("edit") => send_command("edit"),
         Some("lock") => send_command("lock"),
         Some("clear") => send_command("clear"),
+        Some("boards") => list_boards(),
+        // The rest of the line is the command: a board name keeps its spaces, and `board new` takes the
+        // rest of the line as the name it creates.
+        Some("board") | Some("share") => send_command(&args.join(" ")),
         Some(other) => {
             eprintln!("unknown subcommand '{other}'");
             print!("{USAGE}");
@@ -78,7 +92,9 @@ fn socket_path() -> anyhow::Result<PathBuf> {
     Ok(PathBuf::from(dir).join("sgraffito.sock"))
 }
 
-fn send_command(cmd: &str) -> anyhow::Result<()> {
+/// One request to the daemon, returning its reply line. The reply is one line starting with `ok` or
+/// `error:`; an error is this CLI's error too, because a command that failed must not exit zero.
+fn request(cmd: &str) -> anyhow::Result<String> {
     let path = socket_path()?;
     let mut stream = UnixStream::connect(&path).map_err(|e| {
         anyhow::anyhow!(
@@ -96,7 +112,29 @@ fn send_command(cmd: &str) -> anyhow::Result<()> {
     if !response.starts_with("ok") {
         anyhow::bail!("{cmd} got an unexpected response '{response}'");
     }
-    println!("{response}");
+    Ok(response.to_string())
+}
+
+fn send_command(cmd: &str) -> anyhow::Result<()> {
+    println!("{}", request(cmd)?);
+    Ok(())
+}
+
+/// `boards` answers one line of tab-separated names with `*` on the board picked last. A list is read
+/// one line per board rather than as a sentence, so the marker is printed in front of the name.
+fn list_boards() -> anyhow::Result<()> {
+    let response = request("boards")?;
+    let list = response.strip_prefix("ok").unwrap_or_default().trim();
+    if list.is_empty() {
+        println!("no boards yet");
+        return Ok(());
+    }
+    for entry in list.split('\t').filter(|entry| !entry.is_empty()) {
+        match entry.strip_prefix('*') {
+            Some(name) => println!("* {name}"),
+            None => println!("  {entry}"),
+        }
+    }
     Ok(())
 }
 

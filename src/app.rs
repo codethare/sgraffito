@@ -112,23 +112,61 @@ impl Mode {
 }
 
 /// A single command line from the control socket.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Toggle,
     Edit,
     Lock,
     Clear,
+    /// Switch every output to the named board.
+    Board(String),
+    /// Create a board — one `Board N` when no name is given — and switch every output to it.
+    NewBoard(Option<String>),
+    /// List every board, with the one picked last marked.
+    Boards,
+    /// Whether every screen shows the board picked on any of them.
+    Share(bool),
 }
 
 impl Command {
     pub fn parse(line: &str) -> Result<Self, String> {
-        match line.trim() {
+        let line = line.trim();
+        match line {
             "toggle" => Ok(Command::Toggle),
             "edit" => Ok(Command::Edit),
             "lock" => Ok(Command::Lock),
             "clear" => Ok(Command::Clear),
+            "boards" => Ok(Command::Boards),
             "" => Err("empty command".into()),
-            other => Err(format!("unknown command '{other}'")),
+            other => {
+                if let Some(rest) = other.strip_prefix("board ") {
+                    let rest = rest.trim();
+                    if rest.is_empty() {
+                        return Err("board needs a name, or 'board new'".into());
+                    }
+                    // `new` is a word of its own: a board called `newton` is a board.
+                    let created = rest.strip_prefix("new").and_then(|after| match after {
+                        "" => Some(""),
+                        _ => after.strip_prefix(' '),
+                    });
+                    return Ok(match created {
+                        Some("") => Command::NewBoard(None),
+                        Some(name) => Command::NewBoard(Some(name.trim().to_string())),
+                        None => Command::Board(rest.to_string()),
+                    });
+                }
+                if let Some(rest) = other.strip_prefix("share ") {
+                    return match rest.trim() {
+                        "on" => Ok(Command::Share(true)),
+                        "off" => Ok(Command::Share(false)),
+                        _ => Err("share takes 'on' or 'off'".into()),
+                    };
+                }
+                if other == "share" {
+                    return Err("share takes 'on' or 'off'".into());
+                }
+                Err(format!("unknown command '{other}'"))
+            }
         }
     }
 }
@@ -140,6 +178,10 @@ pub struct Output {
     /// The board this output shows. It is the document's key for everything drawn here, which is what
     /// lets two outputs read one board and lets a board outlive the output that was showing it.
     board: String,
+    /// Whether that board was chosen rather than adopted. A name that arrives after the surface was made
+    /// may still put the output back on the board named after it — which is how a file written before
+    /// boards existed gives each screen its own drawing back — but never moves a board somebody picked.
+    board_picked: bool,
     surface: wl_surface::WlSurface,
     layer: LayerSurface,
     width: u32,
@@ -496,6 +538,7 @@ impl App {
                 output,
                 name,
                 board,
+                board_picked: false,
                 surface,
                 layer,
                 width: 0,
@@ -552,10 +595,11 @@ impl App {
             let Some(old) = self.outputs.remove(&key) else {
                 continue;
             };
-            let (was_configured, name, board, view, output) = (
+            let (was_configured, name, board, board_picked, view, output) = (
                 old.configured,
                 old.name.clone(),
                 old.board.clone(),
+                old.board_picked,
                 old.view,
                 old.output.clone(),
             );
@@ -567,6 +611,7 @@ impl App {
                 // The board this output was showing is what it goes on showing: a new surface adopts a
                 // board for a screen that has just appeared, and this is not that.
                 out.board = board;
+                out.board_picked = board_picked;
                 // The view is where the user was looking, and recreating a surface is not a reason to
                 // send them back to the origin.
                 out.view = view;
@@ -858,6 +903,7 @@ impl App {
                 continue;
             }
             out.board = name.to_string();
+            out.board_picked = true;
             out.cache.invalidate();
             out.dirty = true;
             out.pending = None;
@@ -879,24 +925,28 @@ impl App {
         name
     }
 
-    /// Turn the shared mode on or off. On adopts the focused output's board on every output — that is the
-    /// drawing in front of the person switching, and the keyboard is where the pointer's picks act too —
-    /// falling back to the first output when the compositor has given the keyboard to nobody. Off changes
-    /// no board: the screens are equal at that instant and may diverge afterwards.
-    pub(crate) fn toggle_shared(&mut self) {
+    /// Switch the shared mode on or off. On adopts the focused output's board on every output — that is
+    /// the drawing in front of the person switching, and the keyboard is where the pointer's picks act
+    /// too — falling back to the first output when the compositor has given the keyboard to nobody. Off
+    /// changes no board: the screens are equal at that instant and may diverge afterwards.
+    pub(crate) fn set_shared(&mut self, on: bool) {
         let board = self
             .keyboard_focus
             .and_then(|key| self.outputs.get(&key))
             .or_else(|| self.outputs.values().next())
             .map(|out| out.board.clone());
-        self.shared = !self.shared;
+        self.shared = on;
         // `switch_board` reads the mode to decide who moves, so the mode is set first: switched on, the
         // pick then reaches every screen.
-        if let (true, Some(board)) = (self.shared, board) {
+        if let (true, Some(board)) = (on, board) {
             self.switch_board(None, &board);
             return;
         }
         self.refresh_toolbar();
+    }
+
+    pub(crate) fn toggle_shared(&mut self) {
+        self.set_shared(!self.shared);
     }
 
     /// Push the current toolbar into every output's transient overlay. The rail lives in the
@@ -2169,13 +2219,61 @@ impl App {
                 self.set_mode(Mode::Locked);
                 "ok".into()
             }
+            Command::Boards => {
+                // One line, tab-separated, with `*` on the board picked last: the reply protocol is one
+                // line, and a tab keeps a board's own name whole even when it holds spaces.
+                let mut line = String::from("ok");
+                for name in self.doc.names() {
+                    line.push('\t');
+                    if *name == self.doc.active {
+                        line.push('*');
+                    }
+                    line.push_str(name);
+                }
+                line
+            }
+            Command::Board(name) => {
+                if self.switch_board(None, &name) {
+                    "ok".into()
+                } else {
+                    format!("error: no board named '{name}'")
+                }
+            }
+            Command::NewBoard(name) => {
+                let Some(name) = name else {
+                    let name = self.new_board(None);
+                    return format!("ok {name}");
+                };
+                let name = name.trim().to_string();
+                if name.is_empty() {
+                    return "error: a board needs a name".into();
+                }
+                if self.doc.boards.contains_key(&name) {
+                    return format!("error: a board named '{name}' already exists");
+                }
+                // A named board is content like an auto-named one: the file has to hold it or it is gone
+                // the next time the daemon starts.
+                self.doc.boards.insert(name.clone(), Board::default());
+                self.store.mark_dirty(Instant::now());
+                self.switch_board(None, &name);
+                format!("ok {name}")
+            }
+            Command::Share(on) => {
+                self.set_shared(on);
+                "ok".into()
+            }
             Command::Clear => {
                 self.end_text_edit();
                 // `clear` empties the document, so a gesture still holding elements of it is
                 // dropped: writing it would put back what this command just removed.
                 self.gesture = None;
                 self.cancel_transients();
-                self.doc.boards.clear();
+                // Every board keeps its name and is emptied: a board is where a drawing lives, and `clear`
+                // erases what is drawn, not the list of places to draw on. The rail goes on listing the
+                // same boards, which is also what makes the command safe to run from a key binding.
+                for board in self.doc.boards.values_mut() {
+                    *board = Board::default();
+                }
                 self.invalidate_text_caches();
                 self.mark_all_dirty();
                 let _ = self.connection.flush();
@@ -2290,6 +2388,14 @@ impl App {
             return;
         };
         if out.name != name {
+            // The name a surface was made for is not always there when it is made — a `wl_output` burst
+            // can announce the output before it names it — so the board is adopted here as well, and
+            // only ever from a board named after this output and only when nobody has picked one. That
+            // is what tells a version 3 file's `HEADLESS-1` bucket from the same screen's drawing.
+            if !out.board_picked && out.board != name && self.doc.boards.contains_key(&name) {
+                out.board = name.clone();
+                out.cache.invalidate();
+            }
             out.name = name;
             out.dirty = true;
             self.dirty = true;

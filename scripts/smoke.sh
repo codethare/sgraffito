@@ -206,8 +206,11 @@ python3 -c "
 import json,os
 p=os.environ['XDG_DATA_HOME']+'/sgraffito/annotations.json'
 d=json.load(open(p))
-assert d['version']==3, d['version']
-assert d['outputs']=={}, d
+assert d['version']==4, d['version']
+# The seed file is version 3, so this is the migration as well: each old output bucket came back as a
+# board of the same name, and `clear` emptied them without forgetting the names.
+assert sorted(d['boards'])==['HEADLESS-1','HEADLESS-2'], sorted(d['boards'])
+assert all(not b.get(k) for b in d['boards'].values() for k in ('strokes','texts','shapes','notes')), d
 print('  file empty after clear ok')
 "
 grim -t ppm "$work/clear.ppm" 2>/dev/null
@@ -219,6 +222,27 @@ ink = sum(1 for j in range(0, len(px), 3) if max(px[j:j+3]) > 20)
 assert ink == 0, f"the screen still has content after clear (ink={ink})"
 print("  screen empty after clear ok")
 PY
+
+# 4b. the boards are reachable from the command line, which is the only way in while locked: the locked
+# surface is click-through and has no rail to click.
+"$bin" boards | grep -q 'HEADLESS-1' || fail "boards did not list the board the seed file named"
+"$bin" board new office | grep -q '^ok office' || fail "board new did not create and pick a board"
+"$bin" boards | grep -q '^\* office' || fail "the created board is not the one picked"
+if "$bin" board nope 2>/dev/null; then fail "switching to a board that does not exist succeeded"; fi
+"$bin" share on > /dev/null || fail "share on failed"
+"$bin" share off > /dev/null || fail "share off failed"
+sleep 1.2
+python3 -c "
+import json,os
+p=os.environ['XDG_DATA_HOME']+'/sgraffito/annotations.json'
+d=json.load(open(p))
+assert 'office' in d['boards'], sorted(d['boards'])
+assert d['active']=='office', d['active']
+assert not d['boards']['HEADLESS-1'].get('strokes'), 'clear left a stroke behind'
+print('  board commands ok')
+"
+# Back to the board the seed file filled, because the stages below draw on HEADLESS-1 and read it there.
+"$bin" board HEADLESS-1 > /dev/null || fail "switching back to HEADLESS-1 failed"
 
 # 5. injected pointer input. A headless seat has no pointer at all, so the paths only a pointer reaches —
 # the hover, a click on a block, a drag that draws, the eraser's hit test, a note's own drag, a selection
@@ -239,7 +263,7 @@ annotations="$XDG_DATA_HOME/sgraffito/annotations.json"
 kinds() {
     python3 -c "
 import json
-ann = json.load(open('$annotations'))['outputs'].get('HEADLESS-1', {})
+ann = json.load(open('$annotations'))['boards'].get('HEADLESS-1', {})
 print(' '.join(f'{kind}={len(ann.get(kind, []))}' for kind in ('strokes', 'texts', 'shapes', 'notes')))
 "
 }
@@ -255,7 +279,7 @@ VINJECT
 [ "$(kinds)" = "strokes=1 texts=0 shapes=0 notes=0" ] || fail "the injected drag left $(kinds)"
 python3 - "$annotations" <<PY || exit 1
 import json, sys
-stroke = json.load(open(sys.argv[1]))["outputs"]["HEADLESS-1"]["strokes"][0]
+stroke = json.load(open(sys.argv[1]))["boards"]["HEADLESS-1"]["strokes"][0]
 assert stroke["color"] == "#3584e4", f"the colour chip did not arm: {stroke['color']}"
 first, last = stroke["points"][0], stroke["points"][-1]
 assert abs(first[0] - 50) < 8 and abs(last[1] - 420) < 8, stroke["points"]
@@ -294,7 +318,7 @@ VINJECT
 grep -q "tool switched to Note" "$work/daemon.log" || fail "the note's block was not clicked"
 python3 - "$annotations" <<PY || exit 1
 import json, sys
-notes = json.load(open(sys.argv[1]))["outputs"]["HEADLESS-1"]["notes"]
+notes = json.load(open(sys.argv[1]))["boards"]["HEADLESS-1"]["notes"]
 assert len(notes) == 1, f"{len(notes)} notes"
 note = notes[0]
 for field, want in (("x", 120), ("y", 120), ("w", 180), ("h", 140)):
@@ -312,7 +336,7 @@ VINJECT
 grep -q "tool switched to Selection" "$work/daemon.log" || fail "the selection's block was not clicked"
 python3 - "$annotations" <<PY || exit 1
 import json, sys
-note = json.load(open(sys.argv[1]))["outputs"]["HEADLESS-1"]["notes"][0]
+note = json.load(open(sys.argv[1]))["boards"]["HEADLESS-1"]["notes"][0]
 assert abs(note["x"] - 180) < 14 and abs(note["y"] - 180) < 14, f"the drag moved it to {note['x']},{note['y']}"
 assert abs(note["w"] - 180) < 14 and abs(note["h"] - 140) < 14, "a move resized the note"
 print(f"  injected selection drag ok: {note['x']},{note['y']}")
@@ -334,7 +358,7 @@ sleep 1500
 VINJECT
 python3 - "$annotations" <<PY || exit 1
 import json, sys
-notes = json.load(open(sys.argv[1]))["outputs"]["HEADLESS-1"]["notes"]
+notes = json.load(open(sys.argv[1]))["boards"]["HEADLESS-1"]["notes"]
 assert len(notes) == 1, f"{len(notes)} notes"
 note = notes[0]
 assert abs(note["x"] - 192) < 2, f"the arrows did not move it by their steps: {note['x']}"
@@ -356,7 +380,7 @@ sleep 1500
 VINJECT
 python3 - "$annotations" <<PY || exit 1
 import json, sys
-note = json.load(open(sys.argv[1]))["outputs"]["HEADLESS-1"]["notes"][0]
+note = json.load(open(sys.argv[1]))["boards"]["HEADLESS-1"]["notes"][0]
 assert note["text"] == "ab", f"Enter did not open the note for writing: {note['text']!r}"
 print(f"  keyboard note edit ok: {note['text']!r}")
 PY
