@@ -4,6 +4,11 @@
 # The seeded document uses CJK text on purpose, to check multi-byte rendering.
 set -euo pipefail
 
+if [ -z "${1:-}" ]; then
+    # Build before testing: this script drives the binary at the path below, and a stale one would make
+    # every stage below pass or fail against code that is not the code in the tree.
+    cargo build --quiet || { echo "FAIL: the daemon did not build"; exit 1; }
+fi
 bin=${1:-target/debug/sgraffito}
 bin=$(realpath "$bin")
 work=$(mktemp -d /tmp/sgraffito-smoke.XXXXXX)
@@ -299,7 +304,28 @@ assert ink > 50, f"the stroke was not painted on the surface (ink={ink})"
 print(f"  injected stroke painted: ink={ink}")
 PY
 
-# 5b. the eraser's hit test, through a pointer: arm it by its block and click the stroke away.
+# 5b. `Esc` closes the boards panel before it does anything else, which is what the README's control table
+# promises: `c` opens it and one `Esc` puts it away with the editor still in edit mode. A tool key after it
+# is what proves the mode — it is only handled while editing, so a run where `Esc` fell through to its last
+# stage and locked logs no new tool line at all. Nothing is selected and no text is being typed here, so
+# closing the panel is the only thing `Esc` can be doing.
+locks=$(grep -c "mode switched to Locked" "$work/daemon.log" || true)
+tools=$(grep -c "tool switched to" "$work/daemon.log" || true)
+"$vinject" "$layout" seq <<VINJECT
+key c
+sleep 400
+key Escape
+sleep 400
+key o
+sleep 600
+VINJECT
+locks_after=$(grep -c "mode switched to Locked" "$work/daemon.log" || true)
+tools_after=$(grep -c "tool switched to" "$work/daemon.log" || true)
+[ "$locks" = "$locks_after" ] || fail "Esc with the boards panel open locked instead of closing the panel"
+[ "$tools_after" -gt "$tools" ] || fail "Esc with the boards panel open left edit mode"
+echo "  boards panel closed on Esc"
+
+# 5c. the eraser's hit test, through a pointer: arm it by its block and click the stroke away.
 "$vinject" "$layout" seq <<VINJECT
 click $rail 239
 click $((h1 + 150)) 360
@@ -308,7 +334,7 @@ VINJECT
 grep -q "tool switched to Eraser" "$work/daemon.log" || fail "the eraser's block was not clicked"
 [ "$(kinds)" = "strokes=0 texts=0 shapes=0 notes=0" ] || fail "the eraser left $(kinds)"
 
-# 5c. a note is created by the drag that sizes it. This is the path that silently wrote nothing until the
+# 5d. a note is created by the drag that sizes it. This is the path that silently wrote nothing until the
 # gesture was wired to the document, and the drag's own size — not the note's default — is what proves it.
 "$vinject" "$layout" seq <<VINJECT
 click $rail 545
@@ -326,7 +352,7 @@ for field, want in (("x", 120), ("y", 120), ("w", 180), ("h", 140)):
 print(f"  injected note ok: {note['x']},{note['y']} {note['w']}x{note['h']}")
 PY
 
-# 5d. a selection drag moves what the frame holds. The press is resolved in screen space and the gesture
+# 5e. a selection drag moves what the frame holds. The press is resolved in screen space and the gesture
 # works in canvas ones, so a mix-up between the two is exactly what a drag that drifts looks like.
 "$vinject" "$layout" seq <<VINJECT
 click $rail 307
@@ -342,7 +368,7 @@ assert abs(note["w"] - 180) < 14 and abs(note["h"] - 140) < 14, "a move resized 
 print(f"  injected selection drag ok: {note['x']},{note['y']}")
 PY
 
-# 5e. the keyboard alone: `Tab` selects, the arrows move what is held, `Delete` removes it. The click on
+# 5f. the keyboard alone: `Tab` selects, the arrows move what is held, `Delete` removes it. The click on
 # empty space is also what gives that output's surface the keyboard focus — every edit-mode surface is
 # `exclusive`, so exactly one output has it — and it clears the selection the drag above left behind.
 # One press moves a held element by 1 logical pixel and ten while `Shift` is held, so the note the drag
@@ -401,6 +427,7 @@ key Delete
 sleep 1500
 VINJECT
 [ "$(kinds)" = "strokes=0 texts=0 shapes=0 notes=0" ] || fail "the keyboard left $(kinds)"
+
 "$bin" lock > /dev/null || fail "lock after the pointer stage failed"
 
 # 6. a second daemon is rejected

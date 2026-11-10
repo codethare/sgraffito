@@ -3382,11 +3382,12 @@ fn a_board_row_is_hit_as_that_board() {
     assert!(second > first, "the rows are not in the document's order");
 }
 
-/// The pointer travels from the block into the panel without crossing a region that is nobody's, and no
-/// rail hit box reaches into the panel: the rail's boxes are tested first, and one that reached a row
-/// would make that row unclickable.
+/// The corridor: on its own row the block owns the strip as far as the panel's column, and a row of the
+/// panel owns its own column, so no rail box is tested first over a row and takes it. The vertical gap
+/// between the block's band and the rows is not covered here — it is the drawer's, inherited, and it is
+/// what a pointer crossing it exactly can close the panel on.
 #[test]
-fn the_boards_block_and_its_panel_meet_without_a_gap_or_an_overlap() {
+fn the_boards_block_owns_its_row_as_far_as_the_panel_and_a_row_owns_its_column() {
     let (w, h) = (900.0f32, 1000.0f32);
     let mut renderer = Renderer::new();
     let rail = boards_rail(&[("Board 1", true), ("office", false)]);

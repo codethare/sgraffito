@@ -666,7 +666,11 @@ impl App {
     /// edit ends, then a selection is dropped, and only then does the daemon lock.
     fn escape(&mut self) {
         // An open menu is the most transient thing on the screen, so it closes first: a second `Esc` then
-        // does whatever it did before the menu was opened.
+        // does whatever it did before the menu was opened. Both panels are menus, and only one is open.
+        if self.boards_open {
+            self.set_boards(false);
+            return;
+        }
         if self.more {
             self.set_more(false);
             return;

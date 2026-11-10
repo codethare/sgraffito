@@ -354,7 +354,7 @@ pub enum ItemId {
     Note(usize),
 }
 
-/// Annotations belonging to a single output.
+/// Annotations belonging to a single board: what is drawn on it, however many screens show it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Board {
     #[serde(default)]
@@ -1675,6 +1675,32 @@ impl Doc {
             }
             n += 1;
         }
+    }
+
+    /// Which board an output shows once its `wl_output` name arrives, when it was not known at the time the
+    /// surface was made: the same rule as [`Doc::adopt`], run again, so a board picked last still wins over
+    /// the board named after that output. `None` when nothing changes, or when the board was chosen by hand
+    /// — a name that late must never move a board somebody picked.
+    pub fn readopt(&mut self, output: &str, picked: bool, current: &str) -> Option<String> {
+        if picked {
+            return None;
+        }
+        let adopted = self.adopt(output);
+        (adopted != current).then_some(adopted)
+    }
+
+    /// Which board "every screen shows one board" adopts when it is switched on: the focused output's, else
+    /// the board picked last, else the only board there is. A key binding runs while locked, with no focused
+    /// output, so the picked board has to come before an arbitrary one.
+    pub fn shared_board(&self, focused: Option<&str>, first: Option<&str>) -> Option<String> {
+        focused
+            .map(str::to_string)
+            .or_else(|| {
+                self.boards
+                    .contains_key(&self.active)
+                    .then(|| self.active.clone())
+            })
+            .or_else(|| first.map(str::to_string))
     }
 
     /// Which board an output that has just appeared shows: the board picked last, else the board named

@@ -304,3 +304,48 @@ fn the_picked_board_survives_the_round_trip() {
     assert_eq!(back.active, office);
     assert_eq!(back.adopt("eDP-1"), office);
 }
+
+/// A name that arrives after the surface was made re-runs the same rule, so a board picked last still wins
+/// over the board named after the output: otherwise a migrated user who picked `office` would be put back
+/// on the old per-output board on every start-up.
+#[test]
+fn a_late_name_does_not_override_the_board_picked_last() {
+    let mut doc = Doc::default();
+    doc.boards.insert("eDP-1".into(), Board::default());
+    doc.boards.insert("DP-2".into(), Board::default());
+    // Nothing picked yet: the name match is the migration, and it moves the output.
+    assert_eq!(doc.readopt("DP-2", false, "eDP-1"), Some("DP-2".into()));
+    assert_eq!(doc.readopt("eDP-1", false, "eDP-1"), None, "already there");
+    // Picked: the picked board wins, every time.
+    doc.active = "eDP-1".into();
+    assert_eq!(doc.readopt("DP-2", false, "eDP-1"), None);
+    // And a board chosen by hand is never moved, whatever `active` says.
+    doc.active = "DP-2".into();
+    assert_eq!(doc.readopt("DP-2", true, "eDP-1"), None);
+}
+
+/// Switching "every screen" on adopts the focused output's board, else the one picked last, else the only
+/// board there is — the order the design names, because a key binding while locked has no focused output.
+#[test]
+fn the_shared_board_is_the_focused_one_then_the_picked_one() {
+    let mut doc = Doc::default();
+    doc.boards.insert("eDP-1".into(), Board::default());
+    doc.boards.insert("office".into(), Board::default());
+    assert_eq!(
+        doc.shared_board(Some("office"), Some("eDP-1")),
+        Some("office".into())
+    );
+    doc.active = "eDP-1".into();
+    assert_eq!(
+        doc.shared_board(None, Some("office")),
+        Some("eDP-1".into()),
+        "the board picked last comes before an arbitrary output"
+    );
+    doc.active = "gone".into();
+    assert_eq!(
+        doc.shared_board(None, Some("office")),
+        Some("office".into()),
+        "with nothing picked, any board beats none"
+    );
+    assert_eq!(Doc::default().shared_board(None, None), None);
+}

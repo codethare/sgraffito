@@ -507,7 +507,6 @@ impl App {
         // annotation lands scale times too far out and is clipped.
         let scale = output_scale(self.output_state.info(&output).as_ref());
         surface.set_buffer_scale(scale as i32);
-        let toolbar = self.current_toolbar(key_of(&output));
         let layer = self.layer_shell.create_layer_surface(
             &self.qh,
             surface.clone(),
@@ -555,10 +554,7 @@ impl App {
                 pending: None,
                 buffers: Vec::new(),
                 buffer_size: (0, 0),
-                overlay: Overlay {
-                    toolbar,
-                    ..Default::default()
-                },
+                overlay: Overlay::default(),
                 view: View::default(),
                 motion: Motion::default(),
                 motion_from: None,
@@ -567,6 +563,10 @@ impl App {
                 cache: FrameCache::default(),
             },
         );
+        // The rail is built after the output is in the map, because the boards panel marks the board *this*
+        // output shows: built before, every row came out unmarked and the panel named no current board
+        // until the pointer crossed it.
+        self.refresh_toolbar();
     }
 
     /// Switch mode: destroy and recreate every surface on the new layer.
@@ -894,6 +894,10 @@ impl App {
             (false, Some(key)) => vec![key],
             _ => self.outputs.keys().copied().collect(),
         };
+        // A gesture in flight is not in the document, and the duplicate an `Alt` drag made names indices on
+        // the board being left: kept, the next `Esc` would remove an element of the board switched to.
+        self.gesture = None;
+        self.pending_duplicate = None;
         for key in keys {
             self.cancel_transient(key);
             let Some(out) = self.outputs.get_mut(&key) else {
@@ -930,11 +934,12 @@ impl App {
     /// too — falling back to the first output when the compositor has given the keyboard to nobody. Off
     /// changes no board: the screens are equal at that instant and may diverge afterwards.
     pub(crate) fn set_shared(&mut self, on: bool) {
-        let board = self
+        let focused = self
             .keyboard_focus
             .and_then(|key| self.outputs.get(&key))
-            .or_else(|| self.outputs.values().next())
             .map(|out| out.board.clone());
+        let first = self.outputs.values().next().map(|out| out.board.clone());
+        let board = self.doc.shared_board(focused.as_deref(), first.as_deref());
         self.shared = on;
         // `switch_board` reads the mode to decide who moves, so the mode is set first: switched on, the
         // pick then reaches every screen.
@@ -2378,25 +2383,33 @@ impl App {
             reported_name
         };
         let name_changed = self.outputs.get(&key).is_some_and(|out| out.name != name);
+        // Whether the board moved with the name: the rail marks the board its output shows, so the panel has
+        // to be rebuilt for the new one.
+        let mut moved_the_rail = false;
         if name_changed {
             // Finish under the old board_name before changing the name used by the document.
             self.end_text_edit();
             self.invalidate_text_caches();
         }
         self.adopt_scale(&key, output_scale(info.as_ref()));
+        // The name a surface was made for is not always there when it is made — a `wl_output` burst can
+        // announce the output before it names it — so the board is adopted again here, through the same
+        // rule, and only while nobody has picked one: that is what tells a version 3 file's `HEADLESS-1`
+        // bucket from the same screen's drawing, without overriding a board picked last.
+        let moved = match self.outputs.get(&key) {
+            Some(out) if out.name != name => self.doc.readopt(&name, out.board_picked, &out.board),
+            _ => None,
+        };
         let Some(out) = self.outputs.get_mut(&key) else {
             return;
         };
         if out.name != name {
-            // The name a surface was made for is not always there when it is made — a `wl_output` burst
-            // can announce the output before it names it — so the board is adopted here as well, and
-            // only ever from a board named after this output and only when nobody has picked one. That
-            // is what tells a version 3 file's `HEADLESS-1` bucket from the same screen's drawing.
-            if !out.board_picked && out.board != name && self.doc.boards.contains_key(&name) {
-                out.board = name.clone();
-                out.cache.invalidate();
-            }
             out.name = name;
+            if let Some(board) = moved {
+                out.board = board;
+                out.cache.invalidate();
+                moved_the_rail = true;
+            }
             out.dirty = true;
             self.dirty = true;
         }
@@ -2412,6 +2425,10 @@ impl App {
             out.last_transient = None;
             out.dirty = true;
             self.dirty = true;
+        }
+        // The rail marks the board its output shows, so a board that moved with the name is a new panel.
+        if moved_the_rail {
+            self.refresh_toolbar();
         }
     }
 
