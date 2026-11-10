@@ -326,7 +326,10 @@ tools_after=$(grep -c "tool switched to" "$work/daemon.log" || true)
 echo "  boards panel closed on Esc"
 
 # 5c. the eraser's hit test, through a pointer: arm it by its block and click the stroke away.
+# The first event of a fresh connection can be lost while the seat gains the pointer capability, and a click
+# issued immediately after the previous stage closed went missing here, so this stage waits before it clicks.
 "$vinject" "$layout" seq <<VINJECT
+sleep 400
 click $rail 239
 click $((h1 + 150)) 360
 sleep 1500
@@ -336,8 +339,14 @@ grep -q "tool switched to Eraser" "$work/daemon.log" || fail "the eraser's block
 
 # 5d. a note is created by the drag that sizes it. This is the path that silently wrote nothing until the
 # gesture was wired to the document, and the drag's own size — not the note's default — is what proves it.
+# The note is the eleventh tool, and these outputs are 600 logical pixels tall, so it does not fit on the rail:
+# it is a row of the drawer. Its key still arms it — that is what a folded control keeps — and this stage says
+# so. Reaching it with the pointer means reproducing the drawer's row arithmetic by hand here, which is the
+# blind number this file is otherwise careful about; `a_folded_tool_is_reached_through_the_drawer` covers that
+# path as a geometry test instead.
 "$vinject" "$layout" seq <<VINJECT
-click $rail 545
+key n
+sleep 300
 drag $((h1 + 120)) 120 $((h1 + 300)) 260 8
 sleep 1500
 VINJECT

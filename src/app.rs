@@ -2604,8 +2604,10 @@ impl App {
             for extra in [out.last_transient, transient].into_iter().flatten() {
                 box_ = box_.union(extra);
             }
-            if out.toolbar_dirty {
-                box_ = box_.union(toolbar_bounds(w as f32, h as f32));
+            if out.toolbar_dirty
+                && let Some(toolbar) = out.overlay.toolbar.as_ref()
+            {
+                box_ = box_.union(toolbar_bounds(toolbar, w as f32, h as f32));
             }
             Some(box_)
         } else if let Some(text_damage) = text_damage {
@@ -2613,9 +2615,12 @@ impl App {
         } else if out.transient_dirty || out.toolbar_dirty {
             // The rail's box is fixed while editing, so the previous and the current frame agree
             // on it and there is nothing to remember between frames.
-            let rail = out
-                .toolbar_dirty
-                .then(|| toolbar_bounds(w as f32, h as f32));
+            let rail = out.toolbar_dirty.then_some(()).and(
+                out.overlay
+                    .toolbar
+                    .as_ref()
+                    .map(|toolbar| toolbar_bounds(toolbar, w as f32, h as f32)),
+            );
             Some(transient_damage(out.last_transient, transient, rail))
         } else {
             // Nothing changed for this output; another output is why the daemon redrew.

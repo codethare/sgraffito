@@ -4,8 +4,8 @@ use sgraffito::canvas::{
     View,
 };
 use sgraffito::render::{
-    DAMAGE_SLACK, DamageRegion, FrameCache, Renderer, Screen, buffer_format, toolbar_bounds,
-    transient_bounds, transient_damage,
+    DAMAGE_SLACK, DamageRegion, FrameCache, Renderer, Screen, buffer_format, rail_column,
+    toolbar_bounds, transient_bounds, transient_damage,
 };
 use wayland_client::protocol::wl_shm::Format;
 
@@ -444,7 +444,7 @@ fn toolbar_is_a_left_edge_rail_at_the_optical_centre() {
     );
     // The rail hangs on the left edge and fills its box top to bottom: column x 8..44 holds a
     // block on every row of it.
-    let band = toolbar_bounds(w as f32, h as f32);
+    let band = toolbar_bounds(&rail(), w as f32, h as f32);
     let column: Vec<u32> = (0..h).filter(|y| content(&buf, w, 20, *y)).collect();
     assert!(!column.is_empty());
     let (top, bottom) = (*column.first().unwrap(), *column.last().unwrap());
@@ -495,7 +495,7 @@ fn row_of(
     h: f32,
     action: ToolbarAction,
 ) -> f32 {
-    let band = toolbar_bounds(w, h);
+    let band = toolbar_bounds(toolbar, w, h);
     (0..band.h as u32)
         .map(|step| band.y + step as f32 + 0.5)
         .find(|y| renderer.toolbar_hit(toolbar, w, h, band.x + 30.0, *y) == Some(action))
@@ -510,7 +510,7 @@ fn sweep_rail(
     h: f32,
     column_x: f32,
 ) -> Vec<Option<ToolbarAction>> {
-    let band = toolbar_bounds(w, h);
+    let band = toolbar_bounds(toolbar, w, h);
     // `toolbar_bounds` starts one hairline left of the rail.
     let x = band.x + 1.0 + column_x;
     (0..band.h as u32)
@@ -582,7 +582,7 @@ fn every_block_of_the_rail_is_reachable_and_no_row_is_a_gap() {
     // one of them.
     assert_eq!(actions.len(), 21, "a drawn block cannot be hit");
     // Outside the rail the toolbar takes nothing: those presses are drawing gestures.
-    let band = toolbar_bounds(w, h);
+    let band = toolbar_bounds(&rail, w, h);
     assert_eq!(
         renderer.toolbar_hit(&rail, w, h, band.x + 20.0, band.y - 2.0),
         None
@@ -608,7 +608,7 @@ fn a_hovered_block_stretches_to_say_what_it_does() {
     let (fw, fh) = (w as f32, h as f32);
     let rail = rail();
     let mut renderer = Renderer::new();
-    let band = toolbar_bounds(fw, fh);
+    let band = toolbar_bounds(&rail, fw, fh);
     // The top block is the first colour. `inside` is on the square, `beyond` in the room the
     // capsule it unfurls would take, both on that block's own row.
     let row = band.y + 20.0;
@@ -712,7 +712,7 @@ fn the_eraser_cannot_reach_the_toolbar() {
     // position is there to delete -- including the palette swatches and the tool blocks.
     let (w, h) = (1920.0f32, 1080.0f32);
     let mut doc = Board::default();
-    let band = toolbar_bounds(w, h);
+    let band = toolbar_bounds(&rail(), w, h);
     for y in [band.y + 20.0, band.y + band.h / 2.0] {
         assert!(doc.erase(band.x + 20.0, y, ERASER_THRESHOLD).is_none());
     }
@@ -810,7 +810,7 @@ fn the_damage_box_is_the_element_that_changed() {
     );
     // The rail joins the box only when the rail is what changed: a drag far from it leaves it
     // alone, and a drag that reaches it repaints it whole.
-    let rail_box = toolbar_bounds(1024.0, 600.0);
+    let rail_box = toolbar_bounds(&rail(), 1024.0, 600.0);
     assert_eq!(transient_damage(None, Some(here), None), here);
     assert_eq!(
         transient_damage(None, Some(here), Some(rail_box)),
@@ -880,7 +880,7 @@ fn bounding_box_frame_with_a_toolbar_matches_a_whole_surface_frame() {
     let damage = transient_damage(
         transient_bounds(&first),
         transient_bounds(&second),
-        Some(toolbar_bounds(w as f32, h as f32)),
+        Some(toolbar_bounds(&rail, w as f32, h as f32)),
     );
     let mut whole = buffer(w, h);
     frame(&mut whole, w, h, &Board::default(), &first, None);
@@ -1031,7 +1031,7 @@ fn the_capsule_keeps_room_around_its_label() {
     let text = ToolbarAction::Tool(Tool::Text);
     let row = (row_of(&mut renderer, &wheel, fw, fh, text) + 15.0) as u32;
     let buf = rail_frame(w, h, &wheel, Some(text), 1.0);
-    let ox = toolbar_bounds(fw, fh).x + 1.0;
+    let ox = toolbar_bounds(&wheel, fw, fh).x + 1.0;
     let painted: Vec<u32> = (0..w).filter(|x| alpha(&buf, w, *x, row) > 0).collect();
     let glyphs: Vec<u32> = (0..w).filter(|x| bright(&buf, w, *x, row)).collect();
     let (edge, label_end) = (
@@ -1069,7 +1069,7 @@ fn the_pop_out_edge_uncovers_the_label() {
     let text = ToolbarAction::Tool(Tool::Text);
     let row = (row_of(&mut renderer, &wheel, fw, fh, text) + 15.0) as u32;
     let edge = |buf: &[u8]| (0..w).rfind(|x| content(buf, w, *x, row)).unwrap_or(0);
-    let ox = toolbar_bounds(fw, fh).x + 1.0;
+    let ox = toolbar_bounds(&wheel, fw, fh).x + 1.0;
     let label_end = |buf: &[u8]| {
         (0..w)
             .rev()
@@ -1324,30 +1324,48 @@ fn a_cjk_click_lands_inside_the_measured_box() {
 }
 
 #[test]
-fn the_rail_is_pinned_to_the_top_margin_when_it_cannot_be_centred() {
-    // The rail grew to eighteen blocks. On an output with room it still centres on the optical
-    // centre; on one without, its top is the margin, so the bottom of it is what falls off the
-    // output rather than the whole rail sliding off the top.
+fn the_rail_folds_to_fit_a_short_output_and_is_pinned_only_below_the_foot() {
+    // The rail has twenty-two blocks, about 780 logical pixels, and the palette, the tools and the size group
+    // fold into the drawer until the foot — boards, more, Esc — fits. So a short output loses none of the
+    // controls and none of the rail: the column is only ever longer than the output when even the foot cannot
+    // fit, and then its top is the margin rather than the whole rail sliding off the top.
+    let rail = rail();
     let (w, tall) = (640u32, 1600u32);
-    let roomy = toolbar_bounds(w as f32, tall as f32);
+    let roomy = toolbar_bounds(&rail, w as f32, tall as f32);
     assert!(
         roomy.y > 8.0,
         "a tall output centres the rail instead of pinning it: {roomy:?}"
     );
 
     let (short_w, short_h) = (640u32, 500u32);
-    let pinned = toolbar_bounds(short_w as f32, short_h as f32);
+    let short = toolbar_bounds(&rail, short_w as f32, short_h as f32);
+    assert!(
+        rail_column(&rail, short_h as f32) < rail_column(&rail, tall as f32),
+        "a short output's rail is as tall as a tall one's"
+    );
+    assert!(
+        short.y + short.h <= short_h as f32,
+        "the folded rail is still taller than the output: {short:?}"
+    );
+    assert!(
+        short.h < roomy.h,
+        "the rail did not fold: {short:?} against {roomy:?}"
+    );
+
+    // Below the foot's own height there is nothing left to fold, and the rail is pinned.
+    let (tiny_w, tiny_h) = (640u32, 100u32);
+    let pinned = toolbar_bounds(&rail, tiny_w as f32, tiny_h as f32);
     assert_eq!(
         pinned.y,
         8.0 - 1.0,
         "the top is the margin, hairline included"
     );
     assert!(
-        pinned.y + pinned.h > short_h as f32,
+        pinned.y + pinned.h > tiny_h as f32,
         "the rail is taller than the room the output has for it"
     );
 
-    // What is drawn agrees with that box, and the top of the rail is inside the output.
+    // What is drawn agrees with that box, and on the short output the foot is inside the output.
     let mut buf = buffer(short_w, short_h);
     let overlay = Overlay {
         toolbar: Some(toolbar(Tool::Pen, "#33d17a", 3.0, None)),
@@ -1366,10 +1384,17 @@ fn the_rail_is_pinned_to_the_top_margin_when_it_cannot_be_centred() {
     let column: Vec<u32> = (0..short_h)
         .filter(|y| content(&buf, short_w, 20, *y))
         .collect();
-    let top = *column.first().expect("the rail is painted");
+    let (top, bottom) = (
+        *column.first().expect("the rail is painted"),
+        *column.last().expect("the rail is painted"),
+    );
     assert!(
-        top as f32 >= pinned.y && top as f32 <= pinned.y + 8.0,
-        "the rail starts at the margin, not off the top: {top}"
+        top as f32 >= short.y && top as f32 <= short.y + 8.0,
+        "the rail starts where its box does: {top} against {short:?}"
+    );
+    assert!(
+        (bottom as f32) < short_h as f32 - 8.0,
+        "the foot of the rail is off the output: {bottom} of {short_h}"
     );
 }
 
@@ -1399,7 +1424,7 @@ fn the_rail_sits_on_a_plate() {
         &overlay,
         None,
     );
-    let band = toolbar_bounds(w as f32, h as f32);
+    let band = toolbar_bounds(&rail, w as f32, h as f32);
     // The plate reaches a pad left of the blocks and starts at their column's top; the declared box
     // is that plus the hairline.
     let (ox, oy) = (band.x + PAD + HAIRLINE, band.y + HAIRLINE);
@@ -1523,7 +1548,7 @@ fn an_edit_mode_frame_is_painted_on_a_scrim() {
         assert_eq!(alpha(&editing, w, x, y), SCRIM, "no scrim at {x},{y}");
         assert_eq!(alpha(&idle, w, x, y), 0, "{LOCKED_MESSAGE} at {x},{y}");
     }
-    let band = toolbar_bounds(w as f32, h as f32);
+    let band = toolbar_bounds(&rail, w as f32, h as f32);
     assert!(content(&editing, w, (band.x + 20.0) as u32, 200u32));
 }
 
@@ -1635,8 +1660,8 @@ fn a_panned_and_zoomed_frame_puts_the_drawing_where_the_view_says() {
     );
     // The rail is in the same place it is at 1:1: the block column's first row is painted there.
     let (ox, oy) = (
-        toolbar_bounds(w as f32, h as f32).x + 6.0 + 1.0,
-        toolbar_bounds(w as f32, h as f32).y + 1.0,
+        toolbar_bounds(&rail, w as f32, h as f32).x + 6.0 + 1.0,
+        toolbar_bounds(&rail, w as f32, h as f32).y + 1.0,
     );
     assert!(
         content(&buf, w, (ox + 15.0) as u32, (oy + 20.0) as u32),
@@ -1775,7 +1800,7 @@ fn the_drawer_opens_beside_the_rail_without_moving_it() {
         ..closed.clone()
     };
     // The rail's height and its declared box are unchanged by the drawer.
-    let (a, b) = (toolbar_bounds(fw, fh), toolbar_bounds(fw, fh));
+    let (a, b) = (toolbar_bounds(&open, fw, fh), toolbar_bounds(&open, fw, fh));
     assert_eq!(a.h, b.h);
     // The rail's own blocks are where they were: the block that opens the drawer is at the foot of the
     // rail, and `Esc` is still last.
@@ -1803,7 +1828,7 @@ fn the_drawer_opens_beside_the_rail_without_moving_it() {
     // Open, the switch is a row of the panel in the second column, and exactly one row of that panel is
     // level with the block that opened it — the row the corridor leads into, so the pointer can walk from
     // the block straight onto the list.
-    let band = toolbar_bounds(fw, fh);
+    let band = toolbar_bounds(&open, fw, fh);
     let column_x = band.x + 1.0 + 30.0 + 4.0 + 15.0;
     let mut more_row = None;
     for step in 1..band.h as u32 {
@@ -1893,7 +1918,7 @@ fn the_backdrop_can_be_switched_off_and_on() {
         "the backdrop was painted anyway"
     );
     // The rail itself is drawn either way, so it is not the backdrop that makes it visible.
-    let band = toolbar_bounds(w as f32, h as f32);
+    let band = toolbar_bounds(&rail(), w as f32, h as f32);
     assert!(content(
         &with,
         w,
@@ -2372,7 +2397,7 @@ fn hovering_the_more_block_paints_the_drawer_list_inside_the_rails_box() {
     let (hovered, bare) = (draw(rail(Some(ToolbarAction::More))), draw(rail(None)));
     // Everything the legend adds is inside the box the rail declares, which is what a rail-only frame
     // repaints: a line outside it would be left behind the moment the pointer moved on.
-    let box_ = toolbar_bounds(w as f32, h as f32);
+    let box_ = toolbar_bounds(&rail(None), w as f32, h as f32);
     let mut painted = 0;
     let mut rows = (f32::MAX, 0.0f32);
     for (i, (a, b)) in hovered.chunks(4).zip(bare.chunks(4)).enumerate() {
@@ -2416,7 +2441,7 @@ fn a_row_of_the_panel_can_be_clicked_with_the_pointer_on_the_block_that_opened_i
         scrim: true,
     };
     let mut renderer = Renderer::new();
-    let band = toolbar_bounds(w as f32, h as f32);
+    let band = toolbar_bounds(&rail(), w as f32, h as f32);
     let hit = |renderer: &mut Renderer, x: f32, y: f32| {
         renderer.toolbar_hit(&toolbar, w as f32, h as f32, band.x + x, band.y + y)
     };
@@ -3393,7 +3418,7 @@ fn the_boards_block_owns_its_row_as_far_as_the_panel_and_a_row_owns_its_column()
     let (w, h) = (900.0f32, 1000.0f32);
     let mut renderer = Renderer::new();
     let rail = boards_rail(&[("Board 1", true), ("office", false)]);
-    let band = toolbar_bounds(w, h);
+    let band = toolbar_bounds(&rail, w, h);
     // The rail's own origin: the box starts one hairline and one pad left of the block column.
     let base = band.x + 1.0 + 6.0;
     // The rail's own column for the block, the panel's column for its rows.
@@ -3456,7 +3481,7 @@ fn the_boards_panel_paints_inside_the_rails_box() {
         boards_open: false,
         ..boards_rail(&[("Board 1", true), ("office", false)])
     });
-    let box_ = toolbar_bounds(w as f32, h as f32);
+    let box_ = toolbar_bounds(&boards_rail(&[("Board 1", true)]), w as f32, h as f32);
     let mut painted = 0;
     for (i, (a, b)) in open.chunks(4).zip(shut.chunks(4)).enumerate() {
         if a == b {
@@ -3480,7 +3505,7 @@ fn the_pointer_can_walk_from_the_block_into_its_panel_and_between_its_rows() {
     let (w, h) = (900.0f32, 1000.0f32);
     let mut renderer = Renderer::new();
     let rail = boards_rail(&[("Board 1", true), ("office", false)]);
-    let band = toolbar_bounds(w, h);
+    let band = toolbar_bounds(&rail, w, h);
     // The rail's own origin: the box starts one hairline and one pad left of the block column.
     let base = band.x + 1.0 + 6.0;
     let block_row = sweep_rail(&mut renderer, &rail, w, h, 20.0)
@@ -3519,4 +3544,30 @@ fn the_pointer_can_walk_from_the_block_into_its_panel_and_between_its_rows() {
             i as f32 - 80.0
         );
     }
+}
+
+/// A tool that folded is reached through the drawer: it is a row of the panel like any other, and the rail
+/// on that output simply does not have it. Before the fold, this output's rail ran past the bottom of the
+/// screen and the note tool was off it — unreachable, not folded.
+#[test]
+fn a_folded_tool_is_reached_through_the_drawer() {
+    let (w, h) = (900.0f32, 500.0f32);
+    let mut renderer = Renderer::new();
+    let mut rail = toolbar(Tool::Pen, PALETTE[0], 3.0, None);
+    rail.more = true;
+    let hit = |renderer: &mut Renderer, x: f32, y: f32| renderer.toolbar_hit(&rail, w, h, x, y);
+    // The note's tool is not on this output's rail, but it is a row of its drawer.
+    let column_x = toolbar_bounds(&rail, w, h).x + 1.0 + 40.0;
+    let found = (0..h as u32)
+        .map(|y| y as f32 + 0.5)
+        .any(|y| hit(&mut renderer, column_x, y) == Some(ToolbarAction::Tool(Tool::Note)));
+    assert!(found, "the folded note tool is in no drawer row");
+    // And the rail's own column holds no block at all for it.
+    let rail_x = toolbar_bounds(&rail, w, h).x + 1.0 + 15.0;
+    assert!(
+        !(0..h as u32)
+            .map(|y| y as f32 + 0.5)
+            .any(|y| hit(&mut renderer, rail_x, y) == Some(ToolbarAction::Tool(Tool::Note))),
+        "the note is on the rail and in the drawer at once"
+    );
 }

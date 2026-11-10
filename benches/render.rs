@@ -404,7 +404,7 @@ fn main() {
         View::default(),
         &sparse,
         &hovered,
-        Some(toolbar_bounds(3840.0, 2160.0)),
+        Some(toolbar_bounds(&Toolbar::default(), 3840.0, 2160.0)),
         false,
     );
     measure(

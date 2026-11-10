@@ -7,6 +7,16 @@ the user writes in Chinese and expects Chinese in chat, English in the artifacts
 
 ## State right now (2026-11-10)
 
+- **The rail folds into the drawer** (`openspec/changes/rail-folds-into-the-drawer/`): `rail_candidates` (the
+  palette, the tools, the size group) fill from the top while they fit the output, `foot_blocks` (`boards`,
+  `more`, `Esc`) always stays, and the rest are drawer rows after its two preferences. `TOOLBAR_COLUMN` is
+  gone: `rail_column(toolbar, surface)` is what the fitted blocks need, and `ToolbarPill` carries it so the
+  plate, the hit boxes, the panels and the damage box all follow. On the smoke's 600-pixel outputs the rail
+  is 564 tall and the note, hand and arrow tools fold — its note stage now arms the note by its key, because
+  reaching a folded row with the pointer would mean reproducing the drawer's row arithmetic in the script.
+  The smoke was flaky while this landed (three runs, three different stages failing, then a clean pass); its
+  stages are timing-sensitive and the injected events can overtake the daemon.
+
 - **A panel is now anchored to the block that opened it** (`openspec/changes/panel-beside-its-block/`):
   exactly one of its rows shares that block's row band and the rest grow away from it, and the gaps
   between rows belong to the row above them. Before this, every row sat above the block: the corridor
