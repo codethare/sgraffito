@@ -162,6 +162,9 @@ pub enum ToolbarAction {
     Board(usize),
     /// Create a board and pick it.
     NewBoard,
+    /// Delete the board this output shows, from the panel's own row. It carries no name or index, so a
+    /// click reads which board it means from the output rather than from the row it landed on.
+    DeleteBoard,
     /// Switch between every screen sharing one board and each screen picking its own.
     Shared,
 }

@@ -929,6 +929,39 @@ impl App {
         name
     }
 
+    /// Delete the board an output is showing, from the panel's row that names it. Everything the board
+    /// holds goes with it, so the deletion is a document change and schedules the write.
+    ///
+    /// The edit and the drawing in hand belong to the board being left, and both commit through
+    /// `entry(...).or_default()`: run them before the removal, or the board comes back as a fresh empty
+    /// one. Every screen that was showing it then moves to the board that takes its place, through
+    /// `switch_board`, which is what drops each moved output's selection and raster.
+    pub(crate) fn delete_board(&mut self, key: u32) {
+        let Some(name) = self.outputs.get(&key).map(|out| out.board().to_string()) else {
+            return;
+        };
+        self.end_text_edit();
+        self.commit_transient_drawing();
+        let Some(successor) = self.doc.delete_board(&name) else {
+            return;
+        };
+        // The keys are taken before anything moves: in shared mode the first switch moves every output,
+        // and a loop that read `self.outputs` while switching would see boards change under it.
+        let keys: Vec<u32> = self
+            .outputs
+            .iter()
+            .filter(|(_, out)| out.board == name)
+            .map(|(key, _)| *key)
+            .collect();
+        for key in keys {
+            self.switch_board(Some(key), &successor);
+        }
+        // `switch_board` never schedules a write — a switch is a decision about this sitting — but a
+        // deleted board has to leave the file or it is back the next time the daemon starts.
+        self.store.mark_dirty(Instant::now());
+        log(&format!("board deleted: {name}"));
+    }
+
     /// Switch the shared mode on or off. On adopts the focused output's board on every output — that is
     /// the drawing in front of the person switching, and the keyboard is where the pointer's picks act
     /// too — falling back to the first output when the compositor has given the keyboard to nobody. Off

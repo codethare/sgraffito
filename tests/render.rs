@@ -3369,7 +3369,7 @@ fn boards_rail(boards: &[(&str, bool)]) -> Toolbar {
 }
 
 /// The panel is the document's boards and nothing else: one row per board, the one this output shows
-/// marked, and the row that creates one last.
+/// marked, then the row that creates one and the row that deletes one.
 #[test]
 fn the_boards_panel_states_the_documents_boards() {
     let (w, h) = (900.0f32, 1000.0f32);
@@ -3388,10 +3388,28 @@ fn the_boards_panel_states_the_documents_boards() {
         vec![
             ToolbarAction::Board(0),
             ToolbarAction::Board(1),
-            ToolbarAction::NewBoard
+            ToolbarAction::NewBoard,
+            ToolbarAction::DeleteBoard
         ],
-        "the panel's rows are not its boards and the row that creates one"
+        "the panel's rows are not its boards, the row that creates one and the row that deletes one"
     );
+}
+
+/// A document with one board has nothing to delete, so the row is absent rather than inert: a control
+/// that does nothing is a control nobody can tell from one that does.
+#[test]
+fn a_panel_with_one_board_has_no_delete_row() {
+    let (w, h) = (900.0f32, 1000.0f32);
+    let mut renderer = Renderer::new();
+    let rail = boards_rail(&[("Board 1", true)]);
+    let sweep = sweep_rail(&mut renderer, &rail, w, h, 40.0);
+    let mut rows: Vec<ToolbarAction> = Vec::new();
+    for action in sweep.into_iter().flatten() {
+        if !rows.contains(&action) {
+            rows.push(action);
+        }
+    }
+    assert_eq!(rows, vec![ToolbarAction::Board(0), ToolbarAction::NewBoard]);
 }
 
 /// A row of the panel is hit as the board it lists, and the board on screen is the one the panel marks.

@@ -972,6 +972,13 @@ impl App {
             ToolbarAction::NewBoard => {
                 self.new_board(acting);
             }
+            ToolbarAction::DeleteBoard => {
+                // The row names the board through the output, so a click with no output has nothing to
+                // delete. The panel still closes below, as it does after any pick.
+                if let Some(key) = acting {
+                    self.delete_board(key);
+                }
+            }
             ToolbarAction::Lock => {}
         }
         // One click on something in the drawer both does the thing and puts the list away, the way a menu

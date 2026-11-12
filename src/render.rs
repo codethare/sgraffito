@@ -208,7 +208,10 @@ fn key_of(action: ToolbarAction) -> &'static str {
         ToolbarAction::More => "M",
         ToolbarAction::Scrim => "B",
         // The panel's own rows are picks out of the list the block opens, so they name that block's key.
-        ToolbarAction::Boards | ToolbarAction::Board(_) | ToolbarAction::NewBoard => "C",
+        ToolbarAction::Boards
+        | ToolbarAction::Board(_)
+        | ToolbarAction::NewBoard
+        | ToolbarAction::DeleteBoard => "C",
         ToolbarAction::Shared => "F",
         ToolbarAction::Color(index) => ["1", "2", "3", "4", "5"].get(index).copied().unwrap_or("?"),
         ToolbarAction::SizeStep(dir) => {
@@ -521,7 +524,11 @@ fn open_panel(
 /// Whether applying `action` is picking something out of a panel, which closes it: a list is opened to
 /// pick from, not to look at.
 pub fn picks_from_panel(action: ToolbarAction) -> bool {
-    DRAWER.contains(&action) || matches!(action, ToolbarAction::Board(_) | ToolbarAction::NewBoard)
+    DRAWER.contains(&action)
+        || matches!(
+            action,
+            ToolbarAction::Board(_) | ToolbarAction::NewBoard | ToolbarAction::DeleteBoard
+        )
 }
 
 /// Whether the open panel stays open with the pointer on `hover`: on the block that opened it, or on one
@@ -584,8 +591,8 @@ fn drawer_blocks(toolbar: &Toolbar, overflow: &[Block]) -> Vec<Block> {
 }
 
 /// The boards panel's rows: one per board stating its name, the board this output shows accent-filled,
-/// and `new board` last. A board row says its name and no key: every one of them is picked from the list
-/// the `boards` block opened, so a key on the row would repeat the block's own.
+/// then `new board` and `delete <name>`. A board row says its name and no key: every one of them is
+/// picked from the list the `boards` block opened, so a key on the row would repeat the block's own.
 fn board_rows(toolbar: &Toolbar) -> Vec<Block> {
     let mut rows: Vec<Block> = toolbar
         .boards
@@ -609,6 +616,20 @@ fn board_rows(toolbar: &Toolbar) -> Vec<Block> {
         active: false,
         gap: TOOLBAR_GAP,
     });
+    // The rows nearest the block are the ones a short output keeps, so the two rows that act on the list
+    // rather than being an item of it come after every board, and the destructive one comes last.
+    if toolbar.boards.len() > 1
+        && let Some(current) = toolbar.boards.iter().find(|board| board.current)
+    {
+        rows.push(Block {
+            mark: Mark::Icon(Icon::Smaller),
+            column: 1,
+            label: format!("delete {}", current.name),
+            action: Some(ToolbarAction::DeleteBoard),
+            active: false,
+            gap: TOOLBAR_GAP,
+        });
+    }
     rows
 }
 
@@ -3094,14 +3115,60 @@ mod tests {
             ..crate::render::tests::rail_for_legend()
         };
         let rows = board_rows(&toolbar);
-        assert_eq!(rows.len(), MAX_BOARD_ROWS + 1);
+        assert_eq!(rows.len(), MAX_BOARD_ROWS + 2);
         assert_eq!(
-            rows.last().and_then(|row| row.action),
+            rows.get(rows.len() - 2).and_then(|row| row.action),
             Some(ToolbarAction::NewBoard),
             "the row that creates a board is the one that must survive the cap"
         );
+        assert_eq!(
+            rows.last().and_then(|row| row.action),
+            Some(ToolbarAction::DeleteBoard),
+            "the row that deletes comes after the row that creates"
+        );
         assert_eq!(rows[0].action, Some(ToolbarAction::Board(0)));
         assert!(rows[0].active, "the board on screen is marked");
+    }
+
+    /// The row says which board it removes, because the panel is a list and the footer is where the
+    /// list's own actions live: `delete office` cannot be mistaken for a board called that.
+    #[test]
+    fn the_delete_row_names_the_board_it_removes() {
+        let toolbar = Toolbar {
+            boards_open: true,
+            boards: vec![
+                crate::canvas::BoardRow {
+                    name: "Board 1".into(),
+                    current: false,
+                },
+                crate::canvas::BoardRow {
+                    name: "office".into(),
+                    current: true,
+                },
+            ],
+            ..crate::render::tests::rail_for_legend()
+        };
+        let rows = board_rows(&toolbar);
+        let delete = rows
+            .iter()
+            .find(|row| row.action == Some(ToolbarAction::DeleteBoard))
+            .expect("the panel has no row that deletes a board");
+        assert_eq!(delete.label, "delete office");
+        assert!(
+            !delete.active,
+            "the row that deletes is not a list item that is on"
+        );
+    }
+
+    /// The delete row is a pick out of the panel it lives in: it closes the panel like every other row,
+    /// and the panel stays open while the pointer is on it.
+    #[test]
+    fn the_delete_row_is_a_pick_of_its_panel() {
+        assert!(picks_from_panel(ToolbarAction::DeleteBoard));
+        assert!(panel_stays_open(
+            Some(ToolbarAction::DeleteBoard),
+            Some(ToolbarAction::Boards)
+        ));
     }
 
     /// A different list of boards is a different rail: reusing the previous layout would draw the panel
@@ -4048,7 +4115,7 @@ mod tests {
                 }
                 // A row of the boards panel states its name and no key: it is picked from the list the
                 // `boards` block opened, and that block carries the key.
-                ToolbarAction::Board(_) | ToolbarAction::NewBoard => {
+                ToolbarAction::Board(_) | ToolbarAction::NewBoard | ToolbarAction::DeleteBoard => {
                     keysym == Keysym::C || keysym == Keysym::c
                 }
             };
