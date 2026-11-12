@@ -608,16 +608,10 @@ fn board_rows(toolbar: &Toolbar) -> Vec<Block> {
             gap: TOOLBAR_GAP,
         })
         .collect();
-    rows.push(Block {
-        mark: Mark::Icon(Icon::Plus),
-        column: 1,
-        label: "new board".into(),
-        action: Some(ToolbarAction::NewBoard),
-        active: false,
-        gap: TOOLBAR_GAP,
-    });
     // The rows nearest the block are the ones a short output keeps, so the two rows that act on the list
-    // rather than being an item of it come after every board, and the destructive one comes last.
+    // rather than being an item of it come after every board. `new board` is the last one: a panel with the
+    // delete row is tall enough to grow upwards, which puts the last row level with the block, where the
+    // corridor leads the pointer into the list — and that row must not be the one that destroys a board.
     if toolbar.boards.len() > 1
         && let Some(current) = toolbar.boards.iter().find(|board| board.current)
     {
@@ -630,6 +624,14 @@ fn board_rows(toolbar: &Toolbar) -> Vec<Block> {
             gap: TOOLBAR_GAP,
         });
     }
+    rows.push(Block {
+        mark: Mark::Icon(Icon::Plus),
+        column: 1,
+        label: "new board".into(),
+        action: Some(ToolbarAction::NewBoard),
+        active: false,
+        gap: TOOLBAR_GAP,
+    });
     rows
 }
 
@@ -3118,13 +3120,13 @@ mod tests {
         assert_eq!(rows.len(), MAX_BOARD_ROWS + 2);
         assert_eq!(
             rows.get(rows.len() - 2).and_then(|row| row.action),
-            Some(ToolbarAction::NewBoard),
-            "the row that creates a board is the one that must survive the cap"
+            Some(ToolbarAction::DeleteBoard),
+            "the row that deletes comes after every board"
         );
         assert_eq!(
             rows.last().and_then(|row| row.action),
-            Some(ToolbarAction::DeleteBoard),
-            "the row that deletes comes after the row that creates"
+            Some(ToolbarAction::NewBoard),
+            "the row that creates a board is the last one, so it is the row level with the block"
         );
         assert_eq!(rows[0].action, Some(ToolbarAction::Board(0)));
         assert!(rows[0].active, "the board on screen is marked");

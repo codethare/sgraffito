@@ -3369,7 +3369,7 @@ fn boards_rail(boards: &[(&str, bool)]) -> Toolbar {
 }
 
 /// The panel is the document's boards and nothing else: one row per board, the one this output shows
-/// marked, then the row that creates one and the row that deletes one.
+/// marked, then the row that deletes and the row that creates one.
 #[test]
 fn the_boards_panel_states_the_documents_boards() {
     let (w, h) = (900.0f32, 1000.0f32);
@@ -3388,10 +3388,10 @@ fn the_boards_panel_states_the_documents_boards() {
         vec![
             ToolbarAction::Board(0),
             ToolbarAction::Board(1),
-            ToolbarAction::NewBoard,
-            ToolbarAction::DeleteBoard
+            ToolbarAction::DeleteBoard,
+            ToolbarAction::NewBoard
         ],
-        "the panel's rows are not its boards, the row that creates one and the row that deletes one"
+        "the panel's rows are not its boards, the row that deletes one and the row that creates one"
     );
 }
 
@@ -3471,6 +3471,43 @@ fn the_boards_block_owns_its_row_as_far_as_the_panel_and_a_row_owns_its_column()
             "the row was taken from the panel at {x}"
         );
     }
+}
+
+/// The row level with the `boards` block is where the corridor leads the pointer into the list, so the
+/// row that deletes a board is never there: a panel tall enough to grow upwards puts its last row on
+/// that band, and one click from it destroys a board with no undo behind it.
+#[test]
+fn the_row_the_pointer_walks_into_is_not_the_one_that_deletes() {
+    let (w, h) = (900.0f32, 600.0f32);
+    let mut renderer = Renderer::new();
+    let rows = [("Board 1", false), ("office", true)];
+    let open = boards_rail(&rows);
+    let shut = Toolbar {
+        boards_open: false,
+        ..boards_rail(&rows)
+    };
+    let row = |sweep: &[Option<ToolbarAction>], action: ToolbarAction| {
+        sweep
+            .iter()
+            .position(|hit| *hit == Some(action))
+            .unwrap_or_else(|| panic!("{action:?} is not on the rail"))
+    };
+    // The block's own row is taken with the panel shut: open, the corridor answers for the whole
+    // strip beside the panel instead, so the rail's sweep no longer shows the block's band.
+    let block_y = row(
+        &sweep_rail(&mut renderer, &shut, w, h, 20.0),
+        ToolbarAction::Boards,
+    ) + 8;
+    let panel = sweep_rail(&mut renderer, &open, w, h, 40.0);
+    assert!(
+        panel.contains(&Some(ToolbarAction::DeleteBoard)),
+        "the panel has no row that deletes a board"
+    );
+    assert_eq!(
+        panel[block_y],
+        Some(ToolbarAction::NewBoard),
+        "the row level with the `boards` block is not the row that creates a board"
+    );
 }
 
 /// The panel is inside the box the rail declares, or a frame that repaints only the rail leaves its
