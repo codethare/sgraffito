@@ -349,3 +349,50 @@ fn the_shared_board_is_the_focused_one_then_the_picked_one() {
     );
     assert_eq!(Doc::default().shared_board(None, None), None);
 }
+
+/// A board can be removed, and the board that takes its place is the first one the document still has,
+/// so which board a screen lands on after a deletion is the document's decision, not the pointer's.
+#[test]
+fn deleting_a_board_names_the_first_remaining_board() {
+    let mut doc = Doc::default();
+    doc.boards.insert("Board 1".into(), Board::default());
+    doc.boards.insert("Board 3".into(), Board::default());
+    doc.boards.insert("office".into(), Board::default());
+    assert_eq!(doc.delete_board("Board 3"), Some("Board 1".to_string()));
+    assert!(!doc.boards.contains_key("Board 3"));
+    assert!(doc.boards.contains_key("Board 1"));
+    assert!(doc.boards.contains_key("office"));
+}
+
+/// A document with no boards is nowhere to draw, so the last one is refused rather than removed.
+#[test]
+fn the_only_board_cannot_be_deleted() {
+    let mut doc = Doc::default();
+    doc.boards.insert("office".into(), Board::default());
+    assert_eq!(doc.delete_board("office"), None);
+    assert!(doc.boards.contains_key("office"));
+}
+
+/// A name the document does not hold changes nothing: the row a click lands on and the document can
+/// disagree by a frame, and that must not empty a board or the map.
+#[test]
+fn deleting_a_board_that_is_not_there_changes_nothing() {
+    let mut doc = Doc::default();
+    doc.boards.insert("Board 1".into(), Board::default());
+    doc.boards.insert("office".into(), Board::default());
+    let before = doc.clone();
+    assert_eq!(doc.delete_board("gone"), None);
+    assert_eq!(doc, before);
+}
+
+/// The board picked last must not be the one just deleted: a screen that appears afterwards lands on
+/// the board an output adopted, and that name has to exist.
+#[test]
+fn deleting_the_picked_board_moves_the_pick_to_the_one_that_takes_its_place() {
+    let mut doc = Doc::default();
+    doc.boards.insert("Board 1".into(), Board::default());
+    doc.boards.insert("office".into(), Board::default());
+    doc.active = "office".into();
+    assert_eq!(doc.delete_board("office"), Some("Board 1".to_string()));
+    assert_eq!(doc.active, "Board 1");
+}

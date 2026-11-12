@@ -1677,6 +1677,22 @@ impl Doc {
         }
     }
 
+    /// Remove a board with everything drawn on it, and name the board that takes its place: the first one
+    /// still in the document, which is the board [`Doc::adopt`] falls back to. `None` when the name is not
+    /// a board's, or is the document's last one — a document with no boards is nowhere to draw. The board
+    /// picked last is moved to the successor, so no later screen adopts a name that is gone.
+    pub fn delete_board(&mut self, name: &str) -> Option<String> {
+        if self.boards.len() <= 1 || !self.boards.contains_key(name) {
+            return None;
+        }
+        self.boards.remove(name);
+        let successor = self.boards.keys().next().cloned()?;
+        if self.active == name {
+            self.active = successor.clone();
+        }
+        Some(successor)
+    }
+
     /// Which board an output shows once its `wl_output` name arrives, when it was not known at the time the
     /// surface was made: the same rule as [`Doc::adopt`], run again, so a board picked last still wins over
     /// the board named after that output. `None` when nothing changes, or when the board was chosen by hand
