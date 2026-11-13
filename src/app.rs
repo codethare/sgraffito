@@ -663,8 +663,9 @@ impl App {
         }
     }
 
-    /// `[` and `]` step the active tool's size, clamped to its range. The toolbar shows the
-    /// value, so it is repainted (a whole-surface frame, like a tool or colour change).
+    /// `[` and `]` step the active tool's size, clamped to its range, and — with a selection held — the
+    /// size of what it holds. The toolbar shows the value, so it is repainted (a whole-surface frame, like
+    /// a tool or colour change).
     pub(crate) fn nudge_size(&mut self, dir: f32) {
         if self.tool.uses_pen_width() {
             self.pen_width = stepped_size(
@@ -1853,10 +1854,6 @@ impl App {
         }
     }
 
-    /// The other half of a colour chip: what the selection holds takes the colour the chip shows, as one
-    /// document change reported at the union of the boxes those elements occupy. The selection is left
-    /// held, so a second chip recolours the same elements, and the frame stays where it was, which is what
-    /// shows the user what they just changed.
     /// The other half of a size step: what the selection holds takes the step too, as one change, the way
     /// `recolour_selection` applies a colour chip to it. The list is taken first, because the boards are
     /// borrowed mutably in the loop — and two outputs may each hold a selection, on different boards.
@@ -1887,6 +1884,10 @@ impl App {
         }
     }
 
+    /// The other half of a colour chip: what the selection holds takes the colour the chip shows, as one
+    /// document change reported at the union of the boxes those elements occupy. The selection is left
+    /// held, so a second chip recolours the same elements, and the frame stays where it was, which is what
+    /// shows the user what they just changed.
     fn recolour_selection(&mut self, color: &str) {
         let held: Vec<(u32, String, Vec<ItemId>)> = self
             .outputs

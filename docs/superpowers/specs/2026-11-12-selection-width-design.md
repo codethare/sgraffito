@@ -55,10 +55,10 @@ the colour chip's idea to size: the keys that step the width should step the sel
 
 ## How it works
 
-- `Board::step_size(&mut self, items: &[ItemId], dw: f32, dtext: f32) -> Option<Rect>` walks the
-  held items: a stroke's or shape's `width` becomes `stepped_size(width, dw.signum(), PEN_WIDTH_STEP,
-  PEN_WIDTH_MIN, PEN_WIDTH_MAX)`, a text box's `size` the same with the text constants, and a note
-  is left alone. It returns the union of `paint_bounds()` before and after for every item that
+- `Board::step_size(&mut self, items: &[ItemId], dir: f32) -> Option<Rect>` walks the held items: a
+  stroke's or shape's `width` becomes `stepped_size(width, dir, PEN_WIDTH_STEP, PEN_WIDTH_MIN,
+  PEN_WIDTH_MAX)`, a text box's `size` the same with the text step and bounds, and a note is left
+  alone. It returns the union of `paint_bounds()` before and after for every item that
   changed, or `None` when none did.
 - `App::nudge_size(dir)` keeps stepping the armed brush, then walks every output that holds a
   selection the way `recolour_selection` does, calls the board's `step_size` with the pen step and

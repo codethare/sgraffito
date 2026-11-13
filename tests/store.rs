@@ -490,3 +490,72 @@ fn the_size_step_clamps_to_its_range() {
     assert_eq!(stepped_size(16.0, 1.0, 1.0, 1.0, 16.0), 16.0);
     assert_eq!(stepped_size(72.0, 1.0, 2.0, 8.0, 72.0), 72.0);
 }
+
+/// A shrinking step reports the ink it left, not only the ink it produced: the old, wider edge is what a
+/// frame would otherwise leave behind.
+#[test]
+fn a_shrinking_step_reports_the_ink_it_left() {
+    let mut board = Board {
+        strokes: vec![Stroke {
+            color: "#e01b24".into(),
+            width: 5.0,
+            points: vec![[10.0, 10.0], [110.0, 10.0]],
+        }],
+        texts: vec![TextItem {
+            x: 10.0,
+            y: 40.0,
+            color: "#ffffff".into(),
+            size: 20.0,
+            text: "hi".into(),
+        }],
+        ..Default::default()
+    };
+    let (stroke, text) = (
+        board.strokes[0].paint_bounds(),
+        board.texts[0].paint_bounds(),
+    );
+    let box_ = board
+        .step_size(&[ItemId::Stroke(0), ItemId::Text(0)], -1.0)
+        .expect("a shrink is a change");
+    assert_eq!(board.strokes[0].width, 4.0);
+    assert_eq!(board.texts[0].size, 18.0);
+    for old in [stroke, Some(text)].into_iter().flatten() {
+        assert!(box_.contains(old.x, old.y));
+        assert!(box_.contains(old.x + old.w, old.y + old.h));
+    }
+}
+
+/// When only some of what is held can step, the box is exactly the ink of the items that did.
+#[test]
+fn a_mixed_selection_reports_only_what_changed() {
+    let mut board = Board {
+        strokes: vec![Stroke {
+            color: "#e01b24".into(),
+            width: PEN_WIDTH_MAX,
+            points: vec![[10.0, 10.0], [110.0, 10.0]],
+        }],
+        texts: vec![TextItem {
+            x: 10.0,
+            y: 40.0,
+            color: "#ffffff".into(),
+            size: 18.0,
+            text: "hi".into(),
+        }],
+        ..Default::default()
+    };
+    let before = board.texts[0].paint_bounds();
+    let box_ = board
+        .step_size(&[ItemId::Stroke(0), ItemId::Text(0)], 1.0)
+        .expect("the text box can still grow");
+    let after = board.texts[0].paint_bounds();
+    assert_eq!(
+        board.strokes[0].width, PEN_WIDTH_MAX,
+        "a stroke at its bound stepped"
+    );
+    assert_eq!(board.texts[0].size, 20.0);
+    assert_eq!(
+        box_,
+        before.union(after),
+        "the box is not the text's ink alone"
+    );
+}
