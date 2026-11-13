@@ -238,7 +238,7 @@ fn the_wander_is_room_for_painting_and_not_for_hitting() {
 use sgraffito::canvas::{
     Gesture, Grab, Handle, Press, SELECT_HANDLE_HIT, SELECT_ROTATE_GAP, Selection, Transform,
     grab_at, item_bounds, marquee_select, rotate_handle, selection_bounds, selection_frame,
-    selection_press,
+    selection_press, toggle_selection,
 };
 
 fn stroke_at(x: f32, y: f32) -> Stroke {
@@ -999,13 +999,13 @@ fn a_press_resolves_in_the_coordinate_space_it_belongs_to() {
     // A handle is grabbed where it is drawn: on screen, not at its canvas position.
     let corner = screen(Handle::Nw.point(frame));
     assert_eq!(
-        selection_press(&a, &held, view, corner, ERASER_THRESHOLD),
+        selection_press(&a, &held, view, corner, ERASER_THRESHOLD, false),
         Press::Handle(Grab::Handle(Handle::Nw))
     );
     // …and not where the canvas says it is, which is a different place on screen.
     let canvas_corner = Handle::Nw.point(frame);
     assert_ne!(
-        selection_press(&a, &held, view, canvas_corner, ERASER_THRESHOLD),
+        selection_press(&a, &held, view, canvas_corner, ERASER_THRESHOLD, false),
         Press::Handle(Grab::Handle(Handle::Nw)),
         "a handle was grabbed at its canvas position instead of where it is drawn"
     );
@@ -1014,14 +1014,14 @@ fn a_press_resolves_in_the_coordinate_space_it_belongs_to() {
     // stroke's own point is at a different screen position, and asking there must find it.
     let on_other = screen(stroke_at(400.0, 300.0).points[0]);
     assert_eq!(
-        selection_press(&a, &held, view, on_other, ERASER_THRESHOLD),
+        selection_press(&a, &held, view, on_other, ERASER_THRESHOLD, false),
         Press::Element(ItemId::Stroke(1))
     );
 
     // Empty space outside the frame sweeps a marquee, and the marquee is a **canvas** point: that is
     // what the elements it will catch and the frame it is drawn in are measured in.
     let far = [1200.0, 900.0];
-    match selection_press(&a, &held, view, far, ERASER_THRESHOLD) {
+    match selection_press(&a, &held, view, far, ERASER_THRESHOLD, false) {
         Press::Marquee { canvas } => {
             assert_eq!(canvas, view.to_canvas(far));
             assert_ne!(canvas, far, "the marquee is stored in screen coordinates");
@@ -1717,5 +1717,70 @@ fn the_rung_follows_the_speed_of_the_pointer_and_settles_back() {
     assert!(
         frames * 16 <= 200,
         "it took {frames} frames to come back, which is not a settle"
+    );
+}
+
+/// A shift press toggles membership and never replaces the selection, and it keeps the order the
+/// other elements were in.
+#[test]
+fn toggling_an_element_in_and_out_returns_the_list() {
+    let held = vec![ItemId::Stroke(0), ItemId::Text(1)];
+    let added = toggle_selection(&held, ItemId::Stroke(2));
+    assert_eq!(
+        added,
+        vec![ItemId::Stroke(0), ItemId::Text(1), ItemId::Stroke(2)]
+    );
+    assert_eq!(toggle_selection(&added, ItemId::Stroke(2)), held);
+    assert_eq!(
+        toggle_selection(&held, ItemId::Stroke(0)),
+        vec![ItemId::Text(1)]
+    );
+    assert_eq!(
+        toggle_selection(&[ItemId::Text(1)], ItemId::Text(1)),
+        vec![]
+    );
+}
+
+/// With `Shift` held, an element under the pointer is a toggle, empty space is nothing, and a handle is
+/// still a handle — the order the press is decided in is what keeps a proportional resize reachable.
+#[test]
+fn a_shift_press_toggles_and_a_handle_still_wins() {
+    // The held stroke is long enough that a press on it can be away from every handle of its frame.
+    let long = Stroke {
+        color: "#e01b24".into(),
+        width: 2.0,
+        points: vec![[0.0, 0.0], [400.0, 0.0]],
+    };
+    let a = ann(vec![long, stroke_at(400.0, 300.0)], vec![]);
+    let held = vec![ItemId::Stroke(0)];
+    let view = View::default();
+    let on_held = view.to_screen([100.0, 0.0]);
+    let on_other = view.to_screen([400.0, 300.0]);
+    assert_eq!(
+        selection_press(&a, &held, view, on_other, ERASER_THRESHOLD, true),
+        Press::Toggle(ItemId::Stroke(1))
+    );
+    assert_eq!(
+        selection_press(&a, &held, view, on_held, ERASER_THRESHOLD, true),
+        Press::Toggle(ItemId::Stroke(0)),
+        "a held element toggles out instead of dragging the selection"
+    );
+    assert_eq!(
+        selection_press(&a, &held, view, [1200.0, 900.0], ERASER_THRESHOLD, true),
+        Press::Inert,
+        "a shift press on empty space started something"
+    );
+    let frame = selection_frame(&a, &held, None).unwrap();
+    assert_eq!(
+        selection_press(
+            &a,
+            &held,
+            view,
+            view.to_screen(Handle::Nw.point(frame)),
+            ERASER_THRESHOLD,
+            true
+        ),
+        Press::Handle(Grab::Handle(Handle::Nw)),
+        "shift took the handle's press"
     );
 }

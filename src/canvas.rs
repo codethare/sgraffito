@@ -949,6 +949,10 @@ pub enum Press {
     Element(ItemId),
     /// Sweep a marquee: the press is on empty space outside the frame.
     Marquee { canvas: [f32; 2] },
+    /// Add the element under a `Shift` press to the selection, or remove it when it is held.
+    Toggle(ItemId),
+    /// A `Shift` press that grabbed nothing: it changes nothing and starts nothing.
+    Inert,
 }
 
 /// Resolve a press with the selection tool, decided here so that a test can check it: `screen` is where
@@ -965,6 +969,7 @@ pub fn selection_press(
     view: View,
     screen: [f32; 2],
     tolerance: f32,
+    shift: bool,
 ) -> Press {
     let canvas = view.to_canvas(screen);
     let frame = selection_frame(ann, held, None);
@@ -977,6 +982,14 @@ pub fn selection_press(
         )
     {
         return Press::Handle(grab);
+    }
+    // A `Shift` press toggles the element under the pointer and starts nothing else; on empty space it
+    // does nothing at all. The handle test above still comes first, so `Shift` + a handle resizes.
+    if shift {
+        return match ann.hit(canvas[0], canvas[1], tolerance) {
+            Some(id) => Press::Toggle(id),
+            None => Press::Inert,
+        };
     }
     match ann.hit(canvas[0], canvas[1], tolerance) {
         // An element the selection does not hold replaces it, wherever the press landed.
@@ -992,6 +1005,19 @@ pub fn selection_press(
             None => Press::Marquee { canvas },
         },
     }
+}
+
+/// The selection a `Shift` press on `id` produces: the element appended when it was not held, removed
+/// when it was, and every other element left where it was in the order.
+pub fn toggle_selection(held: &[ItemId], id: ItemId) -> Vec<ItemId> {
+    let mut items = held.to_vec();
+    match items.iter().position(|held| *held == id) {
+        Some(index) => {
+            items.remove(index);
+        }
+        None => items.push(id),
+    }
+    items
 }
 
 /// A selection gesture in progress: what it grabbed and where the pointer went down. Held by the

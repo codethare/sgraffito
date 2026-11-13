@@ -46,6 +46,7 @@ use crate::canvas::{
     TEXT_SIZE_MAX, TEXT_SIZE_MIN, TEXT_SIZE_STEP, TextBuffer, TextItem, TextOverlay, Toolbar,
     Transform, View, ZOOM_STEP, Zoom, date_stamp, marquee_select, note_drag, nudge_delta,
     selection_bounds, selection_frame, selection_press, snap_square, stepped_size,
+    toggle_selection,
 };
 
 pub use crate::canvas::{PALETTE, Tool, ToolbarAction};
@@ -1267,8 +1268,14 @@ impl App {
                 .as_ref()
                 .map(|s| s.items.clone())
                 .unwrap_or_default();
-            let press =
-                selection_press(ann, &held, view, [x, y], view.canvas_len(ERASER_THRESHOLD));
+            let press = selection_press(
+                ann,
+                &held,
+                view,
+                [x, y],
+                view.canvas_len(ERASER_THRESHOLD),
+                self.shift,
+            );
             let frame = selection_frame(ann, &held, None);
             (press, frame, view.to_canvas([x, y]))
         };
@@ -1304,6 +1311,18 @@ impl App {
                 // catches are both canvas, and only the pointer has to be converted once, here.
                 self.gesture = Some(Gesture::Marquee { origin: canvas });
             }
+            // A `Shift` press is a click, not a drag: the selection changes on the press and no gesture
+            // is started, so a `Shift` drag cannot move what it just toggled.
+            Press::Toggle(id) => {
+                let held = self
+                    .outputs
+                    .get(&key)
+                    .and_then(|out| out.overlay.selection.as_ref())
+                    .map(|s| s.items.clone())
+                    .unwrap_or_default();
+                self.set_selection(key, toggle_selection(&held, id), None);
+            }
+            Press::Inert => {}
         }
     }
 
