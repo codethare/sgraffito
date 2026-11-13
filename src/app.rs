@@ -683,6 +683,7 @@ impl App {
                 TEXT_SIZE_MAX,
             );
         }
+        self.step_selection_size(dir);
         self.refresh_toolbar();
     }
 
@@ -1856,6 +1857,36 @@ impl App {
     /// document change reported at the union of the boxes those elements occupy. The selection is left
     /// held, so a second chip recolours the same elements, and the frame stays where it was, which is what
     /// shows the user what they just changed.
+    /// The other half of a size step: what the selection holds takes the step too, as one change, the way
+    /// `recolour_selection` applies a colour chip to it. The list is taken first, because the boards are
+    /// borrowed mutably in the loop — and two outputs may each hold a selection, on different boards.
+    fn step_selection_size(&mut self, dir: f32) {
+        let held: Vec<(u32, String, Vec<ItemId>)> = self
+            .outputs
+            .iter()
+            .filter_map(|(key, out)| {
+                out.overlay
+                    .selection
+                    .as_ref()
+                    .map(|s| (*key, out.board().to_string(), s.items.clone()))
+            })
+            .collect();
+        let mut changed = Vec::new();
+        for (key, board_name, items) in held {
+            if let Some(box_) = self
+                .doc
+                .boards
+                .get_mut(&board_name)
+                .and_then(|ann| ann.step_size(&items, dir))
+            {
+                changed.push((key, box_));
+            }
+        }
+        for (key, box_) in changed {
+            self.doc_changed_at(key, box_);
+        }
+    }
+
     fn recolour_selection(&mut self, color: &str) {
         let held: Vec<(u32, String, Vec<ItemId>)> = self
             .outputs
