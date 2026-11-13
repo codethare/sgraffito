@@ -99,11 +99,6 @@ pub fn size_step_for_keysym(keysym: Keysym) -> Option<f32> {
     }
 }
 
-/// Step a size by `dir` (±1) within `[min, max]`.
-pub fn stepped_size(current: f32, dir: f32, step: f32, min: f32, max: f32) -> f32 {
-    (current + dir * step).clamp(min, max)
-}
-
 /// Bytes `delete_surrounding_text` asks the committed buffer to drop. Its `before_length` is
 /// counted from the start of the preedit when one is present (protocol note), and the preedit is
 /// not in the buffer, so those bytes are not deleted.

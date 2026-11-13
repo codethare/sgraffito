@@ -26,6 +26,17 @@ const MIN_SCALE: f32 = 0.05;
 /// Text size bounds, in logical pixels. They bound a new box and every resize of an existing one.
 pub const TEXT_SIZE_MIN: f32 = 8.0;
 pub const TEXT_SIZE_MAX: f32 = 72.0;
+/// The pen width `[`/`]` step and the bounds they step it within, in logical pixels.
+pub const PEN_WIDTH_MIN: f32 = 1.0;
+pub const PEN_WIDTH_MAX: f32 = 16.0;
+pub const PEN_WIDTH_STEP: f32 = 1.0;
+/// The text size step `[`/`]` apply, in logical pixels; the bounds are `TEXT_SIZE_MIN`/`TEXT_SIZE_MAX`.
+pub const TEXT_SIZE_STEP: f32 = 2.0;
+
+/// Step a size by `dir` (±1) within `[min, max]`: the one arithmetic the brush and a held selection share.
+pub fn stepped_size(current: f32, dir: f32, step: f32, min: f32, max: f32) -> f32 {
+    (current + dir * step).clamp(min, max)
+}
 
 /// The zoom range, and the factor one classic wheel notch applies. Multiplicative, so zooming in and
 /// back out returns to where it started.
@@ -508,6 +519,61 @@ impl Board {
                         union_into(&mut box_, Some(n.bounds()));
                     }
                 }
+            }
+        }
+        box_
+    }
+
+    /// Step the size of what is held, as one change: a stroke's or a shape's width by the pen step, a text
+    /// box's size by the text step, each clamped to its own range. A note keeps its own type size. Returns
+    /// the union of the ink before and after every item that changed, or `None` when nothing did — a press
+    /// with every held item at its bound is not a change.
+    pub fn step_size(&mut self, items: &[ItemId], dir: f32) -> Option<Rect> {
+        let mut box_: Option<Rect> = None;
+        for id in items {
+            let (before, after) = match *id {
+                ItemId::Stroke(i) => {
+                    let Some(stroke) = self.strokes.get_mut(i) else {
+                        continue;
+                    };
+                    let before = stroke.paint_bounds();
+                    stroke.width = stepped_size(
+                        stroke.width,
+                        dir,
+                        PEN_WIDTH_STEP,
+                        PEN_WIDTH_MIN,
+                        PEN_WIDTH_MAX,
+                    );
+                    (before, stroke.paint_bounds())
+                }
+                ItemId::Shape(i) => {
+                    let Some(shape) = self.shapes.get_mut(i) else {
+                        continue;
+                    };
+                    let before = Some(shape.paint_bounds());
+                    shape.width = stepped_size(
+                        shape.width,
+                        dir,
+                        PEN_WIDTH_STEP,
+                        PEN_WIDTH_MIN,
+                        PEN_WIDTH_MAX,
+                    );
+                    (before, Some(shape.paint_bounds()))
+                }
+                ItemId::Text(i) => {
+                    let Some(text) = self.texts.get_mut(i) else {
+                        continue;
+                    };
+                    let before = Some(text.paint_bounds());
+                    text.size =
+                        stepped_size(text.size, dir, TEXT_SIZE_STEP, TEXT_SIZE_MIN, TEXT_SIZE_MAX);
+                    (before, Some(text.paint_bounds()))
+                }
+                ItemId::Note(_) => continue,
+            };
+            if before != after {
+                union_into(&mut box_, before);
+                union_into(&mut box_, after);
             }
         }
         box_

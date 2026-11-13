@@ -1,7 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use sgraffito::canvas::{Board, Doc, Shape, ShapeKind, Stroke, TextItem};
+use sgraffito::canvas::{
+    Board, Doc, ItemId, Note, PEN_WIDTH_MAX, Shape, ShapeKind, Stroke, TEXT_SIZE_MAX, TextItem,
+    stepped_size,
+};
 use sgraffito::store::{self, Store};
 
 fn tmpdir(tag: &str) -> PathBuf {
@@ -395,4 +398,95 @@ fn deleting_the_picked_board_moves_the_pick_to_the_one_that_takes_its_place() {
     doc.active = "office".into();
     assert_eq!(doc.delete_board("office"), Some("Board 1".to_string()));
     assert_eq!(doc.active, "Board 1");
+}
+
+/// A size step walks what the selection holds: a stroke's and a shape's width by the pen step, a text
+/// box's size by the text step, and a note not at all — its type size is its own.
+#[test]
+fn stepping_a_selection_steps_its_widths_and_text_sizes() {
+    let mut board = Board {
+        strokes: vec![Stroke {
+            color: "#e01b24".into(),
+            width: 4.0,
+            points: vec![[10.0, 10.0], [110.0, 10.0]],
+        }],
+        texts: vec![TextItem {
+            x: 10.0,
+            y: 40.0,
+            color: "#ffffff".into(),
+            size: 18.0,
+            text: "hi".into(),
+        }],
+        shapes: vec![Shape {
+            kind: ShapeKind::Rect,
+            color: "#33d17a".into(),
+            width: 6.0,
+            from: [10.0, 80.0],
+            to: [110.0, 140.0],
+        }],
+        notes: vec![Note {
+            x: 10.0,
+            y: 160.0,
+            w: 100.0,
+            h: 100.0,
+            color: "#f6d32d".into(),
+            text: "hold".into(),
+            created: "2026/11/12".into(),
+        }],
+    };
+    let note = board.notes[0].clone();
+    let items = [
+        ItemId::Stroke(0),
+        ItemId::Text(0),
+        ItemId::Shape(0),
+        ItemId::Note(0),
+    ];
+    let box_ = board
+        .step_size(&items, 1.0)
+        .expect("a step that changes something reports its box");
+    assert_eq!(board.strokes[0].width, 5.0);
+    assert_eq!(board.shapes[0].width, 7.0);
+    assert_eq!(board.texts[0].size, 20.0);
+    assert_eq!(board.notes[0], note, "a note changed its type size");
+    // The box covers the ink the step produced, or the frame leaves the thicker edge behind.
+    let after = board.texts[0].paint_bounds();
+    assert!(box_.contains(after.x, after.y));
+    assert!(box_.contains(after.x + after.w, after.y + after.h));
+}
+
+/// Nothing to step is not a change: every held item already at its bound leaves the board equal and
+/// reports no box, so a press there cannot dirty the file or repaint anything.
+#[test]
+fn a_size_step_at_the_bound_writes_nothing() {
+    let mut board = Board {
+        strokes: vec![Stroke {
+            color: "#e01b24".into(),
+            width: PEN_WIDTH_MAX,
+            points: vec![[10.0, 10.0], [110.0, 10.0]],
+        }],
+        texts: vec![TextItem {
+            x: 10.0,
+            y: 40.0,
+            color: "#ffffff".into(),
+            size: TEXT_SIZE_MAX,
+            text: "hi".into(),
+        }],
+        ..Default::default()
+    };
+    let before = board.clone();
+    assert_eq!(
+        board.step_size(&[ItemId::Stroke(0), ItemId::Text(0)], 1.0),
+        None
+    );
+    assert_eq!(board, before);
+}
+
+/// The step is a fixed amount on either side and stops at the range's ends.
+#[test]
+fn the_size_step_clamps_to_its_range() {
+    assert_eq!(stepped_size(3.0, 1.0, 1.0, 1.0, 16.0), 4.0);
+    assert_eq!(stepped_size(3.0, -1.0, 1.0, 1.0, 16.0), 2.0);
+    assert_eq!(stepped_size(1.0, -1.0, 1.0, 1.0, 16.0), 1.0);
+    assert_eq!(stepped_size(16.0, 1.0, 1.0, 1.0, 16.0), 16.0);
+    assert_eq!(stepped_size(72.0, 1.0, 2.0, 8.0, 72.0), 72.0);
 }

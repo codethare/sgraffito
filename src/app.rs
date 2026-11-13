@@ -42,9 +42,10 @@ use wayland_client::{
 
 use crate::canvas::{
     Board, BoardRow, Doc, ERASER_THRESHOLD, Gesture, Grab, Handle, ItemId, Motion, Note, Overlay,
-    Press, Rect, Selection, Shape, ShapeKind, TEXT_SIZE_MAX, TEXT_SIZE_MIN, TextBuffer, TextItem,
-    TextOverlay, Toolbar, Transform, View, ZOOM_STEP, Zoom, date_stamp, marquee_select, note_drag,
-    nudge_delta, selection_bounds, selection_frame, selection_press, snap_square,
+    PEN_WIDTH_MAX, PEN_WIDTH_MIN, PEN_WIDTH_STEP, Press, Rect, Selection, Shape, ShapeKind,
+    TEXT_SIZE_MAX, TEXT_SIZE_MIN, TEXT_SIZE_STEP, TextBuffer, TextItem, TextOverlay, Toolbar,
+    Transform, View, ZOOM_STEP, Zoom, date_stamp, marquee_select, note_drag, nudge_delta,
+    selection_bounds, selection_frame, selection_press, snap_square, stepped_size,
 };
 
 pub use crate::canvas::{PALETTE, Tool, ToolbarAction};
@@ -57,26 +58,22 @@ use wayland_protocols::wp::pointer_gestures::zv1::client::zwp_pointer_gestures_v
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3::ZwpTextInputManagerV3;
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::ZwpTextInputV3;
 
-use crate::input::{Nav, PinchData, stepped_size};
+use crate::input::{Nav, PinchData};
 use crate::render::{
     DamageRegion, FrameCache, Renderer, Screen, buffer_format, toolbar_bounds, transient_bounds,
     transient_damage,
 };
 use crate::store::{self, Store};
 
-/// Initial stroke width and the range `[`/`]` may adjust it within, in logical pixels.
+/// Initial stroke width, in logical pixels.
 pub const PEN_WIDTH: f32 = 3.0;
 
 /// The distance the view moves by on an arrow press, in logical pixels: larger than a nudge, because a pan
 /// of one pixel is not a pan.
 pub const PAN_STEP: f32 = 40.0;
 pub const PAN_STEP_FAR: f32 = 400.0;
-pub const PEN_WIDTH_MIN: f32 = 1.0;
-pub const PEN_WIDTH_MAX: f32 = 16.0;
-pub const PEN_WIDTH_STEP: f32 = 1.0;
-/// Initial text size and the range `[`/`]` may adjust it within, in logical pixels.
+/// Initial text size, in logical pixels.
 pub const TEXT_SIZE: f32 = 18.0;
-pub const TEXT_SIZE_STEP: f32 = 2.0;
 
 pub(crate) const BTN_LEFT: u32 = 0x110;
 /// The wheel, pressed: a pan anchored at the point the press started on.

@@ -1,7 +1,7 @@
 use sgraffito::app::{MAX_PASTE_BYTES, Tool, read_selection, text_mime};
 use sgraffito::canvas::Caret;
 use sgraffito::input::{
-    EditAction, bytes_to_delete, color_for_keysym, edit_action, size_step_for_keysym, stepped_size,
+    EditAction, bytes_to_delete, color_for_keysym, edit_action, size_step_for_keysym,
     tool_for_keysym, wants_sampling,
 };
 use smithay_client_toolkit::seat::keyboard::Keysym;
@@ -43,15 +43,6 @@ fn maps_brackets_to_size_directions() {
     assert_eq!(size_step_for_keysym(Keysym::bracketleft), Some(-1.0));
     assert_eq!(size_step_for_keysym(Keysym::bracketright), Some(1.0));
     assert_eq!(size_step_for_keysym(Keysym::p), None);
-}
-
-#[test]
-fn stepping_a_size_clamps_to_its_bounds() {
-    assert_eq!(stepped_size(3.0, 1.0, 1.0, 1.0, 16.0), 4.0);
-    assert_eq!(stepped_size(3.0, -1.0, 1.0, 1.0, 16.0), 2.0);
-    assert_eq!(stepped_size(1.0, -1.0, 1.0, 1.0, 16.0), 1.0);
-    assert_eq!(stepped_size(16.0, 1.0, 1.0, 1.0, 16.0), 16.0);
-    assert_eq!(stepped_size(72.0, 1.0, 2.0, 8.0, 72.0), 72.0);
 }
 
 #[test]

@@ -250,10 +250,12 @@ git commit -m "Step the size of what a selection holds"
 ### Task 2: The keys reach a selection, and the README says so
 
 **Files:**
+
 - Modify: `src/app.rs` (`nudge_size`, a new `step_selection_size` beside `recolour_selection`)
 - Modify: `README.md` (the `[` / `]` key-table row, the brush paragraph, the selection limitation)
 
 **Interfaces:**
+
 - Consumes: `Board::step_size`, `canvas::stepped_size` and the brush constants (Task 1); `App::doc_changed_at(key, box_)`, the `outputs` map, `out.board()`.
 - Produces: `App::step_selection_size(&mut self, dir: f32)` — no return value, nothing consumes it.
 
