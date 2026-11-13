@@ -1249,7 +1249,8 @@ impl App {
 
     /// With the selection tool armed, a press grabs a handle of the frame, takes the element under
     /// the pointer, or starts a marquee. A handle wins over the element below it, so a resize that
-    /// starts on a corner never moves the selection instead.
+    /// starts on a corner never moves the selection instead. With `Shift` held the element under the
+    /// pointer is toggled instead of taken and no gesture starts, and a press on nothing does nothing.
     pub(crate) fn select_press(&mut self, key: u32, x: f32, y: f32) {
         // The decision is `canvas::selection_press`, where the two coordinate spaces — the screen the
         // handles live in and the canvas a gesture moves the document in — are one function a test can

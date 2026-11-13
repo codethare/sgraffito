@@ -1784,3 +1784,28 @@ fn a_shift_press_toggles_and_a_handle_still_wins() {
         "shift took the handle's press"
     );
 }
+
+/// Inside the frame but on no element, a shift press changes nothing where a plain press drags the whole
+/// selection; `Shift` must not turn the frame's interior into a drag.
+#[test]
+fn a_shift_press_inside_the_frame_starts_nothing() {
+    let long = |y: f32| Stroke {
+        color: "#e01b24".into(),
+        width: 2.0,
+        points: vec![[0.0, y], [400.0, y]],
+    };
+    let a = ann(vec![long(0.0), long(200.0)], vec![]);
+    let held = vec![ItemId::Stroke(0), ItemId::Stroke(1)];
+    let view = View::default();
+    let inside = view.to_screen([200.0, 100.0]);
+    assert_eq!(
+        selection_press(&a, &held, view, inside, ERASER_THRESHOLD, true),
+        Press::Inert,
+        "a shift press inside the frame started something"
+    );
+    assert_eq!(
+        selection_press(&a, &held, view, inside, ERASER_THRESHOLD, false),
+        Press::Move,
+        "a plain press inside the frame no longer drags the selection"
+    );
+}

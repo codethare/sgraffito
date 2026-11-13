@@ -528,7 +528,7 @@ no capabilities until a device exists.
   hit test, and a version 2 file.
 - The selection is a tool's state, not the document's: there is no group entity, so the frame is
   recomputed from the geometry every frame, a restart starts with nothing selected, and there is no
-  shift-click to add one element to a selection — a marquee is how several are taken at once. There
+  shift-click adds or removes one element and a marquee is how several are taken at once. There
   is no delete key for a selection either; the eraser still removes one element per click.
 - A resize scales the geometry, not the pen: `Stroke.width` never changes, and a text box's `size`
   follows the vertical factor of the resize, clamped to the existing text size bounds. A factor that
@@ -609,19 +609,17 @@ no capabilities until a device exists.
    on `TextItem`, the shaped box rasterised and used as a `Pattern` shader for a turned rectangle,
    an inverse transform in front of the measured-region hit test, and a version 2 file. Everything
    else about the rotation is already in place.
-7. Shift-click to add one element to a selection. It is an addition to the press rules in
-   `select_press`, not to the gesture arithmetic, and `Delete` already removes a whole selection.
-8. Filling a shape, and a second arrowhead style: a fill would need a fill colour per shape in the
+7. Filling a shape, and a second arrowhead style: a fill would need a fill colour per shape in the
    file and a decision about what a click inside a filled shape does, since the interior is
    deliberately not a hit today. Editing a shape after it lands (its kind, one corner) is the other
    half of that, and a `kind` field already in the file makes it additive.
-9. Forward-delete inside a text box: `Delete` is inert there today, which is recorded rather than
+8. Forward-delete inside a text box: `Delete` is inert there today, which is recorded rather than
    implemented. It would be a `Caret::Right`-shaped deletion in `TextBuffer`, and it is a text
    feature, not a selection one.
-10. Colour the icons? They are drawn in `TOOLBAR_FOREGROUND` and take the accent block's fill behind
+9. Colour the icons? They are drawn in `TOOLBAR_FOREGROUND` and take the accent block's fill behind
    them, which is what a macOS toolbar does; a per-tool tint would be a second meaning for colour in
    an interface whose colour already means the active pen.
-11. Archiving the delivered OpenSpec changes, which stays impossible until the capability specs
+10. Archiving the delivered OpenSpec changes, which stays impossible until the capability specs
     exist under `openspec/specs/`.
 
 ## Sticky-note interaction fixes (this session)

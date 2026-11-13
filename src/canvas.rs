@@ -957,7 +957,8 @@ pub enum Press {
 
 /// Resolve a press with the selection tool, decided here so that a test can check it: `screen` is where
 /// the pointer is, and the frame is measured in canvas coordinates and mapped to screen **only** to find
-/// the handles, because that is where they are drawn.
+/// the handles, because that is where they are drawn. `shift` toggles the element under the pointer into
+/// or out of the selection, after the handles have had their say and instead of any other press.
 ///
 /// The two coordinate spaces are the whole of this function. A gesture and a marquee move the document,
 /// so they are canvas; the handles are interface-sized, so they are screen. Confusing the two makes a
