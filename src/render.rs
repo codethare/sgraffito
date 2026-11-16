@@ -192,8 +192,8 @@ struct Block {
     /// What the stretched block says: what the control does, and the key that does the same thing.
     /// Built by [`labelled`], so an action cannot be added without its text naming its key.
     label: String,
-    /// `None` for the size readout between `[` and `]`: drawn, but the neighbouring block owns
-    /// the presses on its row.
+    /// The control a press applies. Every block has one, the width readout included: its action opens
+    /// the list of steps rather than stepping.
     action: Option<ToolbarAction>,
     /// The armed tool's block, or the active colour's swatch: drawn with the accent.
     active: bool,
@@ -530,6 +530,25 @@ pub fn panel_stays_open(hover: Option<ToolbarAction>, owner: Option<ToolbarActio
             Some(owner) => hover == Some(owner) || hover.is_some_and(picks_from_panel),
             None => false,
         }
+}
+
+/// Whether a press on a rail control dismisses the open panel: a press on the panel's own block or on one
+/// of its rows belongs to the panel, and anything else is a press outside it, which a menu closes on.
+pub fn press_dismisses_panel(hit: Option<ToolbarAction>, owner: Option<ToolbarAction>) -> bool {
+    match (hit, owner) {
+        (Some(hit), Some(owner)) => hit != owner && !picks_from_panel(hit),
+        _ => false,
+    }
+}
+
+/// Whether a hover opens the width list: on entering the readout, and only when no other list is open. A
+/// hover that is still on the readout does not reopen a list the user just dismissed.
+pub fn opens_size_list(
+    previous: Option<ToolbarAction>,
+    hover: Option<ToolbarAction>,
+    owner: Option<ToolbarAction>,
+) -> bool {
+    hover == Some(ToolbarAction::Size) && previous != hover && owner.is_none()
 }
 
 /// The drawer's residents: the controls the rail has no room for. Their own height is what the drawer's
@@ -1280,9 +1299,6 @@ impl Renderer {
         // transition only moves the capsule's trailing edge and the text that edge uncovers.
         let grow = toolbar.grow.clamp(0.0, 1.0);
         for control in &pill.controls {
-            // Only a rail block's capsule opens under the pointer. A row of a panel states its name at rest,
-            // so it is always at its own width: animating it made every row of an open list grow again
-            // whenever the pointer moved from one row to the next.
             // A rail block's capsule opens under the pointer; a panel's rows open once, when the panel
             // does. Both grow from the block square, and neither moves while it opens.
             let opening = if control.block.column == 0 {
@@ -1569,7 +1585,8 @@ impl Renderer {
             // chosen between, and a row that has to be hovered before it can be read has to be probed.
             let labelled = hovered || block.column == 1;
             let bare = block.mark == Mark::None;
-            let label = labelled.then(|| self.text_width(&block.label, TOOLBAR_TEXT_SIZE));
+            let label = (labelled && !block.label.is_empty())
+                .then(|| self.text_width(&block.label, TOOLBAR_TEXT_SIZE));
             // A row of the drawer starts a column to the right, so it has that much less of the reserve to
             // reach into: the reserve is the room a control may take from the rail's own edge, and
             // `toolbar_bounds` — what a frame that repaints only the rail damages — is that wide.
@@ -3054,21 +3071,102 @@ mod tests {
             }],
             ..crate::render::tests::rail_for_legend()
         };
-        let mut renderer = Renderer::new();
-        let layout = |renderer: &mut Renderer, opening: f32| {
-            let pill = renderer
-                .cached_toolbar_pill(&rail(opening), (900.0, 1000.0))
-                .expect("the rail has a layout");
+        // A fresh renderer per end of the transition: the layout cache is keyed by `same_layout`, which
+        // deliberately ignores the opening, so one renderer would serve the first answer to both.
+        let layout = |opening: f32| {
+            let mut renderer = Renderer::new();
+            let pill = renderer.toolbar_pill(&rail(opening), (900.0, 1000.0));
             pill.controls
                 .iter()
                 .map(|control| (control.block.action, control.y, control.width))
                 .collect::<Vec<_>>()
         };
-        assert_eq!(
-            layout(&mut renderer, 0.0),
-            layout(&mut renderer, 1.0),
-            "the opening moved the controls"
+        assert_eq!(layout(0.0), layout(1.0), "the opening moved the controls");
+        // And the press lands on the same control at both ends of it.
+        let mut renderer = Renderer::new();
+        for (x, y) in [(20.0, 400.0), (50.0, 400.0), (50.0, 300.0)] {
+            assert_eq!(
+                renderer.toolbar_hit(&rail(0.0), 900.0, 1000.0, x, y),
+                renderer.toolbar_hit(&rail(1.0), 900.0, 1000.0, x, y),
+                "the hit at ({x},{y}) changed while the panel opened"
+            );
+        }
+    }
+
+    /// A hovered control with no label must not stretch: there would be nothing under the wider capsule,
+    /// and the wider hit box would reach into the panel's column.
+    #[test]
+    fn a_hovered_readout_does_not_stretch() {
+        let rail = Toolbar {
+            hover: Some(ToolbarAction::Size),
+            ..crate::render::tests::rail_for_legend()
+        };
+        let mut renderer = Renderer::new();
+        let pill = renderer.toolbar_pill(&rail, (900.0, 1000.0));
+        let readout = pill
+            .controls
+            .iter()
+            .find(|control| matches!(control.block.mark, Mark::Value(_)))
+            .expect("the rail has no width readout");
+        assert_eq!(readout.width, TOOLBAR_BLOCK, "the readout stretched");
+        assert!(!readout.stretched);
+    }
+
+    /// A press outside an open panel dismisses it, and a press on the panel's block or one of its rows is
+    /// the panel's own business: the board list is opened by a click, so it must close on the next one
+    /// elsewhere rather than outlive it.
+    #[test]
+    fn a_press_outside_the_panel_dismisses_it() {
+        let boards = Some(ToolbarAction::Boards);
+        assert!(press_dismisses_panel(
+            Some(ToolbarAction::Tool(Tool::Pen)),
+            boards
+        ));
+        assert!(press_dismisses_panel(Some(ToolbarAction::Lock), boards));
+        assert!(press_dismisses_panel(Some(ToolbarAction::Size), boards));
+        assert!(
+            press_dismisses_panel(Some(ToolbarAction::More), boards),
+            "another list's block was not a press outside this one"
         );
+        assert!(!press_dismisses_panel(Some(ToolbarAction::Boards), boards));
+        assert!(!press_dismisses_panel(
+            Some(ToolbarAction::Board(0)),
+            boards
+        ));
+        assert!(!press_dismisses_panel(
+            Some(ToolbarAction::NewBoard),
+            boards
+        ));
+        assert!(
+            !press_dismisses_panel(None, boards),
+            "a press on the canvas"
+        );
+        assert!(!press_dismisses_panel(
+            Some(ToolbarAction::Tool(Tool::Pen)),
+            None
+        ));
+    }
+
+    /// The width list opens on entering the readout, not on every motion over it: an `Esc` that closed it
+    /// while the pointer stayed put must not be undone by the next jitter.
+    #[test]
+    fn the_size_list_opens_on_entry() {
+        let size = Some(ToolbarAction::Size);
+        assert!(opens_size_list(
+            Some(ToolbarAction::Tool(Tool::Pen)),
+            size,
+            None
+        ));
+        assert!(opens_size_list(None, size, None));
+        assert!(
+            !opens_size_list(size, size, None),
+            "staying on the readout reopened the list"
+        );
+        assert!(
+            !opens_size_list(None, size, Some(ToolbarAction::Boards)),
+            "a hover dismissed a list somebody opened"
+        );
+        assert!(!opens_size_list(None, None, None));
     }
 
     /// The panel hangs off the block that opens it and never shares that block's band, and its plate is the

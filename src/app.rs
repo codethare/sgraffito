@@ -585,6 +585,9 @@ impl App {
         self.end_text_edit();
         self.commit_any_gesture();
         self.cancel_transients();
+        // A menu belongs to the mode it was opened in: locking hides the rail, and returning to edit mode
+        // must not put back a list nobody asked for.
+        self.close_panels();
         // The view is kept across a mode switch, but a gesture that was holding the pointer is not:
         // the surfaces it was panning are about to be recreated.
         self.pan = None;
@@ -857,6 +860,14 @@ impl App {
         self.toolbar_hover = None;
         self.toolbar_hover_since = None;
         self.refresh_toolbar();
+    }
+
+    /// Dismiss every panel: what a press outside one, a press on another rail block and a mode switch do.
+    /// The three setters are exclusive, so only the one that changes anything repaints the rail.
+    pub(crate) fn close_panels(&mut self) {
+        self.set_more(false);
+        self.set_boards(false);
+        self.set_size(false);
     }
 
     pub(crate) fn toggle_boards(&mut self) {

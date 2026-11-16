@@ -35,7 +35,7 @@ use crate::canvas::{
     Board, Caret, ERASER_THRESHOLD, Rect, SELECT_HANDLE_HIT, ShapeKind, Stroke, TextBuffer,
     ZOOM_STEP, constrained_drag, grab_at, selection_frame,
 };
-use crate::render::{panel_stays_open, picks_from_panel};
+use crate::render::{opens_size_list, panel_stays_open, picks_from_panel, press_dismisses_panel};
 
 /// The input method's own log, off unless `SGRAFFITO_IM_TRACE` is set: a commit that does not appear is a
 /// question about which batch the compositor sent, and the answer has to come from the session where it
@@ -661,7 +661,7 @@ impl App {
     /// edit ends, then a selection is dropped, and only then does the daemon lock.
     fn escape(&mut self) {
         // An open menu is the most transient thing on the screen, so it closes first: a second `Esc` then
-        // does whatever it did before the menu was opened. Both panels are menus, and only one is open.
+        // does whatever it did before the menu was opened. The three panels are menus, and only one is open.
         if self.boards_open {
             self.set_boards(false);
             return;
@@ -768,6 +768,11 @@ impl App {
             return;
         }
         if let Some(action) = self.toolbar_hit(key, x, y) {
+            // A press on another block is a press outside the open menu, which closes it; the block's own
+            // action then runs, so a press on another list's block opens that one.
+            if press_dismisses_panel(Some(action), self.panel_owner()) {
+                self.close_panels();
+            }
             self.apply_toolbar_action(Some(*key), action);
             return;
         }
@@ -777,9 +782,7 @@ impl App {
         // pointer over the canvas and then a click armed the text tool and entered a box with the panel still
         // open — and `Esc` then went to the edit, because a focused box handles `Esc` before the rail does, so
         // the first `Esc` ended the edit and left the menu up.
-        self.set_more(false);
-        self.set_boards(false);
-        self.set_size(false);
+        self.close_panels();
         // A pan owns the pointer while it runs: nothing else may start under it.
         if self.panning() {
             return;
@@ -921,13 +924,11 @@ impl App {
         if let Some(owner) = self.panel_owner()
             && !panel_stays_open(hover, Some(owner))
         {
-            self.set_more(false);
-            self.set_boards(false);
-            self.set_size(false);
+            self.close_panels();
         }
         // Hovering the readout opens the width list, but a hover never dismisses a list that a click or a
-        // key opened: those are dismissed by their own rules.
-        if hover == Some(ToolbarAction::Size) && self.panel_owner().is_none() {
+        // key opened, and staying on the readout does not reopen a list the user just dismissed.
+        if opens_size_list(self.toolbar_hover, hover, self.panel_owner()) {
             self.set_size(true);
         }
         if hover != self.toolbar_hover {
@@ -993,9 +994,7 @@ impl App {
         // closes after its item is chosen. A rail block needs no rule here: the pointer reached it, so the
         // drawer had already closed on the way.
         if picks_from_panel(action) {
-            self.set_more(false);
-            self.set_boards(false);
-            self.set_size(false);
+            self.close_panels();
         }
     }
 
