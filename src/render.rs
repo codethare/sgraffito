@@ -507,8 +507,8 @@ fn open_panel(
     })
 }
 
-/// Whether applying `action` is picking something out of a panel, which closes it: a list is opened to
-/// pick from, not to look at.
+/// Whether `action` belongs to a panel: a pick out of a list. What a pick *closes* is
+/// [`closes_panel_on_pick`]'s decision — a width step is the one pick that leaves its list open.
 pub fn picks_from_panel(action: ToolbarAction) -> bool {
     DRAWER.contains(&action)
         || matches!(
@@ -523,7 +523,8 @@ pub fn picks_from_panel(action: ToolbarAction) -> bool {
 /// Whether the open panel stays open with the pointer on `hover`: on the block that opened it, or on one
 /// of its own rows. The drawer is a menu the pointer opens by walking into it, so anywhere else — including
 /// off the rail entirely — closes it. The boards and width lists are opened by a click or a hover and
-/// dismissed by their own rules — a pick, a press elsewhere, `Esc` — so no hover state closes them.
+/// dismissed by their own rules — a pick that closes them, a press elsewhere, `Esc` — so no hover state
+/// closes them.
 pub fn panel_stays_open(hover: Option<ToolbarAction>, owner: Option<ToolbarAction>) -> bool {
     matches!(owner, Some(ToolbarAction::Boards | ToolbarAction::Size))
         || match owner {
@@ -1670,9 +1671,9 @@ impl Renderer {
         let height = reach;
         // The walkway into a panel. The drawer and the boards list own the strip beside the rail, from
         // their first row to their last — a block level with a row answers for the list, which is how the
-        // pointer walks into a tall list from any height. The width list sits beside the foot, so its rows
-        // would shadow the boards block; it needs only the gap beside the rail's blocks, and those keep
-        // their own press.
+        // pointer walks into a tall list from any height. The width list hangs off the readout, whose rows
+        // reach the boards block just below it, so a full strip would shadow that block; it needs only the
+        // gap beside the rail's blocks, and those keep their own press.
         let corridor_x = match owner {
             Some(ToolbarAction::Size) => TOOLBAR_BLOCK,
             _ => 0.0,
@@ -3207,6 +3208,41 @@ mod tests {
                 renderer.toolbar_hit(&rail, w, h, ox + x, oy + boards.y + 5.0),
                 Some(ToolbarAction::Boards),
                 "the width list answered for the boards block at x={x}"
+            );
+        }
+        // The walkway is the gap beside the rail's blocks, over the whole height the list spans: without it
+        // the pointer would cross a dead zone on its way from the readout into a row.
+        let row_y = |action: ToolbarAction| {
+            pill.controls
+                .iter()
+                .find(|control| control.block.action == Some(action))
+                .map(|control| control.y)
+                .unwrap_or_else(|| panic!("{action:?} is not on the rail"))
+        };
+        for y in [row_y(ToolbarAction::Size), boards.y] {
+            for x in [TOOLBAR_BLOCK + 1.0, TOOLBAR_DRAWER_X - 1.0] {
+                assert_eq!(
+                    renderer.toolbar_hit(&rail, w, h, ox + x, oy + y + 5.0),
+                    Some(ToolbarAction::Size),
+                    "the walkway at x={x}, y={y} is not the list's"
+                );
+            }
+        }
+        // And the panel's column is its rows.
+        for (step, action) in [
+            (ToolbarAction::SizeStep(-1.0), ToolbarAction::SizeStep(-1.0)),
+            (ToolbarAction::SizeStep(1.0), ToolbarAction::SizeStep(1.0)),
+        ] {
+            assert_eq!(
+                renderer.toolbar_hit(
+                    &rail,
+                    w,
+                    h,
+                    ox + TOOLBAR_DRAWER_X + 6.0,
+                    oy + row_y(step) + 5.0
+                ),
+                Some(action),
+                "the panel's column at {step:?} is not its row"
             );
         }
     }
