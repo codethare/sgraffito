@@ -532,13 +532,15 @@ pub fn picks_from_panel(action: ToolbarAction) -> bool {
 }
 
 /// Whether the open panel stays open with the pointer on `hover`: on the block that opened it, or on one
-/// of its own rows. Anywhere else — including off the rail entirely — closes it, so a list never sits open
-/// beside the rail while the pointer is somewhere else.
+/// of its own rows. The drawer is a menu the pointer opens by walking into it, so anywhere else — including
+/// off the rail entirely — closes it. The boards list is opened by a click or a key instead and dismissed
+/// by a pick, a press elsewhere or `Esc`, so no hover state closes it.
 pub fn panel_stays_open(hover: Option<ToolbarAction>, owner: Option<ToolbarAction>) -> bool {
-    match owner {
-        Some(owner) => hover == Some(owner) || hover.is_some_and(picks_from_panel),
-        None => false,
-    }
+    matches!(owner, Some(ToolbarAction::Boards))
+        || match owner {
+            Some(owner) => hover == Some(owner) || hover.is_some_and(picks_from_panel),
+            None => false,
+        }
 }
 
 /// The drawer's residents: the controls the rail has no room for. Their own height is what the drawer's
@@ -2995,6 +2997,27 @@ mod tests {
             Some(ToolbarAction::Color(0)),
             Some(ToolbarAction::More)
         ));
+    }
+
+    /// A menu opened by a click stays until it is dismissed; the drawer, which the pointer opens by
+    /// walking into it, leaves with the pointer. The boards list is the first kind.
+    #[test]
+    fn the_boards_list_stays_open_when_the_pointer_leaves() {
+        for hover in [
+            None,
+            Some(ToolbarAction::Tool(Tool::Hand)),
+            Some(ToolbarAction::Lock),
+            Some(ToolbarAction::Board(0)),
+        ] {
+            assert!(
+                panel_stays_open(hover, Some(ToolbarAction::Boards)),
+                "the boards list closed with {hover:?} under the pointer"
+            );
+        }
+        assert!(
+            !panel_stays_open(None, Some(ToolbarAction::More)),
+            "the drawer stopped leaving with the pointer"
+        );
     }
 
     /// The panel hangs off the block that opens it and never shares that block's band, and its plate is the
