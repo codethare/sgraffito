@@ -333,6 +333,9 @@ pub struct App {
     pub(crate) boards_open: bool,
     /// Whether the rail's width list is open. The one panel a hover opens; one at a time like the others.
     pub(crate) size_open: bool,
+    /// When the open panel opened, for its own transition: `None` when no panel is open. Panels close at
+    /// once, so only the opening has a clock.
+    panel_open_since: Option<Instant>,
     /// The pan gesture in flight: where the pointer was, so a motion event pans by its own delta. A pan
     /// is not a document change, so nothing about it is in the document, in the file, or something
     /// `Esc` has to commit or abandon.
@@ -420,6 +423,7 @@ impl App {
             shared: false,
             boards_open: false,
             size_open: false,
+            panel_open_since: None,
             text_input_manager: None,
             text_input: None,
             text_input_enabled: false,
@@ -639,6 +643,7 @@ impl App {
                     size: self.active_size(),
                     hover: self.toolbar_hover,
                     grow: self.toolbar_grow(Instant::now()),
+                    panel_grow: self.panel_grow(Instant::now()),
                     more: self.more,
                     boards_open: self.boards_open,
                     size_open: self.size_open,
@@ -834,6 +839,7 @@ impl App {
         self.boards_open = false;
         self.size_open = false;
         self.more = open;
+        self.panel_open_since = open.then(Instant::now);
         self.toolbar_hover = None;
         self.toolbar_hover_since = None;
         self.refresh_toolbar();
@@ -847,6 +853,7 @@ impl App {
         self.more = false;
         self.size_open = false;
         self.boards_open = open;
+        self.panel_open_since = open.then(Instant::now);
         self.toolbar_hover = None;
         self.toolbar_hover_since = None;
         self.refresh_toolbar();
@@ -866,6 +873,7 @@ impl App {
         self.boards_open = false;
         self.more = false;
         self.size_open = open;
+        self.panel_open_since = open.then(Instant::now);
         self.refresh_toolbar();
     }
 
@@ -1044,10 +1052,16 @@ impl App {
         hover_grow(self.toolbar_hover_since, now)
     }
 
+    /// How far the open panel has opened, 0 to 1.
+    fn panel_grow(&self, now: Instant) -> f32 {
+        hover_grow(self.panel_open_since, now)
+    }
+
     /// Whether a pop-out is still opening, and so whether the loop has to come back for the next
     /// frame of it.
     fn animating(&self) -> bool {
         self.toolbar_grow(Instant::now()) < 1.0
+            || self.panel_grow(Instant::now()) < 1.0
             || zoom_in_flight(self.outputs.values().map(|out| out.zoom))
             || self.outputs.values().any(|out| out.motion.quality() < 1.0)
     }

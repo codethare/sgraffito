@@ -1283,8 +1283,15 @@ impl Renderer {
             // Only a rail block's capsule opens under the pointer. A row of a panel states its name at rest,
             // so it is always at its own width: animating it made every row of an open list grow again
             // whenever the pointer moved from one row to the next.
-            let width = if control.stretched && control.block.column == 0 {
-                TOOLBAR_BLOCK + (control.width - TOOLBAR_BLOCK) * grow
+            // A rail block's capsule opens under the pointer; a panel's rows open once, when the panel
+            // does. Both grow from the block square, and neither moves while it opens.
+            let opening = if control.block.column == 0 {
+                grow
+            } else {
+                toolbar.panel_grow.clamp(0.0, 1.0)
+            };
+            let width = if control.stretched {
+                TOOLBAR_BLOCK + (control.width - TOOLBAR_BLOCK) * opening
             } else {
                 control.width
             };
@@ -3034,6 +3041,36 @@ mod tests {
         );
     }
 
+    /// The opening moves the drawn rows only: the layout and the hits are the settled panel, at every
+    /// frame of it, so a click during the 140 ms lands where the row will be.
+    #[test]
+    fn a_panel_opening_does_not_move_its_layout() {
+        let rail = |opening: f32| Toolbar {
+            boards_open: true,
+            panel_grow: opening,
+            boards: vec![crate::canvas::BoardRow {
+                name: "office".into(),
+                current: true,
+            }],
+            ..crate::render::tests::rail_for_legend()
+        };
+        let mut renderer = Renderer::new();
+        let layout = |renderer: &mut Renderer, opening: f32| {
+            let pill = renderer
+                .cached_toolbar_pill(&rail(opening), (900.0, 1000.0))
+                .expect("the rail has a layout");
+            pill.controls
+                .iter()
+                .map(|control| (control.block.action, control.y, control.width))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            layout(&mut renderer, 0.0),
+            layout(&mut renderer, 1.0),
+            "the opening moved the controls"
+        );
+    }
+
     /// The panel hangs off the block that opens it and never shares that block's band, and its plate is the
     /// box the layout computed with its rows: what is painted and what is hit are one geometry.
     #[test]
@@ -3355,6 +3392,7 @@ mod tests {
             size: 3.0,
             hover: None,
             grow: 0.0,
+            panel_grow: 1.0,
             more: false,
             boards_open: false,
             size_open: false,
@@ -3643,6 +3681,7 @@ mod tests {
                 size: 3.0,
                 hover: None,
                 grow: 1.0,
+                panel_grow: 1.0,
                 more: false,
                 boards_open: false,
                 size_open: false,
@@ -3983,6 +4022,7 @@ mod tests {
             size: 3.0,
             hover: None,
             grow: 1.0,
+            panel_grow: 1.0,
             more: false,
             boards_open: false,
             size_open: false,

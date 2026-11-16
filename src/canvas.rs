@@ -1880,6 +1880,9 @@ pub struct Toolbar {
     /// How far that stretch has opened, 0 to 1. It moves only the capsule's trailing edge and
     /// the text the edge uncovers, so a frame of the transition is a localized repaint.
     pub grow: f32,
+    /// How far the open panel has opened, 0 to 1: the rows' capsules grow from their squares the way a
+    /// block's pop-out does, and the layout, the hits and the damage box are the settled panel throughout.
+    pub panel_grow: f32,
     /// Whether the drawer of rarely used controls is open. It changes which controls exist, not the
     /// rail's own height, so it is rail state like the tool and the colour.
     pub more: bool,

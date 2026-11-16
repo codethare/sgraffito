@@ -373,6 +373,7 @@ fn toolbar(tool: Tool, color: &'static str, size: f32, hover: Option<ToolbarActi
         size,
         hover,
         grow: 1.0,
+        panel_grow: 1.0,
         more: false,
         boards_open: false,
         size_open: false,
@@ -2436,6 +2437,7 @@ fn a_row_of_the_panel_can_be_clicked_with_the_pointer_on_the_block_that_opened_i
         size: 3.0,
         hover: Some(ToolbarAction::More),
         grow: 1.0,
+        panel_grow: 1.0,
         more: true,
         boards_open: false,
         size_open: false,
@@ -3510,6 +3512,53 @@ fn the_row_the_pointer_walks_into_is_not_the_one_that_deletes() {
         panel[block_y],
         Some(ToolbarAction::NewBoard),
         "the row level with the `boards` block is not the row that creates a board"
+    );
+}
+
+/// A panel opening uncovers its rows: at the start of the transition the panel's column carries only the
+/// row squares, and at the end their capsules and labels.
+#[test]
+fn a_panel_eases_open_from_squares_to_rows() {
+    let (w, h) = (900u32, 1000u32);
+    let frame = |open: bool, opening: f32| {
+        let mut buf = buffer(w, h);
+        Renderer::new().render(
+            &mut buf,
+            w,
+            h,
+            1.0,
+            View::default(),
+            &Board::default(),
+            &Overlay {
+                toolbar: Some(Toolbar {
+                    boards_open: open,
+                    panel_grow: opening,
+                    ..boards_rail(&[("Board 1", true), ("office", false)])
+                }),
+                ..Default::default()
+            },
+            None,
+        );
+        buf
+    };
+    // Beyond the 30 pt square a row paints nothing until its capsule opens, so the closed panel is the
+    // reference for both ends of the transition.
+    let beyond_square = |a: &[u8], b: &[u8]| {
+        (80..260)
+            .flat_map(|x| (0..h).map(move |y| (x, y)))
+            .filter(|(x, y)| {
+                let i = ((y * w + x) * 4) as usize;
+                a[i..i + 4] != b[i..i + 4]
+            })
+            .count()
+    };
+    let closed = frame(false, 1.0);
+    let start = beyond_square(&frame(true, 0.0), &closed);
+    let end = beyond_square(&frame(true, 1.0), &closed);
+    assert_eq!(start, 0, "a collapsed panel painted beyond its squares");
+    assert!(
+        end > 0,
+        "the opening uncovered nothing: {start} against {end}"
     );
 }
 

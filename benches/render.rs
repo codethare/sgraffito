@@ -261,6 +261,7 @@ fn rail_state() -> Toolbar {
         size: 3.0,
         hover: None,
         grow: 1.0,
+        panel_grow: 1.0,
     }
 }
 
