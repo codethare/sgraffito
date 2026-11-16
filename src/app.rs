@@ -331,6 +331,8 @@ pub struct App {
     pub(crate) shared: bool,
     /// Whether the rail's boards panel is open. One panel at a time: opening it closes the drawer.
     pub(crate) boards_open: bool,
+    /// Whether the rail's width list is open. The one panel a hover opens; one at a time like the others.
+    pub(crate) size_open: bool,
     /// The pan gesture in flight: where the pointer was, so a motion event pans by its own delta. A pan
     /// is not a document change, so nothing about it is in the document, in the file, or something
     /// `Esc` has to commit or abandon.
@@ -417,6 +419,7 @@ impl App {
             exit: false,
             shared: false,
             boards_open: false,
+            size_open: false,
             text_input_manager: None,
             text_input: None,
             text_input_enabled: false,
@@ -638,6 +641,7 @@ impl App {
                     grow: self.toolbar_grow(Instant::now()),
                     more: self.more,
                     boards_open: self.boards_open,
+                    size_open: self.size_open,
                     boards: self
                         .doc
                         .names()
@@ -828,6 +832,7 @@ impl App {
         // One panel at a time: the rail declares one panel box, and two plates on screen would be two
         // lists the pointer could not be said to be reading from.
         self.boards_open = false;
+        self.size_open = false;
         self.more = open;
         self.toolbar_hover = None;
         self.toolbar_hover_since = None;
@@ -840,6 +845,7 @@ impl App {
             return;
         }
         self.more = false;
+        self.size_open = false;
         self.boards_open = open;
         self.toolbar_hover = None;
         self.toolbar_hover_since = None;
@@ -850,11 +856,26 @@ impl App {
         self.set_boards(!self.boards_open);
     }
 
+    /// Open or close the width list, the one panel a hover opens. Unlike `set_boards` it keeps the hover:
+    /// clearing it would make the frame that opened the panel forget the block the pointer is on, and the
+    /// next motion would open it again.
+    pub(crate) fn set_size(&mut self, open: bool) {
+        if self.size_open == open {
+            return;
+        }
+        self.boards_open = false;
+        self.more = false;
+        self.size_open = open;
+        self.refresh_toolbar();
+    }
+
     /// The block that owns the open panel, if any: its hit box is the corridor the pointer travels
     /// through to reach the panel's rows, and `None` means no panel is open.
     pub(crate) fn panel_owner(&self) -> Option<ToolbarAction> {
         if self.boards_open {
             Some(ToolbarAction::Boards)
+        } else if self.size_open {
+            Some(ToolbarAction::Size)
         } else if self.more {
             Some(ToolbarAction::More)
         } else {

@@ -161,6 +161,9 @@ pub enum ToolbarAction {
     Color(usize),
     /// Direction to step the active tool's size in, ±1.
     SizeStep(f32),
+    /// Open the list of width steps. The readout is the only control that carries it: hovering it opens the
+    /// list, and the two steps live there rather than beside it on the rail.
+    Size,
     /// The `Esc` control: finish the text box being edited first, lock on the next click.
     Lock,
     /// Open or close the drawer of controls that are not used often.
@@ -1882,6 +1885,9 @@ pub struct Toolbar {
     pub more: bool,
     /// Whether the panel of boards is open. Only one panel is open at a time.
     pub boards_open: bool,
+    /// Whether the width list is open. It is the one panel a hover opens, and it obeys the same one-panel
+    /// rule as the other two.
+    pub size_open: bool,
     /// The boards the panel lists, in name order, with the one this output shows marked. Carried in the
     /// rail's own value because the panel's rows are document names: the layout, the hit test and the
     /// cache all read one value rather than three functions taking the list beside the rail.

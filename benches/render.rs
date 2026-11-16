@@ -252,6 +252,7 @@ fn rail_state() -> Toolbar {
     Toolbar {
         more: false,
         boards_open: false,
+        size_open: false,
         boards: Vec::new(),
         shared: false,
         scrim: true,

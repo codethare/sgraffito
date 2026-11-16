@@ -375,6 +375,7 @@ fn toolbar(tool: Tool, color: &'static str, size: f32, hover: Option<ToolbarActi
         grow: 1.0,
         more: false,
         boards_open: false,
+        size_open: false,
         boards: Vec::new(),
         shared: false,
         scrim: true,
@@ -565,8 +566,10 @@ fn every_block_of_the_rail_is_reachable_and_no_row_is_a_gap() {
             "colour {index}"
         );
     }
-    assert!(actions.contains(&ToolbarAction::SizeStep(-1.0)));
-    assert!(actions.contains(&ToolbarAction::SizeStep(1.0)));
+    assert!(
+        actions.contains(&ToolbarAction::Size),
+        "the width readout is not reachable"
+    );
     assert_eq!(
         actions[0],
         ToolbarAction::Color(0),
@@ -577,10 +580,9 @@ fn every_block_of_the_rail_is_reachable_and_no_row_is_a_gap() {
         ToolbarAction::Lock,
         "Esc is not last"
     );
-    // Twenty-one clickable blocks: five colours, eleven tools, `[`, `]`, the boards' block, the drawer's
-    // block and `Esc`. The size readout is drawn between the two size keys but owned by `[`, so it is not
-    // one of them.
-    assert_eq!(actions.len(), 21, "a drawn block cannot be hit");
+    // Twenty clickable blocks: five colours, eleven tools, the width readout that opens the steps' list,
+    // the boards' block, the drawer's block and `Esc`.
+    assert_eq!(actions.len(), 20, "a drawn block cannot be hit");
     // Outside the rail the toolbar takes nothing: those presses are drawing gestures.
     let band = toolbar_bounds(&rail, w, h);
     assert_eq!(
@@ -2436,6 +2438,7 @@ fn a_row_of_the_panel_can_be_clicked_with_the_pointer_on_the_block_that_opened_i
         grow: 1.0,
         more: true,
         boards_open: false,
+        size_open: false,
         boards: Vec::new(),
         shared: false,
         scrim: true,

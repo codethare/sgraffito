@@ -670,6 +670,10 @@ impl App {
             self.set_more(false);
             return;
         }
+        if self.size_open {
+            self.set_size(false);
+            return;
+        }
         let mut abandoned = self.gesture.take().is_some();
         // A drag that copied what it held made a document change, and aborting the gesture has to take it
         // back: nothing a gesture does reaches the document until it is released.
@@ -775,6 +779,7 @@ impl App {
         // the first `Esc` ended the edit and left the menu up.
         self.set_more(false);
         self.set_boards(false);
+        self.set_size(false);
         // A pan owns the pointer while it runs: nothing else may start under it.
         if self.panning() {
             return;
@@ -918,6 +923,12 @@ impl App {
         {
             self.set_more(false);
             self.set_boards(false);
+            self.set_size(false);
+        }
+        // Hovering the readout opens the width list, but a hover never dismisses a list that a click or a
+        // key opened: those are dismissed by their own rules.
+        if hover == Some(ToolbarAction::Size) && self.panel_owner().is_none() {
+            self.set_size(true);
         }
         if hover != self.toolbar_hover {
             self.toolbar_hover = hover;
@@ -953,6 +964,8 @@ impl App {
             ToolbarAction::Color(index) => self.set_color(index),
             ToolbarAction::SizeStep(dir) => self.nudge_size(dir),
             ToolbarAction::More => self.toggle_more(),
+            // The width readout opens its list on hover; a click on it steps nothing and closes nothing.
+            ToolbarAction::Size => {}
             ToolbarAction::Scrim => self.toggle_scrim(),
             ToolbarAction::Boards => self.toggle_boards(),
             ToolbarAction::Shared => self.toggle_shared(),
@@ -982,6 +995,7 @@ impl App {
         if picks_from_panel(action) {
             self.set_more(false);
             self.set_boards(false);
+            self.set_size(false);
         }
     }
 

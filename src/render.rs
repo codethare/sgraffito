@@ -202,8 +202,8 @@ struct Block {
 }
 
 /// The key a control applies, as it is written in a stretched block's text.
-fn key_of(action: ToolbarAction) -> &'static str {
-    match action {
+fn key_of(action: ToolbarAction) -> Option<&'static str> {
+    Some(match action {
         ToolbarAction::Tool(tool) => tool.key(),
         ToolbarAction::More => "M",
         ToolbarAction::Scrim => "B",
@@ -222,12 +222,17 @@ fn key_of(action: ToolbarAction) -> &'static str {
             }
         }
         ToolbarAction::Lock => "Esc",
-    }
+        // The width readout has no key: hovering it is the way in, and the steps it opens carry `[` and `]`.
+        ToolbarAction::Size => return None,
+    })
 }
 
 /// What a block says when the pointer is on it, ending with the key that applies the same thing.
 fn labelled(action: ToolbarAction, what: &str) -> String {
-    format!("{what} ({})", key_of(action))
+    match key_of(action) {
+        Some(key) => format!("{what} ({key})"),
+        None => what.to_string(),
+    }
 }
 
 /// Where a block's text starts, relative to the rail's origin: after that block's own square and the gap, and
@@ -245,11 +250,6 @@ fn label_x(column_x: f32, bare: bool) -> f32 {
 /// The controls that fill the rail from the top and fold into the drawer when there is no room for them: the
 /// palette, the tools and the size group, in their own order.
 fn rail_candidates(toolbar: &Toolbar) -> Vec<Block> {
-    let axis = if toolbar.tool == Tool::Text {
-        "size"
-    } else {
-        "width"
-    };
     let mut blocks: Vec<Block> = PALETTE
         .iter()
         .enumerate()
@@ -291,27 +291,11 @@ fn rail_candidates(toolbar: &Toolbar) -> Vec<Block> {
     let last = blocks.len() - 1;
     blocks[last].gap = TOOLBAR_GROUP_GAP;
     blocks.push(Block {
-        mark: Mark::Icon(Icon::Smaller),
-        column: 0,
-        label: labelled(ToolbarAction::SizeStep(-1.0), &format!("smaller {axis}")),
-        action: Some(ToolbarAction::SizeStep(-1.0)),
-        active: false,
-        gap: TOOLBAR_GAP,
-    });
-    blocks.push(Block {
         mark: Mark::Value(format!("{:.0}", toolbar.size)),
         column: 0,
-        // Drawn, but no action owns it, so it never stretches to say anything.
+        // A control with no label: its value is its face, and hovering it opens the steps' own list.
         label: String::new(),
-        action: None,
-        active: false,
-        gap: TOOLBAR_GAP,
-    });
-    blocks.push(Block {
-        mark: Mark::Icon(Icon::Larger),
-        column: 0,
-        label: labelled(ToolbarAction::SizeStep(1.0), &format!("larger {axis}")),
-        action: Some(ToolbarAction::SizeStep(1.0)),
+        action: Some(ToolbarAction::Size),
         active: false,
         gap: TOOLBAR_GROUP_GAP,
     });
@@ -508,6 +492,8 @@ fn open_panel(
 ) -> Option<(ToolbarAction, Vec<Block>)> {
     let rows = if toolbar.boards_open {
         Some((ToolbarAction::Boards, board_rows(toolbar)))
+    } else if toolbar.size_open {
+        Some((ToolbarAction::Size, size_rows(toolbar)))
     } else if toolbar.more {
         Some((ToolbarAction::More, drawer_blocks(toolbar, overflow)))
     } else {
@@ -527,7 +513,10 @@ pub fn picks_from_panel(action: ToolbarAction) -> bool {
     DRAWER.contains(&action)
         || matches!(
             action,
-            ToolbarAction::Board(_) | ToolbarAction::NewBoard | ToolbarAction::DeleteBoard
+            ToolbarAction::Board(_)
+                | ToolbarAction::NewBoard
+                | ToolbarAction::DeleteBoard
+                | ToolbarAction::SizeStep(_)
         )
 }
 
@@ -635,6 +624,30 @@ fn board_rows(toolbar: &Toolbar) -> Vec<Block> {
         gap: TOOLBAR_GAP,
     });
     rows
+}
+
+/// The width list's rows: the two steps, smaller first, so the panel reads in the order the rail did.
+fn size_rows(toolbar: &Toolbar) -> Vec<Block> {
+    let axis = if toolbar.tool == Tool::Text {
+        "size"
+    } else {
+        "width"
+    };
+    [(-1.0, "smaller"), (1.0, "larger")]
+        .into_iter()
+        .map(|(dir, word)| Block {
+            mark: Mark::Icon(if dir < 0.0 {
+                Icon::Smaller
+            } else {
+                Icon::Larger
+            }),
+            column: 1,
+            label: labelled(ToolbarAction::SizeStep(dir), &format!("{word} {axis}")),
+            action: Some(ToolbarAction::SizeStep(dir)),
+            active: false,
+            gap: TOOLBAR_GAP,
+        })
+        .collect()
 }
 
 /// What the `more` block reports while the pointer is on it: what is in the drawer, or `None` while the
@@ -2093,6 +2106,7 @@ fn same_layout(a: &Toolbar, b: &Toolbar) -> bool {
         && a.hover == b.hover
         && a.more == b.more
         && a.boards_open == b.boards_open
+        && a.size_open == b.size_open
         && a.boards == b.boards
         && a.shared == b.shared
         && a.scrim == b.scrim
@@ -3343,6 +3357,7 @@ mod tests {
             grow: 0.0,
             more: false,
             boards_open: false,
+            size_open: false,
             boards: Vec::new(),
             shared: false,
             scrim: true,
@@ -3630,6 +3645,7 @@ mod tests {
                 grow: 1.0,
                 more: false,
                 boards_open: false,
+                size_open: false,
                 boards: Vec::new(),
                 shared: false,
                 scrim: true,
@@ -3969,6 +3985,7 @@ mod tests {
             grow: 1.0,
             more: false,
             boards_open: false,
+            size_open: false,
             boards: Vec::new(),
             shared: false,
             scrim: true,
@@ -4025,7 +4042,7 @@ mod tests {
                 assert!(ink > 0, "{icon:?} drew nothing at scale {scale}");
             }
             assert_eq!(
-                icons, 16,
+                icons, 14,
                 "every function has an icon, and only functions do"
             );
         }
@@ -4070,6 +4087,42 @@ mod tests {
         assert_eq!(icon.data(), exact.data());
     }
 
+    /// The width list is the two steps, in reading order, and the readout itself is a control that says
+    /// nothing: it has no key, so its label is empty and its mark is the value.
+    #[test]
+    fn the_width_list_is_the_two_steps() {
+        let toolbar = Toolbar {
+            size_open: true,
+            ..crate::render::tests::rail_for_legend()
+        };
+        let rows = size_rows(&toolbar);
+        let actions: Vec<Option<ToolbarAction>> = rows.iter().map(|row| row.action).collect();
+        assert_eq!(
+            actions,
+            vec![
+                Some(ToolbarAction::SizeStep(-1.0)),
+                Some(ToolbarAction::SizeStep(1.0))
+            ]
+        );
+        assert_eq!(rows[0].label, "smaller width ([)");
+        assert!(rows.iter().all(|row| row.column == 1));
+        assert!(picks_from_panel(ToolbarAction::SizeStep(1.0)));
+        assert!(!picks_from_panel(ToolbarAction::Size));
+    }
+
+    /// The readout is a rail block with an action and no label: hovering it opens the list, so it must be
+    /// hit and it must not stretch into a capsule with nothing in it.
+    #[test]
+    fn the_width_readout_is_a_control_with_no_label() {
+        let blocks = toolbar_blocks(&crate::render::tests::rail_for_legend(), 1000.0);
+        let readout = blocks
+            .iter()
+            .find(|block| matches!(block.mark, Mark::Value(_)))
+            .expect("the rail has no width readout");
+        assert_eq!(readout.action, Some(ToolbarAction::Size));
+        assert!(readout.label.is_empty());
+    }
+
     #[test]
     fn every_block_states_the_key_that_applies_it() {
         // A block's face carries no key letter any more, so the key is what its stretched text
@@ -4104,16 +4157,25 @@ mod tests {
             _ => None,
         };
         let blocks = toolbar_blocks(&rail_state(), 1000.0);
-        assert_eq!(blocks.len(), 22);
+        assert_eq!(blocks.len(), 20);
         let mut stated = 0;
         for block in &blocks {
             let Some(action) = block.action else {
-                // The size readout: it applies nothing, so it says nothing and shows a value.
+                // An actionless block can only be a readout: it shows a value and says nothing.
                 assert!(block.label.is_empty());
                 assert!(matches!(block.mark, Mark::Value(_)));
                 continue;
             };
-            let key = key_of(action);
+            let Some(key) = key_of(action) else {
+                // A control with no key states no key: the width readout opens its list on hover.
+                assert!(
+                    block.label.is_empty(),
+                    "'{}' states a key it has not",
+                    block.label
+                );
+                assert!(matches!(block.mark, Mark::Value(_)));
+                continue;
+            };
             assert!(
                 block.label.ends_with(&format!("({key})")),
                 "'{}' does not end with its key ({key})",
@@ -4143,11 +4205,13 @@ mod tests {
                 ToolbarAction::Board(_) | ToolbarAction::NewBoard | ToolbarAction::DeleteBoard => {
                     keysym == Keysym::C || keysym == Keysym::c
                 }
+                ToolbarAction::Size => unreachable!("no key, filtered above"),
             };
             assert!(applies, "'{}' names a key that does not do it", block.label);
         }
-        // Twenty-one blocks apply something: five colours, eleven tools, two size steps, boards, the
-        // drawer's control and lock. Both panel switches are in the drawer, which is closed in this rail.
-        assert_eq!(stated, 21);
+        // Nineteen blocks apply something: five colours, eleven tools, boards, the drawer's control and
+        // lock. Both panel switches are in the drawer, which is closed in this rail, and the width readout
+        // applies nothing of its own.
+        assert_eq!(stated, 19);
     }
 }
