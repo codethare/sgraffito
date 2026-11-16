@@ -35,7 +35,9 @@ use crate::canvas::{
     Board, Caret, ERASER_THRESHOLD, Rect, SELECT_HANDLE_HIT, ShapeKind, Stroke, TextBuffer,
     ZOOM_STEP, constrained_drag, grab_at, selection_frame,
 };
-use crate::render::{opens_size_list, panel_stays_open, picks_from_panel, press_dismisses_panel};
+use crate::render::{
+    closes_panel_on_pick, opens_size_list, panel_stays_open, press_dismisses_panel,
+};
 
 /// The input method's own log, off unless `SGRAFFITO_IM_TRACE` is set: a commit that does not appear is a
 /// question about which batch the compositor sent, and the answer has to come from the session where it
@@ -993,7 +995,7 @@ impl App {
         // One click on something in the drawer both does the thing and puts the list away, the way a menu
         // closes after its item is chosen. A rail block needs no rule here: the pointer reached it, so the
         // drawer had already closed on the way.
-        if picks_from_panel(action) {
+        if closes_panel_on_pick(action) {
             self.close_panels();
         }
     }

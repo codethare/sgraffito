@@ -522,14 +522,21 @@ pub fn picks_from_panel(action: ToolbarAction) -> bool {
 
 /// Whether the open panel stays open with the pointer on `hover`: on the block that opened it, or on one
 /// of its own rows. The drawer is a menu the pointer opens by walking into it, so anywhere else — including
-/// off the rail entirely — closes it. The boards list is opened by a click or a key instead and dismissed
-/// by a pick, a press elsewhere or `Esc`, so no hover state closes it.
+/// off the rail entirely — closes it. The boards and width lists are opened by a click or a hover and
+/// dismissed by their own rules — a pick, a press elsewhere, `Esc` — so no hover state closes them.
 pub fn panel_stays_open(hover: Option<ToolbarAction>, owner: Option<ToolbarAction>) -> bool {
-    matches!(owner, Some(ToolbarAction::Boards))
+    matches!(owner, Some(ToolbarAction::Boards | ToolbarAction::Size))
         || match owner {
             Some(owner) => hover == Some(owner) || hover.is_some_and(picks_from_panel),
             None => false,
         }
+}
+
+/// Whether a pick out of a panel closes it: every pick does, except a width step, which is a command you
+/// may want to repeat. `picks_from_panel` still says what belongs to a panel, for the walkway and for a
+/// press on a row that must not be read as a press outside it.
+pub fn closes_panel_on_pick(action: ToolbarAction) -> bool {
+    picks_from_panel(action) && !matches!(action, ToolbarAction::SizeStep(_))
 }
 
 /// Whether a press on a rail control dismisses the open panel: a press on the panel's own block or on one
@@ -1661,12 +1668,21 @@ impl Renderer {
             hits[index].0.h = hits[index + 1].0.y - hits[index].0.y;
         }
         let height = reach;
+        // The walkway into a panel. The drawer and the boards list own the strip beside the rail, from
+        // their first row to their last — a block level with a row answers for the list, which is how the
+        // pointer walks into a tall list from any height. The width list sits beside the foot, so its rows
+        // would shadow the boards block; it needs only the gap beside the rail's blocks, and those keep
+        // their own press.
+        let corridor_x = match owner {
+            Some(ToolbarAction::Size) => TOOLBAR_BLOCK,
+            _ => 0.0,
+        };
         let corridor = match (plate, owner) {
             (Some(plate), Some(owner)) => Some((
                 Rect {
-                    x: 0.0,
+                    x: corridor_x,
                     y: plate.y,
-                    w: TOOLBAR_DRAWER_X,
+                    w: TOOLBAR_DRAWER_X - corridor_x,
                     h: plate.h,
                 },
                 owner,
@@ -3167,6 +3183,61 @@ mod tests {
             "a hover dismissed a list somebody opened"
         );
         assert!(!opens_size_list(None, None, None));
+    }
+
+    /// An open list's walkway stops at the rail's blocks: with the width list open over the boards block's
+    /// row, the block answers for itself rather than for the readout that owns the list.
+    #[test]
+    fn an_open_list_does_not_shadow_the_rail_beside_it() {
+        let rail = Toolbar {
+            size_open: true,
+            ..crate::render::tests::rail_for_legend()
+        };
+        let (w, h) = (900.0, 1000.0);
+        let mut renderer = Renderer::new();
+        let pill = renderer.toolbar_pill(&rail, (w, h));
+        let boards = pill
+            .controls
+            .iter()
+            .find(|control| control.block.action == Some(ToolbarAction::Boards))
+            .expect("the boards block is not on the rail");
+        let (ox, oy) = toolbar_origin(h, pill.column);
+        for x in [4.0, 12.0, 20.0, 28.0] {
+            assert_eq!(
+                renderer.toolbar_hit(&rail, w, h, ox + x, oy + boards.y + 5.0),
+                Some(ToolbarAction::Boards),
+                "the width list answered for the boards block at x={x}"
+            );
+        }
+    }
+
+    /// The width list is the second panel no hover state closes; the drawer is the only one left that
+    /// leaves with the pointer.
+    #[test]
+    fn the_width_list_stays_open_when_the_pointer_leaves() {
+        for hover in [
+            None,
+            Some(ToolbarAction::Tool(Tool::Pen)),
+            Some(ToolbarAction::Boards),
+        ] {
+            assert!(
+                panel_stays_open(hover, Some(ToolbarAction::Size)),
+                "the width list closed with {hover:?} under the pointer"
+            );
+        }
+        assert!(!panel_stays_open(None, Some(ToolbarAction::More)));
+    }
+
+    /// A width step is a command you may want to repeat: it applies without putting its list away. Every
+    /// other pick still closes the panel it came from.
+    #[test]
+    fn a_width_step_keeps_its_list_open() {
+        assert!(!closes_panel_on_pick(ToolbarAction::SizeStep(-1.0)));
+        assert!(!closes_panel_on_pick(ToolbarAction::SizeStep(1.0)));
+        assert!(closes_panel_on_pick(ToolbarAction::Board(0)));
+        assert!(closes_panel_on_pick(ToolbarAction::NewBoard));
+        assert!(closes_panel_on_pick(ToolbarAction::Scrim));
+        assert!(!closes_panel_on_pick(ToolbarAction::Tool(Tool::Pen)));
     }
 
     /// The panel hangs off the block that opens it and never shares that block's band, and its plate is the
