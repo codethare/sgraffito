@@ -9,7 +9,8 @@ boards block, so hovering or pressing Boards answers for the width readout inste
 
 ## Goals
 
-1. **The width list stays once open.** Like the boards list, no hover state closes it. It is dismissed
+1. **The width list is a button, and it stays once open.** A click on the readout toggles it. Like
+   the boards list, no hover state closes it. It is dismissed
    by `Esc`, by a press anywhere outside it (the canvas, another rail block, another list), and by a
    mode switch. Only the drawer keeps its leave-close: it is the panel the pointer opens by walking
    into it.
@@ -33,8 +34,6 @@ boards block, so hovering or pressing Boards answers for the width readout inste
 
 - A walkway that shadows a rail block for the width list.
 - A step press that closes the list it came from.
-- A list that reopens on jitter: the entry rule (a hover opens only when it moves onto the readout)
-  stays.
 
 ## Constraints
 

@@ -35,9 +35,7 @@ use crate::canvas::{
     Board, Caret, ERASER_THRESHOLD, Rect, SELECT_HANDLE_HIT, ShapeKind, Stroke, TextBuffer,
     ZOOM_STEP, constrained_drag, grab_at, selection_frame,
 };
-use crate::render::{
-    closes_panel_on_pick, opens_size_list, panel_stays_open, press_dismisses_panel,
-};
+use crate::render::{closes_panel_on_pick, panel_stays_open, press_dismisses_panel};
 
 /// The input method's own log, off unless `SGRAFFITO_IM_TRACE` is set: a commit that does not appear is a
 /// question about which batch the compositor sent, and the answer has to come from the session where it
@@ -928,11 +926,6 @@ impl App {
         {
             self.close_panels();
         }
-        // Hovering the readout opens the width list, but a hover never dismisses a list that a click or a
-        // key opened, and staying on the readout does not reopen a list the user just dismissed.
-        if opens_size_list(self.toolbar_hover, hover, self.panel_owner()) {
-            self.set_size(true);
-        }
         if hover != self.toolbar_hover {
             self.toolbar_hover = hover;
             // A fresh block opens from nothing; leaving the rail closes immediately.
@@ -967,8 +960,8 @@ impl App {
             ToolbarAction::Color(index) => self.set_color(index),
             ToolbarAction::SizeStep(dir) => self.nudge_size(dir),
             ToolbarAction::More => self.toggle_more(),
-            // The width readout opens its list on hover; a click on it steps nothing and closes nothing.
-            ToolbarAction::Size => {}
+            // A click on the readout toggles its list, like every other control on the rail.
+            ToolbarAction::Size => self.set_size(!self.size_open),
             ToolbarAction::Scrim => self.toggle_scrim(),
             ToolbarAction::Boards => self.toggle_boards(),
             ToolbarAction::Shared => self.toggle_shared(),

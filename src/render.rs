@@ -293,7 +293,7 @@ fn rail_candidates(toolbar: &Toolbar) -> Vec<Block> {
     blocks.push(Block {
         mark: Mark::Value(format!("{:.0}", toolbar.size)),
         column: 0,
-        // A control with no label: its value is its face, and hovering it opens the steps' own list.
+        // A control with no label: its value is its face, and a click opens the steps' own list.
         label: String::new(),
         action: Some(ToolbarAction::Size),
         active: false,
@@ -547,16 +547,6 @@ pub fn press_dismisses_panel(hit: Option<ToolbarAction>, owner: Option<ToolbarAc
         (Some(hit), Some(owner)) => hit != owner && !picks_from_panel(hit),
         _ => false,
     }
-}
-
-/// Whether a hover opens the width list: on entering the readout, and only when no other list is open. A
-/// hover that is still on the readout does not reopen a list the user just dismissed.
-pub fn opens_size_list(
-    previous: Option<ToolbarAction>,
-    hover: Option<ToolbarAction>,
-    owner: Option<ToolbarAction>,
-) -> bool {
-    hover == Some(ToolbarAction::Size) && previous != hover && owner.is_none()
 }
 
 /// The drawer's residents: the controls the rail has no room for. Their own height is what the drawer's
@@ -3164,28 +3154,6 @@ mod tests {
         ));
     }
 
-    /// The width list opens on entering the readout, not on every motion over it: an `Esc` that closed it
-    /// while the pointer stayed put must not be undone by the next jitter.
-    #[test]
-    fn the_size_list_opens_on_entry() {
-        let size = Some(ToolbarAction::Size);
-        assert!(opens_size_list(
-            Some(ToolbarAction::Tool(Tool::Pen)),
-            size,
-            None
-        ));
-        assert!(opens_size_list(None, size, None));
-        assert!(
-            !opens_size_list(size, size, None),
-            "staying on the readout reopened the list"
-        );
-        assert!(
-            !opens_size_list(None, size, Some(ToolbarAction::Boards)),
-            "a hover dismissed a list somebody opened"
-        );
-        assert!(!opens_size_list(None, None, None));
-    }
-
     /// An open list's walkway stops at the rail's blocks: with the width list open over the boards block's
     /// row, the block answers for itself rather than for the readout that owns the list.
     #[test]
@@ -4355,7 +4323,7 @@ mod tests {
         assert!(!picks_from_panel(ToolbarAction::Size));
     }
 
-    /// The readout is a rail block with an action and no label: hovering it opens the list, so it must be
+    /// The readout is a rail block with an action and no label: a click opens the list, so it must be
     /// hit and it must not stretch into a capsule with nothing in it.
     #[test]
     fn the_width_readout_is_a_control_with_no_label() {

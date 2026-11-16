@@ -331,7 +331,7 @@ pub struct App {
     pub(crate) shared: bool,
     /// Whether the rail's boards panel is open. One panel at a time: opening it closes the drawer.
     pub(crate) boards_open: bool,
-    /// Whether the rail's width list is open. The one panel a hover opens; one at a time like the others.
+    /// Whether the rail's width list is open. The readout toggles it; one at a time like the others.
     pub(crate) size_open: bool,
     /// When the open panel opened, for its own transition: `None` when no panel is open. Panels close at
     /// once, so only the opening has a clock.
@@ -874,9 +874,8 @@ impl App {
         self.set_boards(!self.boards_open);
     }
 
-    /// Open or close the width list, the one panel a hover opens. Unlike `set_boards` it keeps the hover:
-    /// clearing it would make the frame that opened the panel forget the block the pointer is on, and the
-    /// next motion would open it again.
+    /// Open or close the width list. Unlike `set_boards` it keeps the hover: clearing it would make the
+    /// frame that changed the list forget the block the pointer is on.
     pub(crate) fn set_size(&mut self, open: bool) {
         if self.size_open == open {
             return;
