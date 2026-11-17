@@ -1,8 +1,8 @@
 use sgraffito::app::{MAX_PASTE_BYTES, Tool, read_selection, text_mime};
 use sgraffito::canvas::Caret;
 use sgraffito::input::{
-    EditAction, bytes_to_delete, color_for_keysym, edit_action, size_step_for_keysym,
-    tool_for_keysym, wants_sampling,
+    EditAction, RenameKey, bytes_to_delete, color_for_keysym, edit_action, rename_key,
+    size_step_for_keysym, tool_for_keysym, wants_sampling,
 };
 use smithay_client_toolkit::seat::keyboard::Keysym;
 
@@ -438,4 +438,16 @@ fn the_boards_panel_and_the_shared_mode_have_their_own_keys() {
         assert_eq!(color_for_keysym(keysym), None);
         assert_eq!(size_step_for_keysym(keysym), None);
     }
+}
+
+#[test]
+fn a_rename_commits_on_enter_and_cancels_on_escape() {
+    // `ok` is false while a modifier is held: a chord is not text.
+    assert_eq!(rename_key(Keysym::Return, true), RenameKey::Commit);
+    assert_eq!(rename_key(Keysym::Escape, true), RenameKey::Cancel);
+    assert_eq!(rename_key(Keysym::BackSpace, true), RenameKey::Buffer);
+    assert_eq!(rename_key(Keysym::V, true), RenameKey::Buffer);
+    assert_eq!(rename_key(Keysym::Left, true), RenameKey::Ignore);
+    assert_eq!(rename_key(Keysym::p, true), RenameKey::Buffer);
+    assert_eq!(rename_key(Keysym::p, false), RenameKey::Ignore);
 }

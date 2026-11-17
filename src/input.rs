@@ -90,6 +90,31 @@ pub fn edit_action(keysym: Keysym, ctrl: bool, preedit_active: bool) -> EditActi
     }
 }
 
+/// What a key does while a board's name is being edited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenameKey {
+    /// `Enter`: the name is taken.
+    Commit,
+    /// `Esc`: the name is left as it was.
+    Cancel,
+    /// A character, a deletion or a paste: the buffer's business.
+    Buffer,
+    /// Everything else: a name is one line, with no caret moves.
+    Ignore,
+}
+
+/// `ok` is false while a modifier is held, and a chord is not text.
+pub fn rename_key(keysym: Keysym, ok: bool) -> RenameKey {
+    match keysym {
+        Keysym::Return | Keysym::KP_Enter => RenameKey::Commit,
+        Keysym::Escape => RenameKey::Cancel,
+        Keysym::BackSpace | Keysym::Delete | Keysym::V if ok => RenameKey::Buffer,
+        Keysym::Left | Keysym::Right | Keysym::Up | Keysym::Down => RenameKey::Ignore,
+        _ if ok => RenameKey::Buffer,
+        _ => RenameKey::Ignore,
+    }
+}
+
 /// `[` narrows and `]` widens the active tool's size; returns the direction as ±1.
 pub fn size_step_for_keysym(keysym: Keysym) -> Option<f32> {
     match keysym {
@@ -325,8 +350,35 @@ impl KeyboardHandler for App {
         if self.mode != Mode::Edit {
             return;
         }
+        // A name being edited takes its own keys: `Enter` takes it, `Esc` leaves it, and the rest
+        // belongs to the buffer.
+        if self.rename.is_some() {
+            match rename_key(event.keysym, !self.ctrl) {
+                RenameKey::Commit => self.commit_rename(),
+                RenameKey::Cancel => self.cancel_rename(),
+                RenameKey::Buffer => {
+                    match edit_action(event.keysym, self.ctrl, !self.preedit_is_empty()) {
+                        EditAction::Backspace => self.edit_buffer(|b| {
+                            b.backspace();
+                        }),
+                        EditAction::Paste => self.paste(),
+                        EditAction::Local => {
+                            if let Some(text) = event.utf8 {
+                                self.edit_buffer(|b| b.insert(&text));
+                            }
+                        }
+                        EditAction::EndText
+                        | EditAction::Newline
+                        | EditAction::Move(_)
+                        | EditAction::InputMethod => {}
+                    }
+                }
+                RenameKey::Ignore => {}
+            }
+            return;
+        }
         // While a text box is edited, printable characters are content, not shortcuts.
-        if self.focused_edit_mut().is_some() {
+        if self.edit_target_mut().is_some() {
             match edit_action(event.keysym, self.ctrl, !self.preedit_is_empty()) {
                 EditAction::EndText => self.end_text_edit(),
                 EditAction::Backspace => self.edit_buffer(|b| {
@@ -375,7 +427,7 @@ impl KeyboardHandler for App {
         _: u32,
         event: KeyEvent,
     ) {
-        if self.mode != Mode::Edit || self.focused_edit_mut().is_some() {
+        if self.mode != Mode::Edit || self.edit_target_mut().is_some() {
             return;
         }
         // Only the movement keys repeat: everything else acts once per press, so a key held a fraction
@@ -509,8 +561,8 @@ impl App {
             return;
         };
         let state = self
-            .focused_edit()
-            .map(|t| (t.buffer.text.clone(), t.buffer.cursor_bytes()));
+            .edit_target()
+            .map(|(buffer, _)| (buffer.text.clone(), buffer.cursor_bytes()));
         match state {
             Some((text, cursor)) => {
                 if !self.text_input_enabled {
@@ -590,26 +642,26 @@ impl App {
         let preedit = self.im_preedit.take();
         let commit = std::mem::take(&mut self.im_commit);
         let delete = self.im_delete.take();
-        let Some(edit) = self.focused_edit_mut() else {
+        let Some((buffer, preedit_slot)) = self.edit_target_mut() else {
             im_trace(&format!(
-                "batch dropped, no text box is focused: preedit {preedit:?} commit {commit:?}"
+                "batch dropped, nothing is being typed into: preedit {preedit:?} commit {commit:?}"
             ));
             return;
         };
         // The preedit is double-buffered: a `done` batch that carried no `preedit_string` resets
         // it to empty, so the last pinyin does not stay rendered after its candidate was committed.
-        edit.preedit = preedit.unwrap_or_default();
+        *preedit_slot = preedit.unwrap_or_default();
         if let Some((before, _after)) = delete {
             // The cursor is always at the end, so there is never anything after it to delete.
-            let bytes = bytes_to_delete(before, edit.preedit.len());
-            edit.buffer.delete_before_bytes(bytes);
+            let bytes = bytes_to_delete(before, preedit_slot.len());
+            buffer.delete_before_bytes(bytes);
         }
         if !commit.is_empty() {
-            edit.buffer.insert(&commit);
+            buffer.insert(&commit);
         }
         im_trace(&format!(
             "applied: preedit {:?}, commit {commit:?}, buffer {:?}",
-            edit.preedit, edit.buffer.text
+            preedit_slot, buffer.text
         ));
         self.mark_edit_dirty();
         self.sync_text_input();
@@ -617,10 +669,10 @@ impl App {
 
     /// Mutate the text box being edited, then resync the input method and the screen.
     pub(crate) fn edit_buffer(&mut self, f: impl FnOnce(&mut TextBuffer)) {
-        let Some(edit) = self.focused_edit_mut() else {
+        let Some((buffer, _)) = self.edit_target_mut() else {
             return;
         };
-        f(&mut edit.buffer);
+        f(buffer);
         self.mark_edit_dirty();
         self.sync_text_input();
     }
@@ -641,18 +693,33 @@ impl App {
         }
     }
 
-    fn focused_edit(&self) -> Option<&crate::canvas::TextOverlay> {
-        self.outputs.values().find_map(|o| o.overlay.text.as_ref())
+    /// The buffer and preedit being typed into: a text box, a note, or a board's name. One of them at
+    /// most — starting a rename ends a text edit, and a press ends a rename.
+    fn edit_target_mut(&mut self) -> Option<(&mut TextBuffer, &mut String)> {
+        if let Some(rename) = self.rename.as_mut() {
+            return Some((&mut rename.text, &mut rename.preedit));
+        }
+        let out = self
+            .outputs
+            .values_mut()
+            .find_map(|o| o.overlay.text.as_mut())?;
+        Some((&mut out.buffer, &mut out.preedit))
     }
 
-    fn focused_edit_mut(&mut self) -> Option<&mut crate::canvas::TextOverlay> {
-        self.outputs
-            .values_mut()
-            .find_map(|o| o.overlay.text.as_mut())
+    fn edit_target(&self) -> Option<(&TextBuffer, &str)> {
+        if let Some(rename) = self.rename.as_ref() {
+            return Some((&rename.text, &rename.preedit));
+        }
+        let out = self
+            .outputs
+            .values()
+            .find_map(|o| o.overlay.text.as_ref())?;
+        Some((&out.buffer, &out.preedit))
     }
 
     fn preedit_is_empty(&self) -> bool {
-        self.focused_edit().is_none_or(|t| t.preedit.is_empty())
+        self.edit_target()
+            .is_none_or(|(_, preedit)| preedit.is_empty())
     }
 
     /// `Esc` undoes the state the daemon is in, one step at a time. A gesture being dragged is
@@ -696,7 +763,7 @@ impl App {
             self.dirty = true;
             return;
         }
-        if self.focused_edit().is_some() {
+        if self.edit_target().is_some() {
             self.end_text_edit();
             return;
         }
@@ -767,6 +834,9 @@ impl App {
         if self.mode != Mode::Edit {
             return;
         }
+        // A name being edited is committed by leaving it, the way a text box is: the press then goes
+        // on to do what it would have done.
+        self.commit_rename();
         if let Some(action) = self.toolbar_hit(key, x, y) {
             // A press on another block is a press outside the open menu, which closes it; the block's own
             // action then runs, so a press on another list's block opens that one.
@@ -945,7 +1015,7 @@ impl App {
     /// keyboard: the first click finishes the text box being edited, the next one locks.
     fn apply_toolbar_action(&mut self, acting: Option<u32>, action: ToolbarAction) {
         if action == ToolbarAction::Lock {
-            if self.focused_edit().is_some() {
+            if self.edit_target().is_some() {
                 self.end_text_edit();
             } else {
                 self.set_mode(Mode::Locked);
@@ -1003,7 +1073,7 @@ impl App {
     /// bytes are read off the event loop: a thread reads the pipe and rings the loop when it has
     /// them, so a slow clipboard owner cannot stall drawing or the control socket.
     fn paste(&mut self) {
-        if self.focused_edit().is_none() {
+        if self.edit_target().is_none() {
             return;
         }
         let Some(offer) = self.selection.clone() else {

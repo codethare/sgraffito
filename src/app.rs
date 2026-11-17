@@ -41,10 +41,10 @@ use wayland_client::{
 };
 
 use crate::canvas::{
-    Board, BoardRow, Doc, ERASER_THRESHOLD, Gesture, Grab, Handle, ItemId, Motion, Note, Overlay,
-    PEN_WIDTH_MAX, PEN_WIDTH_MIN, PEN_WIDTH_STEP, Press, Rect, Selection, Shape, ShapeKind,
-    TEXT_SIZE_MAX, TEXT_SIZE_MIN, TEXT_SIZE_STEP, TextBuffer, TextItem, TextOverlay, Toolbar,
-    Transform, View, ZOOM_STEP, Zoom, date_stamp, marquee_select, note_drag, nudge_delta,
+    Board, BoardEdit, BoardRow, Doc, ERASER_THRESHOLD, Gesture, Grab, Handle, ItemId, Motion, Note,
+    Overlay, PEN_WIDTH_MAX, PEN_WIDTH_MIN, PEN_WIDTH_STEP, Press, Rect, Selection, Shape,
+    ShapeKind, TEXT_SIZE_MAX, TEXT_SIZE_MIN, TEXT_SIZE_STEP, TextBuffer, TextItem, TextOverlay,
+    Toolbar, Transform, View, ZOOM_STEP, Zoom, date_stamp, marquee_select, note_drag, nudge_delta,
     selection_bounds, selection_frame, selection_press, snap_square, stepped_size,
     toggle_selection,
 };
@@ -236,6 +236,17 @@ impl Output {
     }
 }
 
+/// A board's name being edited in the rail's list.
+pub struct Rename {
+    /// The row's place in the rail's list, which is stable while the keyboard is on it.
+    pub(crate) index: usize,
+    /// The name the row had: the key the rename moves.
+    pub(crate) board: String,
+    pub(crate) text: TextBuffer,
+    /// Input method preedit string; never persisted.
+    pub(crate) preedit: String,
+}
+
 pub struct App {
     pub(crate) qh: QueueHandle<App>,
     pub(crate) connection: Connection,
@@ -333,6 +344,9 @@ pub struct App {
     pub(crate) boards_open: bool,
     /// Whether the rail's width list is open. The readout toggles it; one at a time like the others.
     pub(crate) size_open: bool,
+    /// The board's name being edited in the list, if any. A name is typed where it is read, so this is
+    /// app-level state and not an output's.
+    pub(crate) rename: Option<Rename>,
     /// When the open panel opened, for its own transition: `None` when no panel is open. Panels close at
     /// once, so only the opening has a clock.
     panel_open_since: Option<Instant>,
@@ -423,6 +437,7 @@ impl App {
             shared: false,
             boards_open: false,
             size_open: false,
+            rename: None,
             panel_open_since: None,
             text_input_manager: None,
             text_input: None,
@@ -583,6 +598,7 @@ impl App {
             return;
         }
         self.end_text_edit();
+        self.commit_rename();
         self.commit_any_gesture();
         self.cancel_transients();
         // A menu belongs to the mode it was opened in: locking hides the rail, and returning to edit mode
@@ -650,8 +666,12 @@ impl App {
                     more: self.more,
                     boards_open: self.boards_open,
                     size_open: self.size_open,
-                    // Filled by task 3's editor; the field exists now so the row can hide its buttons.
-                    rename: None,
+                    rename: self.rename.as_ref().map(|rename| BoardEdit {
+                        index: rename.index,
+                        text: rename.text.text.clone(),
+                        cursor: rename.text.cursor,
+                        preedit: rename.preedit.clone(),
+                    }),
                     boards: self
                         .doc
                         .names()
@@ -1001,7 +1021,62 @@ impl App {
     }
 
     /// Start editing the name of the board at `index` of the rail's list.
-    pub(crate) fn begin_rename(&mut self, _index: usize, _name: &str) {}
+    pub(crate) fn begin_rename(&mut self, index: usize, name: &str) {
+        self.end_text_edit();
+        self.commit_transient_drawing();
+        self.rename = Some(Rename {
+            index,
+            board: name.to_string(),
+            text: TextBuffer::new(name),
+            preedit: String::new(),
+        });
+        self.dirty = true;
+        self.sync_text_input();
+        self.refresh_toolbar();
+    }
+
+    /// Take the edited name if the document can hold it; anything else leaves the board as it was. A
+    /// refused name is dropped rather than reported: the rail has nowhere to say why.
+    pub(crate) fn commit_rename(&mut self) {
+        let Some(rename) = self.rename.take() else {
+            return;
+        };
+        let name = rename.text.text.trim().to_string();
+        if name != rename.board {
+            self.rename_board(&rename.board, &name);
+        }
+        self.dirty = true;
+        self.sync_text_input();
+        self.refresh_toolbar();
+    }
+
+    /// Leave the name as it was.
+    pub(crate) fn cancel_rename(&mut self) {
+        if self.rename.take().is_none() {
+            return;
+        }
+        self.dirty = true;
+        self.sync_text_input();
+        self.refresh_toolbar();
+    }
+
+    /// Rename a board and keep every screen that shows it on it. Unlike a pick, a name is document
+    /// content, so it goes to the file.
+    pub(crate) fn rename_board(&mut self, old: &str, new: &str) -> bool {
+        if !self.doc.rename_board(old, new) {
+            return false;
+        }
+        for out in self.outputs.values_mut() {
+            if out.board == old {
+                out.board = new.to_string();
+                out.dirty = true;
+            }
+        }
+        self.dirty = true;
+        self.store.mark_dirty(Instant::now());
+        log(&format!("board renamed: {old} -> {new}"));
+        true
+    }
 
     /// Switch the shared mode on or off. On adopts the focused output's board on every output — that is
     /// the drawing in front of the person switching, and the keyboard is where the pointer's picks act
