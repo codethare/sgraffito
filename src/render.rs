@@ -85,6 +85,11 @@ const TOOLBAR_PLATE_FILL: &str = "#000000e6";
 const TOOLBAR_FOREGROUND: &str = "#ffffffee";
 const TOOLBAR_LABEL_TEXT: &str = "#ebebf59e";
 const TOOLBAR_SWATCH_EDGE: &str = "#ffffff4d";
+/// The wash a hovered button of a board's row takes. White rather than the accent: on the row of the
+/// board this screen shows the capsule is accent-filled, and an accent ring there is invisible.
+const TOOLBAR_HOVER_FILL: &str = "#ffffff24";
+/// How far inside its cell a hovered button's outline sits, so it never touches the row's edge.
+const TOOLBAR_HOVER_INSET: f32 = 2.0;
 const UNDERLINE_HEIGHT: f32 = 1.5;
 const CURSOR_WIDTH: f32 = 2.0;
 const LINE_HEIGHT_SCALE: f32 = 1.2;
@@ -1489,20 +1494,17 @@ impl Renderer {
                         w: TOOLBAR_BLOCK * scale,
                         h: TOOLBAR_BLOCK * scale,
                     };
-                    // The button under the pointer states its own shape: an outline is what makes a
-                    // glyph a control the press will land on.
-                    if toolbar.hover == Some(*action)
-                        && let Some(path) = rounded_rect_path(square, TOOLBAR_RADIUS * scale)
-                    {
-                        let c = parse_hex(TOOLBAR_ACCENT);
-                        let mut paint = Paint::default();
-                        paint.set_color_rgba8(c[0], c[1], c[2], c[3]);
-                        paint.anti_alias = true;
-                        let stroke = SkStroke {
-                            width: TOOLBAR_HAIRLINE.max(1.0) * scale,
-                            ..Default::default()
-                        };
-                        pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+                    // The button under the pointer states its own shape: a wash inside a hairline,
+                    // inset far enough that the outline never meets the row's own rounded edge.
+                    if toolbar.hover == Some(*action) {
+                        let ring = square.grown(-TOOLBAR_HOVER_INSET * scale);
+                        round_rect(
+                            pixmap,
+                            ring,
+                            (TOOLBAR_RADIUS - TOOLBAR_HOVER_INSET) * scale,
+                            parse_hex(TOOLBAR_HOVER_FILL),
+                            Some((parse_hex(TOOLBAR_FOREGROUND), TOOLBAR_HAIRLINE * scale)),
+                        );
                     }
                     draw_icon(pixmap, *icon, square, scale, TOOLBAR_LABEL_TEXT);
                 }
@@ -1691,7 +1693,10 @@ impl Renderer {
             }
             let x = block.column as f32 * TOOLBAR_DRAWER_X;
             let gap = block.gap;
-            let hovered = block.action.is_some() && block.action == toolbar.hover;
+            // The block that owns the open panel stays a square: the list it opened says what it is,
+            // and a caption growing over it would push against the list's own rows.
+            let hovered =
+                block.action.is_some() && block.action == toolbar.hover && block.action != owner;
             // The capsule is [block][gap][label][padding], so the text never touches its edge. A row of the
             // drawer states its name and key whether or not the pointer is on it: a menu row is read and
             // chosen between, and a row that has to be hovered before it can be read has to be probed.
@@ -3704,6 +3709,35 @@ mod tests {
             caret: true,
         });
         assert_eq!(row_label(&toolbar, &row), "left");
+    }
+
+    /// The block whose list is open keeps its square: the list says what it is, so a caption growing
+    /// from the block would push against the list's own rows.
+    #[test]
+    fn the_block_that_opened_a_panel_does_not_stretch() {
+        let width = |boards_open: bool| {
+            let toolbar = Toolbar {
+                boards_open,
+                boards: vec![crate::canvas::BoardRow {
+                    name: "laptop".into(),
+                    current: true,
+                }],
+                hover: Some(ToolbarAction::Boards),
+                ..crate::render::tests::rail_for_legend()
+            };
+            let mut renderer = Renderer::new();
+            let pill = renderer.toolbar_pill(&toolbar, (900.0, 1000.0));
+            pill.controls
+                .iter()
+                .find(|control| control.block.action == Some(ToolbarAction::Boards))
+                .expect("no block for the boards list")
+                .width
+        };
+        assert_eq!(width(true), TOOLBAR_BLOCK, "the open block grew a caption");
+        assert!(
+            width(false) > TOOLBAR_BLOCK,
+            "the block under the pointer did not say what it does"
+        );
     }
 
     /// The row an edit is in is measured from what is typed, and a document's only board makes room
