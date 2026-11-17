@@ -976,11 +976,17 @@ impl App {
             ToolbarAction::NewBoard => {
                 self.new_board(acting);
             }
-            ToolbarAction::DeleteBoard => {
-                // The row names the board through the output, so a click with no output has nothing to
-                // delete. The panel still closes below, as it does after any pick.
-                if let Some(key) = acting {
-                    self.delete_board(key);
+            ToolbarAction::DeleteBoard(index) => {
+                // The row names its board by index, so a click needs no output to know what it means.
+                let name = self.doc.names().nth(index).cloned();
+                if let Some(name) = name {
+                    self.delete_board_named(&name);
+                }
+            }
+            ToolbarAction::RenameBoard(index) => {
+                let name = self.doc.names().nth(index).cloned();
+                if let Some(name) = name {
+                    self.begin_rename(index, &name);
                 }
             }
             ToolbarAction::Lock => {}

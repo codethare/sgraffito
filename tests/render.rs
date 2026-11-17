@@ -377,6 +377,7 @@ fn toolbar(tool: Tool, color: &'static str, size: f32, hover: Option<ToolbarActi
         more: false,
         boards_open: false,
         size_open: false,
+        rename: None,
         boards: Vec::new(),
         shared: false,
         scrim: true,
@@ -2441,6 +2442,7 @@ fn a_row_of_the_panel_can_be_clicked_with_the_pointer_on_the_block_that_opened_i
         more: true,
         boards_open: false,
         size_open: false,
+        rename: None,
         boards: Vec::new(),
         shared: false,
         scrim: true,
@@ -3393,7 +3395,6 @@ fn the_boards_panel_states_the_documents_boards() {
         vec![
             ToolbarAction::Board(0),
             ToolbarAction::Board(1),
-            ToolbarAction::DeleteBoard,
             ToolbarAction::NewBoard
         ],
         "the panel's rows are not its boards, the row that deletes one and the row that creates one"
@@ -3482,7 +3483,7 @@ fn the_boards_block_owns_its_row_as_far_as_the_panel_and_a_row_owns_its_column()
 /// row that deletes a board is never there: a panel tall enough to grow upwards puts its last row on
 /// that band, and one click from it destroys a board with no undo behind it.
 #[test]
-fn the_row_the_pointer_walks_into_is_not_the_one_that_deletes() {
+fn the_row_the_pointer_walks_into_deletes_nothing() {
     let (w, h) = (900.0f32, 600.0f32);
     let mut renderer = Renderer::new();
     let rows = [("Board 1", false), ("office", true)];
@@ -3504,14 +3505,16 @@ fn the_row_the_pointer_walks_into_is_not_the_one_that_deletes() {
         ToolbarAction::Boards,
     ) + 8;
     let panel = sweep_rail(&mut renderer, &open, w, h, 40.0);
+    // The corridor leads the pointer in along the row level with the block, so that row must not be
+    // one that destroys a board: a delete is a button at a row's right end, which the corridor never
+    // reaches.
     assert!(
-        panel.contains(&Some(ToolbarAction::DeleteBoard)),
-        "the panel has no row that deletes a board"
+        !matches!(panel[block_y], Some(ToolbarAction::DeleteBoard(_))),
+        "the pointer walking into the list lands on the row that deletes a board"
     );
-    assert_eq!(
-        panel[block_y],
-        Some(ToolbarAction::NewBoard),
-        "the row level with the `boards` block is not the row that creates a board"
+    assert!(
+        panel.contains(&Some(ToolbarAction::Board(0))),
+        "the panel's rows are not in it"
     );
 }
 

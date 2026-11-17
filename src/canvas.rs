@@ -176,9 +176,11 @@ pub enum ToolbarAction {
     Board(usize),
     /// Create a board and pick it.
     NewBoard,
-    /// Delete the board this output shows, from the panel's own row. It carries no name or index, so a
-    /// click reads which board it means from the output rather than from the row it landed on.
-    DeleteBoard,
+    /// Delete the board at this index of the panel's list, from that board's own row.
+    DeleteBoard(usize),
+    /// Rename the board at this index of the panel's list, from that board's own row. The one row
+    /// press that leaves its list open: the row it edits is in the list.
+    RenameBoard(usize),
     /// Switch between every screen sharing one board and each screen picking its own.
     Shared,
 }
@@ -1883,6 +1885,16 @@ pub struct BoardRow {
     pub current: bool,
 }
 
+/// A board's name being edited, as the frame draws it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoardEdit {
+    /// The row's place in [`Toolbar::boards`].
+    pub index: usize,
+    pub text: String,
+    pub cursor: usize,
+    pub preedit: String,
+}
+
 /// What the edit-mode toolbar shows: the active tool, the active colour, the active size in
 /// logical pixels, and the block the pointer is on, if any.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -1908,6 +1920,8 @@ pub struct Toolbar {
     /// Whether the width list is open. The readout toggles it, and it obeys the same one-panel rule as the
     /// other two.
     pub size_open: bool,
+    /// The board's name being edited in the list, which its row draws instead of the name.
+    pub rename: Option<BoardEdit>,
     /// The boards the panel lists, in name order, with the one this output shows marked. Carried in the
     /// rail's own value because the panel's rows are document names: the layout, the hit test and the
     /// cache all read one value rather than three functions taking the list beside the rail.

@@ -211,7 +211,8 @@ fn key_of(action: ToolbarAction) -> Option<&'static str> {
         ToolbarAction::Boards
         | ToolbarAction::Board(_)
         | ToolbarAction::NewBoard
-        | ToolbarAction::DeleteBoard => "C",
+        | ToolbarAction::DeleteBoard(_)
+        | ToolbarAction::RenameBoard(_) => "C",
         ToolbarAction::Shared => "F",
         ToolbarAction::Color(index) => ["1", "2", "3", "4", "5"].get(index).copied().unwrap_or("?"),
         ToolbarAction::SizeStep(dir) => {
@@ -515,7 +516,8 @@ pub fn picks_from_panel(action: ToolbarAction) -> bool {
             action,
             ToolbarAction::Board(_)
                 | ToolbarAction::NewBoard
-                | ToolbarAction::DeleteBoard
+                | ToolbarAction::DeleteBoard(_)
+                | ToolbarAction::RenameBoard(_)
                 | ToolbarAction::SizeStep(_)
         )
 }
@@ -537,7 +539,13 @@ pub fn panel_stays_open(hover: Option<ToolbarAction>, owner: Option<ToolbarActio
 /// may want to repeat. `picks_from_panel` still says what belongs to a panel, for the walkway and for a
 /// press on a row that must not be read as a press outside it.
 pub fn closes_panel_on_pick(action: ToolbarAction) -> bool {
-    picks_from_panel(action) && !matches!(action, ToolbarAction::SizeStep(_))
+    // A width step and a rename work on what the panel holds rather than choosing from it, so they
+    // leave it open.
+    picks_from_panel(action)
+        && !matches!(
+            action,
+            ToolbarAction::SizeStep(_) | ToolbarAction::RenameBoard(_)
+        )
 }
 
 /// Whether a press on a rail control dismisses the open panel: a press on the panel's own block or on one
@@ -598,6 +606,27 @@ fn drawer_blocks(toolbar: &Toolbar, overflow: &[Block]) -> Vec<Block> {
     rows
 }
 
+/// Whether a board's row shows its buttons, as `(delete, rename)`: the pointer is on the row or on one
+/// of them, the document has a board to delete, and the row is not the one being renamed.
+fn board_actions(toolbar: &Toolbar, index: usize) -> Option<(bool, bool)> {
+    if toolbar
+        .rename
+        .as_ref()
+        .is_some_and(|edit| edit.index == index)
+    {
+        return None;
+    }
+    let on_it = matches!(
+        toolbar.hover,
+        Some(
+            ToolbarAction::Board(i)
+                | ToolbarAction::DeleteBoard(i)
+                | ToolbarAction::RenameBoard(i)
+        ) if i == index
+    );
+    on_it.then_some((toolbar.boards.len() > 1, true))
+}
+
 /// The boards panel's rows: one per board stating its name, the board this output shows accent-filled,
 /// then `new board` and `delete <name>`. A board row says its name and no key: every one of them is
 /// picked from the list the `boards` block opened, so a key on the row would repeat the block's own.
@@ -616,22 +645,8 @@ fn board_rows(toolbar: &Toolbar) -> Vec<Block> {
             gap: TOOLBAR_GAP,
         })
         .collect();
-    // The rows nearest the block are the ones a short output keeps, so the two rows that act on the list
-    // rather than being an item of it come after every board. `new board` is the last one: a panel with the
-    // delete row is tall enough to grow upwards, which puts the last row level with the block, where the
-    // corridor leads the pointer into the list — and that row must not be the one that destroys a board.
-    if toolbar.boards.len() > 1
-        && let Some(current) = toolbar.boards.iter().find(|board| board.current)
-    {
-        rows.push(Block {
-            mark: Mark::Icon(Icon::Smaller),
-            column: 1,
-            label: format!("delete {}", current.name),
-            action: Some(ToolbarAction::DeleteBoard),
-            active: false,
-            gap: TOOLBAR_GAP,
-        });
-    }
+    // `new board` is the last row: a panel with more rows than the column holds grows upwards, which puts
+    // the last row level with the block, where the corridor leads the pointer into the list.
     rows.push(Block {
         mark: Mark::Icon(Icon::Plus),
         column: 1,
@@ -1606,6 +1621,18 @@ impl Renderer {
                 }
                 _ => TOOLBAR_BLOCK,
             };
+            // A board's row makes room for its two buttons while they are up: the name is drawn to the
+            // left of them, and the row's own hit stops where they start.
+            let buttons = match block.action {
+                Some(ToolbarAction::Board(index)) => board_actions(toolbar, index),
+                _ => None,
+            };
+            let button_w = 2.0 * TOOLBAR_BLOCK;
+            let width = if buttons.is_some() {
+                (width + button_w).min(ceiling)
+            } else {
+                width
+            };
             if let Some(action) = block.action {
                 // The corridor: while the panel is open, the block that opens it owns the row as far as the
                 // panel's left edge — so the pointer can travel from the block into the list without
@@ -1614,6 +1641,8 @@ impl Renderer {
                 // the rail's boxes are the ones tested first.
                 let w = if owner == Some(action) {
                     TOOLBAR_DRAWER_X
+                } else if buttons.is_some() {
+                    width - button_w
                 } else {
                     width
                 };
@@ -1657,6 +1686,34 @@ impl Renderer {
         // with a row is the rail's, whose box is tested first.
         for index in rail_rows..hits.len().saturating_sub(1) {
             hits[index].0.h = hits[index + 1].0.y - hits[index].0.y;
+        }
+        // A board's two buttons answer before the row they sit on: their rects are inside the row's
+        // box, past the name, and a hit is the first rect that contains the point. They are appended
+        // after the gap-filling above, which walks the rows in order.
+        for control in &controls {
+            let Some(ToolbarAction::Board(index)) = control.block.action else {
+                continue;
+            };
+            let Some((delete, _)) = board_actions(toolbar, index) else {
+                continue;
+            };
+            let mut actions = Vec::new();
+            if delete {
+                actions.push(ToolbarAction::DeleteBoard(index));
+            }
+            actions.push(ToolbarAction::RenameBoard(index));
+            for (number, action) in actions.iter().enumerate() {
+                let slot = (actions.len() - number) as f32;
+                hits.push((
+                    Rect {
+                        x: TOOLBAR_DRAWER_X + control.width - slot * TOOLBAR_BLOCK,
+                        y: control.y,
+                        w: TOOLBAR_BLOCK,
+                        h: TOOLBAR_BLOCK,
+                    },
+                    *action,
+                ));
+            }
         }
         let height = reach;
         // The walkway into a panel. The drawer and the boards list own the strip beside the rail, from
@@ -2138,6 +2195,7 @@ fn same_layout(a: &Toolbar, b: &Toolbar) -> bool {
         && a.more == b.more
         && a.boards_open == b.boards_open
         && a.size_open == b.size_open
+        && a.rename == b.rename
         && a.boards == b.boards
         && a.shared == b.shared
         && a.scrim == b.scrim
@@ -3160,6 +3218,7 @@ mod tests {
     fn an_open_list_does_not_shadow_the_rail_beside_it() {
         let rail = Toolbar {
             size_open: true,
+            rename: None,
             ..crate::render::tests::rail_for_legend()
         };
         let (w, h) = (900.0, 1000.0);
@@ -3364,12 +3423,7 @@ mod tests {
             ..crate::render::tests::rail_for_legend()
         };
         let rows = board_rows(&toolbar);
-        assert_eq!(rows.len(), MAX_BOARD_ROWS + 2);
-        assert_eq!(
-            rows.get(rows.len() - 2).and_then(|row| row.action),
-            Some(ToolbarAction::DeleteBoard),
-            "the row that deletes comes after every board"
-        );
+        assert_eq!(rows.len(), MAX_BOARD_ROWS + 1);
         assert_eq!(
             rows.last().and_then(|row| row.action),
             Some(ToolbarAction::NewBoard),
@@ -3379,43 +3433,101 @@ mod tests {
         assert!(rows[0].active, "the board on screen is marked");
     }
 
-    /// The row says which board it removes, because the panel is a list and the footer is where the
-    /// list's own actions live: `delete office` cannot be mistaken for a board called that.
+    /// A board's row shows its two buttons only while the pointer is on the row or on one of them: the
+    /// row makes room for them, and its own hit stops where they begin.
     #[test]
-    fn the_delete_row_names_the_board_it_removes() {
-        let toolbar = Toolbar {
+    fn every_board_row_reveals_its_buttons_under_the_pointer() {
+        let boards = vec![
+            crate::canvas::BoardRow {
+                name: "laptop".into(),
+                current: true,
+            },
+            crate::canvas::BoardRow {
+                name: "monitor".into(),
+                current: false,
+            },
+        ];
+        let rail = |hover: Option<ToolbarAction>| Toolbar {
             boards_open: true,
-            boards: vec![
-                crate::canvas::BoardRow {
-                    name: "Board 1".into(),
-                    current: false,
-                },
-                crate::canvas::BoardRow {
-                    name: "office".into(),
-                    current: true,
-                },
-            ],
+            boards: boards.clone(),
+            hover,
             ..crate::render::tests::rail_for_legend()
         };
-        let rows = board_rows(&toolbar);
-        let delete = rows
-            .iter()
-            .find(|row| row.action == Some(ToolbarAction::DeleteBoard))
-            .expect("the panel has no row that deletes a board");
-        assert_eq!(delete.label, "delete office");
-        assert!(
-            !delete.active,
-            "the row that deletes is not a list item that is on"
+        // The row's box and its screen origin, from the layout the frame draws.
+        let row = |toolbar: &Toolbar| {
+            let mut renderer = Renderer::new();
+            let pill = renderer.toolbar_pill(toolbar, (900.0, 1000.0));
+            let control = pill
+                .controls
+                .iter()
+                .find(|control| control.block.action == Some(ToolbarAction::Board(0)))
+                .expect("no row for the first board")
+                .clone();
+            let (ox, oy) = toolbar_origin(1000.0, pill.column);
+            (ox + TOOLBAR_DRAWER_X, oy + control.y, control.width)
+        };
+        let hit = |toolbar: &Toolbar, x: f32, y: f32| {
+            let mut renderer = Renderer::new();
+            renderer.toolbar_hit(toolbar, 900.0, 1000.0, x, y)
+        };
+        // Away from the row: nothing to press beside the name.
+        let away = rail(None);
+        let (x, y, w) = row(&away);
+        assert_eq!(hit(&away, x + 8.0, y + 8.0), Some(ToolbarAction::Board(0)));
+        assert_eq!(hit(&away, x + w + 8.0, y + 8.0), None);
+        // On the row: the two buttons at its right end, and the name's own box stops before them.
+        let on = rail(Some(ToolbarAction::Board(0)));
+        let (x, y, w) = row(&on);
+        assert_eq!(
+            hit(&on, x + w - 2.0 * TOOLBAR_BLOCK + 8.0, y + 8.0),
+            Some(ToolbarAction::DeleteBoard(0))
         );
+        assert_eq!(
+            hit(&on, x + w - TOOLBAR_BLOCK + 8.0, y + 8.0),
+            Some(ToolbarAction::RenameBoard(0))
+        );
+        assert_eq!(
+            hit(&on, x + w - 2.5 * TOOLBAR_BLOCK, y + 8.0),
+            Some(ToolbarAction::Board(0)),
+            "the name's box did not stop before the buttons"
+        );
+        // On a button: both stay up, or the row would flicker as the pointer reached for them.
+        let held = rail(Some(ToolbarAction::DeleteBoard(0)));
+        let (x, y, w) = row(&held);
+        assert_eq!(
+            hit(&held, x + w - TOOLBAR_BLOCK + 8.0, y + 8.0),
+            Some(ToolbarAction::RenameBoard(0)),
+            "the buttons went away as the pointer reached one"
+        );
+        assert!(board_actions(&held, 0).is_some());
+        assert!(board_actions(&rail(None), 0).is_none());
     }
 
-    /// The delete row is a pick out of the panel it lives in: it closes the panel like every other row,
-    /// and the panel stays open while the pointer is on it.
+    /// A document's last board has nothing to delete: its row shows the rename alone.
     #[test]
-    fn the_delete_row_is_a_pick_of_its_panel() {
-        assert!(picks_from_panel(ToolbarAction::DeleteBoard));
+    fn the_delete_button_is_absent_on_the_only_board() {
+        let toolbar = Toolbar {
+            boards_open: true,
+            boards: vec![crate::canvas::BoardRow {
+                name: "laptop".into(),
+                current: true,
+            }],
+            hover: Some(ToolbarAction::Board(0)),
+            ..crate::render::tests::rail_for_legend()
+        };
+        assert_eq!(board_actions(&toolbar, 0), Some((false, true)));
+    }
+
+    /// Delete is a pick that closes the list; the rename is the one row press that leaves it open,
+    /// because the row it edits is in the list.
+    #[test]
+    fn a_rename_press_keeps_its_list_and_a_delete_press_closes_it() {
+        assert!(picks_from_panel(ToolbarAction::DeleteBoard(0)));
+        assert!(picks_from_panel(ToolbarAction::RenameBoard(0)));
+        assert!(closes_panel_on_pick(ToolbarAction::DeleteBoard(0)));
+        assert!(!closes_panel_on_pick(ToolbarAction::RenameBoard(0)));
         assert!(panel_stays_open(
-            Some(ToolbarAction::DeleteBoard),
+            Some(ToolbarAction::RenameBoard(0)),
             Some(ToolbarAction::Boards)
         ));
     }
@@ -3569,6 +3681,7 @@ mod tests {
             more: false,
             boards_open: false,
             size_open: false,
+            rename: None,
             boards: Vec::new(),
             shared: false,
             scrim: true,
@@ -3858,6 +3971,7 @@ mod tests {
                 more: false,
                 boards_open: false,
                 size_open: false,
+                rename: None,
                 boards: Vec::new(),
                 shared: false,
                 scrim: true,
@@ -4199,6 +4313,7 @@ mod tests {
             more: false,
             boards_open: false,
             size_open: false,
+            rename: None,
             boards: Vec::new(),
             shared: false,
             scrim: true,
@@ -4306,6 +4421,7 @@ mod tests {
     fn the_width_list_is_the_two_steps() {
         let toolbar = Toolbar {
             size_open: true,
+            rename: None,
             ..crate::render::tests::rail_for_legend()
         };
         let rows = size_rows(&toolbar);
@@ -4415,9 +4531,10 @@ mod tests {
                 }
                 // A row of the boards panel states its name and no key: it is picked from the list the
                 // `boards` block opened, and that block carries the key.
-                ToolbarAction::Board(_) | ToolbarAction::NewBoard | ToolbarAction::DeleteBoard => {
-                    keysym == Keysym::C || keysym == Keysym::c
-                }
+                ToolbarAction::Board(_)
+                | ToolbarAction::NewBoard
+                | ToolbarAction::DeleteBoard(_)
+                | ToolbarAction::RenameBoard(_) => keysym == Keysym::C || keysym == Keysym::c,
                 ToolbarAction::Size => unreachable!("no key, filtered above"),
             };
             assert!(applies, "'{}' names a key that does not do it", block.label);
