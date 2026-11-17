@@ -3487,7 +3487,11 @@ fn the_row_the_pointer_walks_into_deletes_nothing() {
     let (w, h) = (900.0f32, 600.0f32);
     let mut renderer = Renderer::new();
     let rows = [("Board 1", false), ("office", true)];
-    let open = boards_rail(&rows);
+    // The pointer is on the first board's row, so its buttons are up and a sweep can see them.
+    let open = Toolbar {
+        hover: Some(ToolbarAction::Board(0)),
+        ..boards_rail(&rows)
+    };
     let shut = Toolbar {
         boards_open: false,
         ..boards_rail(&rows)

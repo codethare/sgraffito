@@ -1106,7 +1106,7 @@ impl App {
     /// Push the current toolbar into every output's transient overlay. The rail lives in the
     /// left strip and the document does not change with it, so its box is the only thing the
     /// next frame has to damage; the rest of the surface comes back from the document raster.
-    fn refresh_toolbar(&mut self) {
+    pub(crate) fn refresh_toolbar(&mut self) {
         let keys: Vec<u32> = self.outputs.keys().copied().collect();
         for key in keys {
             let toolbar = self.current_toolbar(key);

@@ -594,3 +594,15 @@ fn a_rename_refuses_a_name_it_cannot_take() {
     assert!(!doc.rename_board("desk", "drawing"));
     assert_eq!(doc, before);
 }
+
+/// A rename can move a board's row: the list is ordered by name, so a press resolved after a rename
+/// commit would act on a different board than the one it landed on.
+#[test]
+fn a_rename_can_move_a_board_row() {
+    let mut doc = Doc::default();
+    doc.boards.insert("a".into(), Board::default());
+    doc.boards.insert("z".into(), Board::default());
+    assert_eq!(doc.names().cloned().collect::<Vec<_>>(), ["a", "z"]);
+    assert!(doc.rename_board("a", "zz"));
+    assert_eq!(doc.names().cloned().collect::<Vec<_>>(), ["z", "zz"]);
+}

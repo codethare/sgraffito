@@ -90,6 +90,16 @@ pub fn edit_action(keysym: Keysym, ctrl: bool, preedit_active: bool) -> EditActi
     }
 }
 
+/// The index a row action names, when it names a row of the boards list.
+fn board_index(action: ToolbarAction) -> Option<usize> {
+    match action {
+        ToolbarAction::Board(i) | ToolbarAction::DeleteBoard(i) | ToolbarAction::RenameBoard(i) => {
+            Some(i)
+        }
+        _ => None,
+    }
+}
+
 /// What a key does while a board's name is being edited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenameKey {
@@ -108,7 +118,9 @@ pub fn rename_key(keysym: Keysym, ok: bool) -> RenameKey {
     match keysym {
         Keysym::Return | Keysym::KP_Enter => RenameKey::Commit,
         Keysym::Escape => RenameKey::Cancel,
-        Keysym::BackSpace | Keysym::Delete | Keysym::V if ok => RenameKey::Buffer,
+        // `Ctrl+V` is a paste, and a name is pasted like any other text.
+        Keysym::BackSpace | Keysym::Delete => RenameKey::Buffer,
+        Keysym::V => RenameKey::Buffer,
         Keysym::Left | Keysym::Right | Keysym::Up | Keysym::Down => RenameKey::Ignore,
         _ if ok => RenameKey::Buffer,
         _ => RenameKey::Ignore,
@@ -682,6 +694,11 @@ impl App {
     fn mark_edit_dirty(&mut self) {
         self.grow_note();
         self.dirty = true;
+        // A name lives in the rail's snapshot, not in an output's overlay, so nothing else would put
+        // the typed text on screen.
+        if self.rename.is_some() {
+            self.refresh_toolbar();
+        }
         for out in self.outputs.values_mut() {
             if let Some(edit) = &out.overlay.text {
                 if edit.preedit.is_empty() {
@@ -834,18 +851,25 @@ impl App {
         if self.mode != Mode::Edit {
             return;
         }
-        // A name being edited is committed by leaving it, the way a text box is: the press then goes
-        // on to do what it would have done.
-        self.commit_rename();
         if let Some(action) = self.toolbar_hit(key, x, y) {
+            // The rows were drawn from the list as it stands, and committing a name can re-sort it, so
+            // the board the press means is named before the commit moves anything.
+            let board = board_index(action).and_then(|index| self.doc.names().nth(index).cloned());
+            // A name being edited is committed by leaving it, the way a text box is; the lock control
+            // is the rail's `Esc`, and `Esc` finishes an edit by cancelling it.
+            if action != ToolbarAction::Lock {
+                self.commit_rename();
+            }
             // A press on another block is a press outside the open menu, which closes it; the block's own
             // action then runs, so a press on another list's block opens that one.
             if press_dismisses_panel(Some(action), self.panel_owner()) {
                 self.close_panels();
             }
-            self.apply_toolbar_action(Some(*key), action);
+            self.apply_toolbar_action_on(Some(*key), action, board);
             return;
         }
+        // A press anywhere else is a press outside the name too, and it commits it before it applies.
+        self.commit_rename();
         // A press anywhere else is a press outside the menu, and clicking outside a menu dismisses it. This
         // is also what keeps an open panel and a live text edit from existing at once: a press is what starts
         // an edit, and the panel has already gone by the time the tool below sees it. Without it, `M` with the
@@ -1014,8 +1038,20 @@ impl App {
     /// cannot diverge in clamping or bounds. `Esc` is the same two-stage key it is on the
     /// keyboard: the first click finishes the text box being edited, the next one locks.
     fn apply_toolbar_action(&mut self, acting: Option<u32>, action: ToolbarAction) {
+        self.apply_toolbar_action_on(acting, action, None);
+    }
+
+    /// `board` is the board the press meant, named before a rename commit could re-sort the rows.
+    fn apply_toolbar_action_on(
+        &mut self,
+        acting: Option<u32>,
+        action: ToolbarAction,
+        board: Option<String>,
+    ) {
         if action == ToolbarAction::Lock {
-            if self.edit_target().is_some() {
+            if self.rename.is_some() {
+                self.cancel_rename();
+            } else if self.edit_target().is_some() {
                 self.end_text_edit();
             } else {
                 self.set_mode(Mode::Locked);
@@ -1038,7 +1074,7 @@ impl App {
             // The panel's rows are the document's boards in name order, which is the order the rail was
             // drawn from, so an index names the same board it was drawn as.
             ToolbarAction::Board(index) => {
-                let picked = self.doc.names().nth(index).cloned();
+                let picked = board.or_else(|| self.doc.names().nth(index).cloned());
                 if let Some(name) = picked {
                     self.switch_board(acting, &name);
                 }
@@ -1048,14 +1084,16 @@ impl App {
             }
             ToolbarAction::DeleteBoard(index) => {
                 // The row names its board by index, so a click needs no output to know what it means.
-                let name = self.doc.names().nth(index).cloned();
+                let name = board.or_else(|| self.doc.names().nth(index).cloned());
                 if let Some(name) = name {
                     self.delete_board_named(&name);
                 }
             }
             ToolbarAction::RenameBoard(index) => {
-                let name = self.doc.names().nth(index).cloned();
+                let name = board.or_else(|| self.doc.names().nth(index).cloned());
                 if let Some(name) = name {
+                    // The row's index is where that name sits now, which a re-sort may have moved.
+                    let index = self.doc.names().position(|n| *n == name).unwrap_or(index);
                     self.begin_rename(index, &name);
                 }
             }

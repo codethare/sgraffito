@@ -1440,10 +1440,10 @@ impl Renderer {
                 Some(ToolbarAction::Board(index)) => board_actions(toolbar, index),
                 _ => None,
             };
-            let buttons_w = if buttons.is_some() {
-                2.0 * TOOLBAR_BLOCK
-            } else {
-                0.0
+            let buttons_w = match buttons {
+                Some((true, _)) => 2.0 * TOOLBAR_BLOCK,
+                Some((false, _)) => TOOLBAR_BLOCK,
+                None => 0.0,
             };
             let label = row_label(toolbar, &control.block);
             if (control.stretched || bare) && !label.is_empty() {
@@ -1676,8 +1676,11 @@ impl Renderer {
             // chosen between, and a row that has to be hovered before it can be read has to be probed.
             let labelled = hovered || block.column == 1;
             let bare = block.mark == Mark::None;
-            let label = (labelled && !block.label.is_empty())
-                .then(|| self.text_width(&block.label, TOOLBAR_TEXT_SIZE));
+            // A row being renamed draws its buffer, so the row is measured from the text it draws:
+            // measuring the old name would clip a longer one at the capsule's edge.
+            let text = row_label(toolbar, &block);
+            let label =
+                (labelled && !text.is_empty()).then(|| self.text_width(text, TOOLBAR_TEXT_SIZE));
             // A row of the drawer starts a column to the right, so it has that much less of the reserve to
             // reach into: the reserve is the room a control may take from the rail's own edge, and
             // `toolbar_bounds` — what a frame that repaints only the rail damages — is that wide.
@@ -1705,12 +1708,13 @@ impl Renderer {
                 Some(ToolbarAction::Board(index)) => board_actions(toolbar, index),
                 _ => None,
             };
-            let button_w = 2.0 * TOOLBAR_BLOCK;
-            let width = if buttons.is_some() {
-                (width + button_w).min(ceiling)
-            } else {
-                width
+            // One board has nothing to delete, so its row makes room for its rename alone.
+            let button_w = match buttons {
+                Some((true, _)) => 2.0 * TOOLBAR_BLOCK,
+                Some((false, _)) => TOOLBAR_BLOCK,
+                None => 0.0,
             };
+            let width = (width + button_w).min(ceiling);
             if let Some(action) = block.action {
                 // The corridor: while the panel is open, the block that opens it owns the row as far as the
                 // panel's left edge — so the pointer can travel from the block into the list without
@@ -1775,6 +1779,13 @@ impl Renderer {
             let Some((delete, _)) = board_actions(toolbar, index) else {
                 continue;
             };
+            // A button takes the height its row was given, so the strip between two rows belongs to
+            // the row above and the pointer can walk down a column of buttons.
+            let row_h = hits
+                .iter()
+                .rev()
+                .find(|(_, action)| Some(*action) == control.block.action)
+                .map_or(TOOLBAR_BLOCK, |(rect, _)| rect.h);
             let mut actions = Vec::new();
             if delete {
                 actions.push(ToolbarAction::DeleteBoard(index));
@@ -1787,7 +1798,7 @@ impl Renderer {
                         x: TOOLBAR_DRAWER_X + control.width - slot * TOOLBAR_BLOCK,
                         y: control.y,
                         w: TOOLBAR_BLOCK,
-                        h: TOOLBAR_BLOCK,
+                        h: row_h,
                     },
                     *action,
                 ));
@@ -3671,6 +3682,51 @@ mod tests {
             preedit: String::new(),
         });
         assert_eq!(row_label(&toolbar, &row), "left");
+    }
+
+    /// The row an edit is in is measured from what is typed, and a document's only board makes room
+    /// for its rename alone: the capsule and the name's clip follow the text, not the name it started
+    /// from.
+    #[test]
+    fn a_row_being_edited_is_measured_from_its_buffer() {
+        let row = |text: Option<&str>, boards: usize| {
+            let mut toolbar = Toolbar {
+                boards_open: true,
+                boards: (0..boards)
+                    .map(|i| crate::canvas::BoardRow {
+                        name: format!("Board {i}"),
+                        current: i == 0,
+                    })
+                    .collect(),
+                hover: Some(ToolbarAction::Board(0)),
+                ..crate::render::tests::rail_for_legend()
+            };
+            toolbar.rename = text.map(|text| crate::canvas::BoardEdit {
+                index: 0,
+                text: text.into(),
+                cursor: text.chars().count(),
+                preedit: String::new(),
+            });
+            let mut renderer = Renderer::new();
+            let pill = renderer.toolbar_pill(&toolbar, (900.0, 1000.0));
+            pill.controls
+                .iter()
+                .find(|control| control.block.action == Some(ToolbarAction::Board(0)))
+                .expect("no row for the first board")
+                .width
+        };
+        let short = row(Some("Board 1"), 2);
+        let long = row(Some("a much longer name"), 2);
+        assert!(
+            long > short,
+            "the row was measured from the name it started from"
+        );
+        // One board, one button: no empty slot where a delete would be.
+        assert_eq!(
+            row(None, 2) - row(None, 1),
+            TOOLBAR_BLOCK,
+            "the last board's row kept room for a button it does not show"
+        );
     }
 
     /// A different list of boards is a different rail: reusing the previous layout would draw the panel
