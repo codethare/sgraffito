@@ -84,6 +84,8 @@ const MAX_BUFFERS: usize = 2;
 /// How long the pop-out of a hovered block takes, one frame of it, and the relaxed poll the
 /// event loop uses when nothing is moving.
 const TOOLBAR_ANIM: Duration = Duration::from_millis(140);
+/// How long the caret stays on, and then off. Slow enough not to pull the eye off the name.
+const CARET_BLINK: Duration = Duration::from_millis(530);
 const FRAME_WAIT: Duration = Duration::from_millis(16);
 pub const IDLE_WAIT: Duration = Duration::from_millis(200);
 
@@ -236,10 +238,17 @@ impl Output {
     }
 }
 
+/// Whether the caret is on at `elapsed` since the edit began: on for one blink, off for the next.
+fn caret_visible(elapsed: Duration) -> bool {
+    (elapsed.as_millis() / CARET_BLINK.as_millis()).is_multiple_of(2)
+}
+
 /// A board's name being edited in the rail's list.
 pub struct Rename {
     /// The row's place in the rail's list, which is stable while the keyboard is on it.
     pub(crate) index: usize,
+    /// When the edit began, which is what the caret blinks from.
+    pub(crate) since: Instant,
     /// The name the row had: the key the rename moves.
     pub(crate) board: String,
     pub(crate) text: TextBuffer,
@@ -671,6 +680,7 @@ impl App {
                         text: rename.text.text.clone(),
                         cursor: rename.text.cursor,
                         preedit: rename.preedit.clone(),
+                        caret: caret_visible(rename.since.elapsed()),
                     }),
                     boards: self
                         .doc
@@ -1026,6 +1036,7 @@ impl App {
         self.commit_transient_drawing();
         self.rename = Some(Rename {
             index,
+            since: Instant::now(),
             board: name.to_string(),
             text: TextBuffer::new(name),
             preedit: String::new(),
@@ -2525,6 +2536,11 @@ impl App {
         if self.animating() {
             self.refresh_toolbar_hover();
         }
+        // A caret blinks: the rail is re-snapshotted on the tick that toggles it, and the wait below
+        // is what spaces those ticks out.
+        if self.rename.is_some() {
+            self.refresh_toolbar();
+        }
         if self.dirty {
             self.dirty = false;
             let keys: Vec<u32> = self.outputs.keys().copied().collect();
@@ -2563,6 +2579,11 @@ impl App {
     fn next_wait(&self) -> Duration {
         if self.animating() {
             FRAME_WAIT
+        } else if let Some(rename) = &self.rename {
+            // The loop wakes when the caret changes, not sixty times a second.
+            let half = CARET_BLINK.as_millis();
+            let left = half - rename.since.elapsed().as_millis() % half;
+            Duration::from_millis(left as u64).min(IDLE_WAIT)
         } else {
             IDLE_WAIT
         }
@@ -3285,6 +3306,16 @@ delegate_dispatch2!(App);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A caret is on for one blink and off for the next, measured from the edit's start.
+    #[test]
+    fn the_caret_blinks_from_the_start_of_the_edit() {
+        assert!(caret_visible(Duration::ZERO));
+        assert!(caret_visible(CARET_BLINK - Duration::from_millis(1)));
+        assert!(!caret_visible(CARET_BLINK));
+        assert!(!caret_visible(CARET_BLINK * 2 - Duration::from_millis(1)));
+        assert!(caret_visible(CARET_BLINK * 2));
+    }
 
     /// The loop comes back for a zoom's next frame only while one is in flight: this predicate is
     /// what `animating` asks, and `next_wait` is what turns it into the 16 ms wait. A zoom that has

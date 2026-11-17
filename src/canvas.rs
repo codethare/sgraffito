@@ -1893,6 +1893,8 @@ pub struct BoardEdit {
     pub text: String,
     pub cursor: usize,
     pub preedit: String,
+    /// Whether the caret is on this half of its blink.
+    pub caret: bool,
 }
 
 /// What the edit-mode toolbar shows: the active tool, the active colour, the active size in

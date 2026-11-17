@@ -1472,12 +1472,16 @@ impl Renderer {
                 );
             }
             if let Some((delete, _)) = buttons {
+                let index = match control.block.action {
+                    Some(ToolbarAction::Board(index)) => index,
+                    _ => 0,
+                };
                 let mut actions = Vec::new();
                 if delete {
-                    actions.push(Icon::Cross);
+                    actions.push((Icon::Cross, ToolbarAction::DeleteBoard(index)));
                 }
-                actions.push(Icon::Pencil);
-                for (number, icon) in actions.iter().enumerate() {
+                actions.push((Icon::Pencil, ToolbarAction::RenameBoard(index)));
+                for (number, (icon, action)) in actions.iter().enumerate() {
                     let slot = (actions.len() - number) as f32;
                     let square = Rect {
                         x: (ox + column_x + width - slot * TOOLBAR_BLOCK) * scale,
@@ -1485,6 +1489,21 @@ impl Renderer {
                         w: TOOLBAR_BLOCK * scale,
                         h: TOOLBAR_BLOCK * scale,
                     };
+                    // The button under the pointer states its own shape: an outline is what makes a
+                    // glyph a control the press will land on.
+                    if toolbar.hover == Some(*action)
+                        && let Some(path) = rounded_rect_path(square, TOOLBAR_RADIUS * scale)
+                    {
+                        let c = parse_hex(TOOLBAR_ACCENT);
+                        let mut paint = Paint::default();
+                        paint.set_color_rgba8(c[0], c[1], c[2], c[3]);
+                        paint.anti_alias = true;
+                        let stroke = SkStroke {
+                            width: TOOLBAR_HAIRLINE.max(1.0) * scale,
+                            ..Default::default()
+                        };
+                        pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+                    }
                     draw_icon(pixmap, *icon, square, scale, TOOLBAR_LABEL_TEXT);
                 }
             }
@@ -1496,13 +1515,15 @@ impl Renderer {
             {
                 let typed: String = edit.text.chars().take(edit.cursor).collect();
                 let x = ox + label_x(column_x, bare) + self.text_width(&typed, TOOLBAR_TEXT_SIZE);
-                let caret = Rect {
-                    x: x * scale,
-                    y: (oy + control.y + TOOLBAR_BLOCK * 0.2) * scale,
-                    w: TOOLBAR_HAIRLINE.max(1.0) * scale,
-                    h: TOOLBAR_BLOCK * 0.6 * scale,
-                };
-                round_rect(pixmap, caret, 0.0, parse_hex(TOOLBAR_ACCENT), None);
+                if edit.caret {
+                    let caret = Rect {
+                        x: x * scale,
+                        y: (oy + control.y + TOOLBAR_BLOCK * 0.2) * scale,
+                        w: TOOLBAR_HAIRLINE.max(1.0) * scale,
+                        h: TOOLBAR_BLOCK * 0.6 * scale,
+                    };
+                    round_rect(pixmap, caret, 0.0, parse_hex(TOOLBAR_ACCENT), None);
+                }
                 if !edit.preedit.is_empty() {
                     let item = toolbar_text(
                         x + TOOLBAR_HAIRLINE,
@@ -3680,6 +3701,7 @@ mod tests {
             text: "left".into(),
             cursor: 4,
             preedit: String::new(),
+            caret: true,
         });
         assert_eq!(row_label(&toolbar, &row), "left");
     }
@@ -3706,6 +3728,7 @@ mod tests {
                 text: text.into(),
                 cursor: text.chars().count(),
                 preedit: String::new(),
+                caret: true,
             });
             let mut renderer = Renderer::new();
             let pill = renderer.toolbar_pill(&toolbar, (900.0, 1000.0));
