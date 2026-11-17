@@ -118,6 +118,8 @@ enum Icon {
     Arrow,
     Smaller,
     Larger,
+    Cross,
+    Pencil,
     Lock,
     Hand,
     Note,
@@ -604,6 +606,16 @@ fn drawer_blocks(toolbar: &Toolbar, overflow: &[Block]) -> Vec<Block> {
         block
     }));
     rows
+}
+
+/// What a row draws where its name goes: the buffer while it is being edited.
+fn row_label<'a>(toolbar: &'a Toolbar, row: &'a Block) -> &'a str {
+    if let (Some(edit), Some(ToolbarAction::Board(index))) = (&toolbar.rename, row.action)
+        && edit.index == index
+    {
+        return &edit.text;
+    }
+    &row.label
 }
 
 /// Whether a board's row shows its buttons, as `(delete, rename)`: the pointer is on the row or on one
@@ -1422,14 +1434,26 @@ impl Renderer {
                 }
             }
             let bare = control.block.mark == Mark::None;
-            if (control.stretched || bare) && !control.block.label.is_empty() {
+            // A board's row shows its two buttons at its right end while the pointer is on it: the
+            // name is clipped where they begin, and each button is a block-sized square of its own.
+            let buttons = match control.block.action {
+                Some(ToolbarAction::Board(index)) => board_actions(toolbar, index),
+                _ => None,
+            };
+            let buttons_w = if buttons.is_some() {
+                2.0 * TOOLBAR_BLOCK
+            } else {
+                0.0
+            };
+            let label = row_label(toolbar, &control.block);
+            if (control.stretched || bare) && !label.is_empty() {
                 let item = toolbar_text(
                     ox + label_x(column_x, bare),
                     oy + control.y,
                     TOOLBAR_BLOCK,
                     TOOLBAR_TEXT_SIZE,
                     TOOLBAR_LABEL_TEXT,
-                    &control.block.label,
+                    label,
                 );
                 // The label is uncovered by the capsule growing over it: a glyph appears once
                 // the edge has passed it, and at rest the edge is past its trailing padding.
@@ -1443,9 +1467,63 @@ impl Renderer {
                     None,
                     // The clip that uncovers the text as the capsule opens is measured from the block's own
                     // column too, or a panel row's name is cut off 34 points before the end of its capsule.
-                    Some(ox + column_x + width),
+                    Some(ox + column_x + width - buttons_w),
                     None,
                 );
+            }
+            if let Some((delete, _)) = buttons {
+                let mut actions = Vec::new();
+                if delete {
+                    actions.push(Icon::Cross);
+                }
+                actions.push(Icon::Pencil);
+                for (number, icon) in actions.iter().enumerate() {
+                    let slot = (actions.len() - number) as f32;
+                    let square = Rect {
+                        x: (ox + column_x + width - slot * TOOLBAR_BLOCK) * scale,
+                        y: (oy + control.y) * scale,
+                        w: TOOLBAR_BLOCK * scale,
+                        h: TOOLBAR_BLOCK * scale,
+                    };
+                    draw_icon(pixmap, *icon, square, scale, TOOLBAR_LABEL_TEXT);
+                }
+            }
+            // The caret sits after the buffer's text, and the preedit after the caret: a name is
+            // typed in its row the way a text box is typed in the canvas.
+            if let (Some(edit), Some(ToolbarAction::Board(index))) =
+                (&toolbar.rename, control.block.action)
+                && edit.index == index
+            {
+                let typed: String = edit.text.chars().take(edit.cursor).collect();
+                let x = ox + label_x(column_x, bare) + self.text_width(&typed, TOOLBAR_TEXT_SIZE);
+                let caret = Rect {
+                    x: x * scale,
+                    y: (oy + control.y + TOOLBAR_BLOCK * 0.2) * scale,
+                    w: TOOLBAR_HAIRLINE.max(1.0) * scale,
+                    h: TOOLBAR_BLOCK * 0.6 * scale,
+                };
+                round_rect(pixmap, caret, 0.0, parse_hex(TOOLBAR_ACCENT), None);
+                if !edit.preedit.is_empty() {
+                    let item = toolbar_text(
+                        x + TOOLBAR_HAIRLINE,
+                        oy + control.y,
+                        TOOLBAR_BLOCK,
+                        TOOLBAR_TEXT_SIZE,
+                        TOOLBAR_FOREGROUND,
+                        &edit.preedit,
+                    );
+                    self.draw_text(
+                        pixmap,
+                        &item,
+                        Screen {
+                            scale,
+                            view: View::default(),
+                        },
+                        None,
+                        Some(ox + column_x + width),
+                        None,
+                    );
+                }
             }
             // The `more` block states what the drawer holds, on a line under its own label: a control
             // nobody can find is a control nobody uses. It goes in the drawer's own column, which is
@@ -2535,6 +2613,42 @@ fn draw_icon(pixmap: &mut PixmapMut, icon: Icon, square: Rect, scale: f32, color
         }
         return;
     }
+    if icon == Icon::Cross {
+        // A cross: two lines through the middle of the box.
+        for (from, to) in [((0.25, 0.25), (0.75, 0.75)), ((0.75, 0.25), (0.25, 0.75))] {
+            let mut line = PathBuilder::new();
+            line.move_to(x + w * from.0, y + h * from.1);
+            line.line_to(x + w * to.0, y + h * to.1);
+            if let Some(path) = line.finish() {
+                pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+            }
+        }
+        return;
+    }
+    if icon == Icon::Pencil {
+        // A pencil: a body running up the box and a filled tip at its foot.
+        let mut body = PathBuilder::new();
+        body.move_to(x + w * 0.3, y + h * 0.8);
+        body.line_to(x + w * 0.75, y + h * 0.2);
+        if let Some(path) = body.finish() {
+            pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+        }
+        let mut tip = PathBuilder::new();
+        tip.move_to(x + w * 0.3, y + h * 0.8);
+        tip.line_to(x + w * 0.42, y + h * 0.78);
+        tip.line_to(x + w * 0.32, y + h * 0.68);
+        tip.close();
+        if let Some(path) = tip.finish() {
+            pixmap.fill_path(
+                &path,
+                &paint,
+                tiny_skia::FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
+        }
+        return;
+    }
     if icon == Icon::Hand {
         // A palm with three fingers and a thumb: a hand, drawn in the same stroke language as the
         // rest of the set.
@@ -2607,6 +2721,8 @@ fn draw_icon(pixmap: &mut PixmapMut, icon: Icon, square: Rect, scale: f32, color
                 }
             }
         }
+        // Both are drawn and returned before this match: see the blocks above.
+        Icon::Cross | Icon::Pencil => {}
         Icon::Smaller => {
             path.move_to(x + w * 0.2, y + h / 2.0);
             path.line_to(x + w * 0.8, y + h / 2.0);
@@ -3530,6 +3646,31 @@ mod tests {
             Some(ToolbarAction::RenameBoard(0)),
             Some(ToolbarAction::Boards)
         ));
+    }
+
+    /// The row being edited draws the buffer, not the name it started from.
+    #[test]
+    fn the_edited_row_draws_the_buffer_instead_of_its_name() {
+        let mut toolbar = Toolbar {
+            boards_open: true,
+            boards: vec![crate::canvas::BoardRow {
+                name: "laptop".into(),
+                current: true,
+            }],
+            ..crate::render::tests::rail_for_legend()
+        };
+        let row = board_rows(&toolbar)
+            .into_iter()
+            .find(|row| row.action == Some(ToolbarAction::Board(0)))
+            .expect("no row for the first board");
+        assert_eq!(row_label(&toolbar, &row), "laptop");
+        toolbar.rename = Some(crate::canvas::BoardEdit {
+            index: 0,
+            text: "left".into(),
+            cursor: 4,
+            preedit: String::new(),
+        });
+        assert_eq!(row_label(&toolbar, &row), "left");
     }
 
     /// A different list of boards is a different rail: reusing the previous layout would draw the panel
