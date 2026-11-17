@@ -559,3 +559,38 @@ fn a_mixed_selection_reports_only_what_changed() {
         "the box is not the text's ink alone"
     );
 }
+
+/// A rename moves the drawing with the name: the board's content and the picked board follow it, and
+/// nothing is left under the old key.
+#[test]
+fn renaming_a_board_moves_its_drawing() {
+    let mut doc = Doc::default();
+    doc.boards.insert("laptop".into(), Board::default());
+    doc.boards.insert("monitor".into(), Board::default());
+    doc.boards.get_mut("laptop").unwrap().notes.push(Note::new(
+        0.0,
+        0.0,
+        "#ffffff",
+        "2026/11/17".into(),
+    ));
+    doc.active = "laptop".into();
+    assert!(doc.rename_board("laptop", "left"));
+    assert_eq!(doc.active, "left");
+    assert_eq!(doc.boards["left"].notes.len(), 1);
+    assert!(!doc.boards.contains_key("laptop"));
+}
+
+/// A name the document cannot hold is refused rather than half-applied: empty, taken, or not a board.
+#[test]
+fn a_rename_refuses_a_name_it_cannot_take() {
+    let mut doc = Doc::default();
+    doc.boards.insert("laptop".into(), Board::default());
+    doc.boards.insert("monitor".into(), Board::default());
+    let before = doc.clone();
+    for bad in ["", "monitor"] {
+        assert!(!doc.rename_board("laptop", bad), "{bad:?} was taken");
+        assert_eq!(doc, before, "{bad:?} left the document changed");
+    }
+    assert!(!doc.rename_board("desk", "drawing"));
+    assert_eq!(doc, before);
+}

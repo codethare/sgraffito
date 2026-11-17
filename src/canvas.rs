@@ -1792,6 +1792,23 @@ impl Doc {
         Some(successor)
     }
 
+    /// Rename `old` to `new`, moving its drawing and the picked board with it. `false` when the new
+    /// name is empty or another board holds it, or when there is no board called `old`: a refused
+    /// rename changes nothing.
+    pub fn rename_board(&mut self, old: &str, new: &str) -> bool {
+        if old == new || new.is_empty() || self.boards.contains_key(new) {
+            return false;
+        }
+        let Some(board) = self.boards.remove(old) else {
+            return false;
+        };
+        self.boards.insert(new.to_string(), board);
+        if self.active == old {
+            self.active = new.to_string();
+        }
+        true
+    }
+
     /// Which board an output shows once its `wl_output` name arrives, when it was not known at the time the
     /// surface was made: the same rule as [`Doc::adopt`], run again, so a board picked last still wins over
     /// the board named after that output. `None` when nothing changes, or when the board was chosen by hand
