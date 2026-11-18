@@ -15,6 +15,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 smithay-client-toolkit = "0.21.1"
 tiny-skia = { version = "0.12.0", default-features = false, features = ["std", "simd"] }
+toml = "1.1"
 wayland-client = "0.31.15"
 wayland-protocols = { version = "0.32.13", features = ["client", "unstable", "staging"] }
 wayland-protocols-wlr = "0.3.12"

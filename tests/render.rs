@@ -369,7 +369,7 @@ fn frame(buf: &mut [u8], w: u32, h: u32, ann: &Board, overlay: &Overlay, damage:
 fn toolbar(tool: Tool, color: &'static str, size: f32, hover: Option<ToolbarAction>) -> Toolbar {
     Toolbar {
         tool,
-        color,
+        color: color.to_string(),
         size,
         hover,
         grow: 1.0,
@@ -2434,7 +2434,7 @@ fn a_row_of_the_panel_can_be_clicked_with_the_pointer_on_the_block_that_opened_i
     let (w, h) = (900u32, 820u32);
     let toolbar = Toolbar {
         tool: Tool::Pen,
-        color: PALETTE[0],
+        color: PALETTE[0].to_string(),
         size: 3.0,
         hover: Some(ToolbarAction::More),
         grow: 1.0,

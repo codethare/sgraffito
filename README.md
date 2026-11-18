@@ -166,16 +166,38 @@ A shape is a `kind` (`circle`, `rect`, `diamond`, `line` or `arrow`), its colour
 - A corrupt file or an unsupported version is renamed to `annotations.json.bak` and the daemon starts with no annotations.
 - A board outlives the output that showed it: closing an output changes nothing, whatever was drawn on the board is still there, and the next output to appear adopts the board picked last.
 
+## Configuration
+
+Optional: `$XDG_CONFIG_HOME/sgraffito/config.toml` (default `~/.config/sgraffito/config.toml`). A missing file or an invalid value keeps the built-in default; the daemon says what it ignored.
+
+```toml
+# Sticky-note border thickness, in logical pixels. 0 draws no border.
+border = 1.0
+
+# Exactly five palette colours, used by the rail's 1-5 chips and by new strokes, shapes,
+# notes and text boxes. Hex (#rgb, #rgba, #rrggbb, #rrggbbaa), rgb()/rgba() and
+# hsl()/hsla() are accepted and normalized to #rrggbb or #rrggbbaa.
+colors = [
+  "#e01b24",
+  "rgb(246, 211, 45)",
+  "hsl(130, 60%, 51%)",
+  "rgba(53, 132, 228, 0.8)",
+  "#ffffff",
+]
+```
+
+The file is read once when the daemon starts.
+
 ## Known limitations
 
-- v1 has no undo/redo — a gesture cannot be undone once the pointer is released, and the eraser is the only way back — no copy, cut or duplicate, no z-order, no layers, no PNG export, no configuration file and no pressure or touch support.
+- v1 has no undo/redo — a gesture cannot be undone once the pointer is released, and the eraser is the only way back — no copy, cut or duplicate, no z-order, no layers, no PNG export and no pressure or touch support.
 - The toolbar is part of the full-screen edit overlay, not a surface of its own, so it cannot respect another layer surface's exclusive zone: a compositor bar or dock that occupies the left edge, or the optical-centre band, is covered by it while editing. Its position is fixed; it cannot be dragged.
 - A block shows an icon of what it does and says what it does only while the pointer is on it, so a first-time user learns the rail by hovering, or from this README's key table. Each block's text ends with its key, and that is the only place a key appears: when a block's text does not fit the room reserved for the rail, the block stays a square showing its icon and no text, and its key is then only in this README. The longest text is `text: click to place (T)`, about 177 logical pixels of capsule, which fits the 320-pixel reserve on any output at least 336 pixels wide.
 - A drawer shows the rows that fit the output. A very short screen folds almost the whole rail into it, and a panel taller than the screen would be rows nobody could click or read, so the rows nearest the `more` block are kept and the rest stay on their keys — a folded control never loses its key.
 - A board can be created, picked, renamed and deleted. A delete is final — there is no undo behind it, and the button sits on the row of the board it removes, so a slip removes that board with everything drawn on it. A name is refused when it is empty or another board already has it: the board keeps the name it had. The last board cannot be deleted, because a document with no boards is nowhere to draw; the panel lists eight boards and `sgraffito boards` lists them all, because the panel is drawn inside a fixed damage box.
 - Which board a screen shows is not saved, only which board was picked last: after a restart every screen starts on that board, so a per-screen setup has to be picked again. With the screens sharing one board there is nothing to pick again.
 - The rail is only as tall as the output it is drawn on: the palette, the tools and the size keys fill from the top, `boards`, `more` and `Esc` always stay at its foot, and every control that does not fit is a row of the drawer instead — so a short output loses no control, at the price of the tools it cannot show being one click (or one key) away. There is no scrolling rail. The rail sits on a black plate at 90% opacity, so it reads as one control over any wallpaper: the plate is the block column plus 6 pt on every side, and a block stretched into a capsule is wider than the plate, so a capsule reaches out over the wallpaper by design.
-- The hand-drawn style is fixed: there is no roughness setting, no way to switch it off, and no clean-line mode. It is not a preference in the file either, so a drawing made before the style existed opens in it.
+- The hand-drawn style is fixed: there is no roughness setting, no way to switch it off, and no clean-line mode. It is not a configuration option either, so a drawing made before the style existed opens in it.
 - **Panning or zooming a dense drawing is the most expensive thing this program does.** The committed document is rasterised into a screen-space cache, so a view change moves every pixel of it and rebuilds that cache: measured at 3840x2160 over 200 strokes, a pan frame costs 32.5 ms median (38.5 ms p95) against 19.7 ms for the commit that rebuilds the same cache, because a pan also copies the whole surface back out. On a sparse drawing or a smaller output it is milliseconds. A partial rebuild — redrawing only the band a pan exposes — is the fix, and it is the same work as the partial cache rebuild already listed as the next step.
 - The rail's drawer holds only the controls that are not used often, and it is closed every time the daemon starts: there is no way to make it stay open, and a control in it is only reachable by key while it is open.
 - A note's date is UTC, and its typography is its own (18 pt text, an 11 pt date): the size keys do not change a note, and there is no way to set a different size on one note. A note cannot be resized by dragging its corner while it is being typed in, and its text does not rotate with the selection that holds it.

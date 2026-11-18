@@ -12,10 +12,11 @@ use tiny_skia::{
 use wayland_client::protocol::wl_shm::Format;
 
 use crate::canvas::{
-    Board, Handle, ItemId, NOTE_DATE_SIZE, NOTE_RADIUS, Note, Overlay, PALETTE, Rect,
-    SELECT_HANDLE, SELECT_ROTATE_GAP, Shape, ShapeKind, Stroke, TextItem, TextOverlay, Tool,
-    Toolbar, ToolbarAction, View, parse_hex, rect_of, rotate_handle, selection_frame,
+    Board, Handle, ItemId, NOTE_DATE_SIZE, NOTE_RADIUS, Note, Overlay, Rect, SELECT_HANDLE,
+    SELECT_ROTATE_GAP, Shape, ShapeKind, Stroke, TextItem, TextOverlay, Tool, Toolbar,
+    ToolbarAction, View, parse_hex, rect_of, rotate_handle, selection_frame,
 };
+use crate::config;
 use crate::sketch::{self, Seg};
 /// Radius of the eraser marker circle, in logical pixels.
 const ERASER_MARKER_RADIUS: f32 = 8.0;
@@ -258,7 +259,8 @@ fn label_x(column_x: f32, bare: bool) -> f32 {
 /// The controls that fill the rail from the top and fold into the drawer when there is no room for them: the
 /// palette, the tools and the size group, in their own order.
 fn rail_candidates(toolbar: &Toolbar) -> Vec<Block> {
-    let mut blocks: Vec<Block> = PALETTE
+    let colors = &config::current().colors;
+    let mut blocks: Vec<Block> = colors
         .iter()
         .enumerate()
         .map(|(index, color)| Block {
@@ -269,11 +271,11 @@ fn rail_candidates(toolbar: &Toolbar) -> Vec<Block> {
                 &format!("colour {}", index + 1),
             ),
             action: Some(ToolbarAction::Color(index)),
-            active: *color == toolbar.color,
+            active: color == &toolbar.color,
             gap: TOOLBAR_GAP,
         })
         .collect();
-    blocks[PALETTE.len() - 1].gap = TOOLBAR_GROUP_GAP;
+    blocks[colors.len() - 1].gap = TOOLBAR_GROUP_GAP;
     for (tool, icon, label) in [
         (Tool::Pen, Icon::Pen, "pen"),
         (Tool::Eraser, Icon::Eraser, "eraser"),
@@ -1377,7 +1379,7 @@ impl Renderer {
                         pixmap,
                         square,
                         TOOLBAR_RADIUS * scale,
-                        parse_hex(PALETTE[*index]),
+                        parse_hex(&config::current().colors[*index]),
                         Some((
                             parse_hex(if control.block.active {
                                 TOOLBAR_ACCENT
@@ -1949,12 +1951,13 @@ impl Renderer {
         edit: Option<&TextOverlay>,
     ) {
         let square = screen.rect(note.bounds());
+        let border = config::current().border;
         round_rect(
             pixmap,
             square,
             screen.len(NOTE_RADIUS),
             parse_hex(&note.color),
-            Some((parse_hex(note.ink()), screen.ui(TOOLBAR_HAIRLINE))),
+            (border > 0.0).then(|| (parse_hex(note.ink()), screen.ui(border))),
         );
         // The live text is the overlay's: a note that has become shorter must not leave the committed
         // glyphs behind, so the caller leaves the note out of the raster while it is being edited.
@@ -3927,7 +3930,7 @@ mod tests {
     fn rail_for_legend() -> Toolbar {
         Toolbar {
             tool: Tool::Pen,
-            color: crate::canvas::PALETTE[0],
+            color: crate::canvas::PALETTE[0].to_string(),
             size: 3.0,
             hover: None,
             grow: 0.0,
@@ -4217,7 +4220,7 @@ mod tests {
         let overlay = Overlay {
             toolbar: Some(Toolbar {
                 tool: Tool::Pen,
-                color: "#e01b24",
+                color: "#e01b24".to_string(),
                 size: 3.0,
                 hover: None,
                 grow: 1.0,
@@ -4559,7 +4562,7 @@ mod tests {
     fn rail_state() -> Toolbar {
         Toolbar {
             tool: Tool::Pen,
-            color: PALETTE[0],
+            color: crate::canvas::PALETTE[0].to_string(),
             size: 3.0,
             hover: None,
             grow: 1.0,

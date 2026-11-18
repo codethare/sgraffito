@@ -49,7 +49,7 @@ use crate::canvas::{
     toggle_selection,
 };
 
-pub use crate::canvas::{PALETTE, Tool, ToolbarAction};
+pub use crate::canvas::{Tool, ToolbarAction};
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::{
     Shape as CursorShape, WpCursorShapeDeviceV1,
 };
@@ -414,6 +414,8 @@ impl App {
         data_device_manager: DataDeviceManagerState,
         ping: Ping,
     ) -> anyhow::Result<Self> {
+        // Configuration is startup state: read before the palette or the note border is used.
+        crate::config::init();
         let path = store::path().ok_or_else(|| {
             anyhow::anyhow!("need $XDG_DATA_HOME or $HOME to locate the annotation file")
         })?;
@@ -667,7 +669,7 @@ impl App {
                 let board = self.outputs.get(&key).map(|out| out.board.as_str());
                 Some(Toolbar {
                     tool: self.tool,
-                    color: PALETTE[self.color_idx],
+                    color: crate::config::current().colors[self.color_idx].clone(),
                     size: self.active_size(),
                     hover: self.toolbar_hover,
                     grow: self.toolbar_grow(Instant::now()),
@@ -2000,10 +2002,10 @@ impl App {
     }
 
     pub(crate) fn set_color(&mut self, idx: usize) {
-        if idx < PALETTE.len() {
+        if idx < crate::config::current().colors.len() {
             self.color_idx = idx;
             self.refresh_toolbar();
-            self.recolour_selection(PALETTE[idx]);
+            self.recolour_selection(&crate::config::current().colors[idx]);
         }
     }
 
@@ -2195,7 +2197,7 @@ impl App {
                 TextItem {
                     x,
                     y,
-                    color: PALETTE[self.color_idx].to_string(),
+                    color: crate::config::current().colors[self.color_idx].clone(),
                     size: self.text_size,
                     text: String::new(),
                 },
@@ -2230,7 +2232,7 @@ impl App {
     /// so a shape is the pen's gesture with a kind, and a live shape is transient exactly as an
     /// in-progress stroke is. A shape is stroked with the pen width and never filled.
     pub(crate) fn begin_shape(&mut self, key: &u32, x: f32, y: f32, kind: ShapeKind) {
-        let color = PALETTE[self.color_idx].to_string();
+        let color = crate::config::current().colors[self.color_idx].clone();
         let width = self.pen_width;
         let Some(out) = self.outputs.get_mut(key) else {
             return;
@@ -2341,7 +2343,7 @@ impl App {
             Note::new(
                 origin[0],
                 origin[1],
-                PALETTE[self.color_idx],
+                &crate::config::current().colors[self.color_idx],
                 date_stamp(SystemTime::now()),
             )
         });

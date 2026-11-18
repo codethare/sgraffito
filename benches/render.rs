@@ -258,7 +258,7 @@ fn rail_state() -> Toolbar {
         shared: false,
         scrim: true,
         tool: Tool::Pen,
-        color: "#e01b24",
+        color: "#e01b24".to_string(),
         size: 3.0,
         hover: None,
         grow: 1.0,

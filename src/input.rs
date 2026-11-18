@@ -29,7 +29,7 @@ use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::{
 };
 
 use crate::app::{
-    App, BTN_LEFT, BTN_MIDDLE, Mode, PALETTE, Tool, ToolbarAction, log, read_selection, text_mime,
+    App, BTN_LEFT, BTN_MIDDLE, Mode, Tool, ToolbarAction, log, read_selection, text_mime,
 };
 use crate::canvas::{
     Board, Caret, ERASER_THRESHOLD, Rect, SELECT_HANDLE_HIT, ShapeKind, Stroke, TextBuffer,
@@ -900,7 +900,7 @@ impl App {
                 if let Some(out) = self.outputs.get_mut(key) {
                     let width = self.pen_width;
                     out.overlay.stroke = Some(Stroke {
-                        color: PALETTE[self.color_idx].to_string(),
+                        color: crate::config::current().colors[self.color_idx].clone(),
                         width,
                         points: vec![canvas],
                     });

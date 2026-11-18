@@ -1902,8 +1902,8 @@ pub struct BoardEdit {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Toolbar {
     pub tool: Tool,
-    /// `#rrggbb`, one of `PALETTE`.
-    pub color: &'static str,
+    /// The active colour, normalized to `#rrggbb` or `#rrggbbaa`; one of [`crate::config::current`]'s.
+    pub color: String,
     /// Stroke width or text size, depending on the tool.
     pub size: f32,
     /// The block under the pointer: it stretches to say what it does.
