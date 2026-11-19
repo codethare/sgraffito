@@ -238,6 +238,19 @@ impl Output {
     }
 }
 
+/// What a press in the board list applies, when the list was opened to pick a target rather than to
+/// switch the screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    Link,
+    Move,
+}
+
+/// Whether a press in the board list applies a target instead of switching the screen.
+pub fn applies_target(target: Option<Target>) -> bool {
+    target.is_some()
+}
+
 /// Whether the caret is on at `elapsed` since the edit began: on for one blink, off for the next.
 fn caret_visible(elapsed: Duration) -> bool {
     (elapsed.as_millis() / CARET_BLINK.as_millis()).is_multiple_of(2)
@@ -353,6 +366,8 @@ pub struct App {
     pub(crate) boards_open: bool,
     /// Whether the rail's width list is open. The readout toggles it; one at a time like the others.
     pub(crate) size_open: bool,
+    /// What the open board list is picking for, when it is picking a target rather than a screen.
+    pub(crate) target: Option<Target>,
     /// The board's name being edited in the list, if any. A name is typed where it is read, so this is
     /// app-level state and not an output's.
     pub(crate) rename: Option<Rename>,
@@ -448,6 +463,7 @@ impl App {
             shared: false,
             boards_open: false,
             size_open: false,
+            target: None,
             rename: None,
             panel_open_since: None,
             text_input_manager: None,
@@ -896,9 +912,18 @@ impl App {
         self.refresh_toolbar();
     }
 
+    /// The board an output shows and the elements it holds, if it holds any.
+    pub(crate) fn held(&self, key: u32) -> Option<(String, Vec<ItemId>)> {
+        let out = self.outputs.get(&key)?;
+        let items = out.overlay.selection.as_ref()?.items.clone();
+        Some((out.board.clone(), items))
+    }
+
     /// Dismiss every panel: what a press outside one, a press on another rail block and a mode switch do.
     /// The three setters are exclusive, so only the one that changes anything repaints the rail.
     pub(crate) fn close_panels(&mut self) {
+        // A pending target belongs to the list that was open: closing it cancels the pick.
+        self.target = None;
         self.set_more(false);
         self.set_boards(false);
         self.set_size(false);
@@ -1113,6 +1138,54 @@ impl App {
         let bounds = text.paint_bounds();
         let centre = [bounds.x + bounds.w / 2.0, bounds.y + bounds.h / 2.0];
         self.view_changed(*key, |view| *view = view.centred_on(size, centre));
+    }
+
+    /// The `link` row: hold one text box, then pick the board it should link to.
+    pub(crate) fn open_link_target(&mut self) {
+        let Some(key) = self.keyboard_focus.filter(|k| self.outputs.contains_key(k)) else {
+            log("link needs a focused screen");
+            return;
+        };
+        let Some((board_name, items)) = self.held(key) else {
+            log("link needs one text box selected");
+            return;
+        };
+        let Some(ann) = self.doc.boards.get(&board_name) else {
+            return;
+        };
+        if crate::canvas::link_source(ann, &items).is_none() {
+            log("link needs one text box selected");
+            return;
+        }
+        self.target = Some(Target::Link);
+        self.set_boards(true);
+    }
+
+    /// Set the link of the held text box, which is a document change like any other.
+    fn link_selected(&mut self, board: &str) {
+        let Some(key) = self.keyboard_focus else {
+            return;
+        };
+        let Some((board_name, items)) = self.held(key) else {
+            return;
+        };
+        let Some(ann) = self.doc.boards.get_mut(&board_name) else {
+            return;
+        };
+        let Some(index) = crate::canvas::link_source(ann, &items) else {
+            return;
+        };
+        ann.texts[index].link = Some(board.to_string());
+        self.doc_changed();
+        log(&format!("text linked to {board}"));
+    }
+
+    /// Apply a pending target to the board a row picked.
+    pub(crate) fn apply_target(&mut self, target: Target, board: &str) {
+        match target {
+            Target::Link => self.link_selected(board),
+            Target::Move => {}
+        }
     }
 
     /// Rename a board and keep every screen that shows it on it. Unlike a pick, a name is document

@@ -124,6 +124,7 @@ enum Icon {
     Arrow,
     Smaller,
     Larger,
+    Link,
     Cross,
     Pencil,
     Lock,
@@ -222,6 +223,8 @@ fn key_of(action: ToolbarAction) -> Option<&'static str> {
         | ToolbarAction::DeleteBoard(_)
         | ToolbarAction::RenameBoard(_) => "C",
         ToolbarAction::Shared => "F",
+        // A row of the drawer names the block that holds the drawer, as its other rows do.
+        ToolbarAction::Link => "M",
         ToolbarAction::Color(index) => ["1", "2", "3", "4", "5"].get(index).copied().unwrap_or("?"),
         ToolbarAction::SizeStep(dir) => {
             if dir < 0.0 {
@@ -487,7 +490,11 @@ fn toolbar_blocks(toolbar: &Toolbar, height: f32) -> Vec<Block> {
 /// The controls the drawer holds: the rail has no room for them, so they live in the list the `more`
 /// block opens. This is the one list of who they are — `drawer_blocks` is what they look like — so the
 /// rules that open and close the drawer cannot disagree with what it shows.
-pub const DRAWER: [ToolbarAction; 2] = [ToolbarAction::Scrim, ToolbarAction::Shared];
+pub const DRAWER: [ToolbarAction; 3] = [
+    ToolbarAction::Scrim,
+    ToolbarAction::Shared,
+    ToolbarAction::Link,
+];
 
 /// How many boards the panel lists before the rest are only reachable from the command line. The rail
 /// declares a fixed box for damage accounting and a frame that repaints only the rail has to repaint the
@@ -526,6 +533,7 @@ pub fn picks_from_panel(action: ToolbarAction) -> bool {
             ToolbarAction::Board(_)
                 | ToolbarAction::NewBoard
                 | ToolbarAction::DeleteBoard(_)
+                | ToolbarAction::Link
                 | ToolbarAction::RenameBoard(_)
                 | ToolbarAction::SizeStep(_)
         )
@@ -601,6 +609,14 @@ fn drawer_blocks(toolbar: &Toolbar, overflow: &[Block]) -> Vec<Block> {
                 ),
                 action: Some(*action),
                 active: toolbar.shared,
+                gap: TOOLBAR_GAP,
+            }),
+            ToolbarAction::Link => Some(Block {
+                mark: Mark::Icon(Icon::Link),
+                column: 1,
+                label: labelled(*action, "link board"),
+                action: Some(*action),
+                active: false,
                 gap: TOOLBAR_GAP,
             }),
             _ => None,
@@ -2674,6 +2690,22 @@ fn draw_icon(pixmap: &mut PixmapMut, icon: Icon, square: Rect, scale: f32, color
         }
         return;
     }
+    if icon == Icon::Link {
+        // Two chain links, one through the other: a rounded rectangle is the same stroke the rest of
+        // the set uses, so the link reads at the rail's size.
+        for (at, size) in [((0.06, 0.34), (0.52, 0.42)), ((0.44, 0.24), (0.52, 0.42))] {
+            let body = Rect {
+                x: x + w * at.0,
+                y: y + h * at.1,
+                w: w * size.0,
+                h: h * size.1,
+            };
+            if let Some(path) = rounded_rect_path(body, 3.0 * scale) {
+                pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+            }
+        }
+        return;
+    }
     if icon == Icon::Cross {
         // A cross: two lines through the middle of the box.
         for (from, to) in [((0.25, 0.25), (0.75, 0.75)), ((0.75, 0.25), (0.25, 0.75))] {
@@ -2782,8 +2814,8 @@ fn draw_icon(pixmap: &mut PixmapMut, icon: Icon, square: Rect, scale: f32, color
                 }
             }
         }
-        // Both are drawn and returned before this match: see the blocks above.
-        Icon::Cross | Icon::Pencil => {}
+        // All three are drawn and returned before this match: see the blocks above.
+        Icon::Cross | Icon::Pencil | Icon::Link => {}
         Icon::Smaller => {
             path.move_to(x + w * 0.2, y + h / 2.0);
             path.line_to(x + w * 0.8, y + h / 2.0);
@@ -3240,6 +3272,7 @@ fn fill(pixmap: &mut PixmapMut, x: f32, y: f32, w: f32, h: f32, color: Color) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::canvas::link_source;
     use crate::canvas::{Note, View};
 
     /// Who is in the drawer is one list, and both of the rules that close it are built from that list.
@@ -3733,6 +3766,45 @@ mod tests {
             caret: true,
         });
         assert_eq!(row_label(&toolbar, &row), "left");
+    }
+
+    /// The `link` row needs one text box held: nothing, or a stroke, links nothing.
+    #[test]
+    fn the_link_row_needs_exactly_one_held_text_box() {
+        let ann = crate::canvas::Board {
+            texts: vec![TextItem {
+                x: 0.0,
+                y: 0.0,
+                color: "#fff".into(),
+                size: 18.0,
+                text: "go".into(),
+                link: None,
+            }],
+            strokes: vec![crate::canvas::Stroke {
+                color: "#fff".into(),
+                width: 3.0,
+                points: vec![[0.0, 0.0]],
+            }],
+            ..crate::canvas::Board::default()
+        };
+        assert_eq!(link_source(&ann, &[ItemId::Text(0)]), Some(0));
+        assert_eq!(
+            link_source(&ann, &[ItemId::Text(0), ItemId::Stroke(0)]),
+            None
+        );
+        assert_eq!(link_source(&ann, &[ItemId::Stroke(0)]), None);
+        assert_eq!(link_source(&ann, &[]), None);
+    }
+
+    /// A pick out of the board list is a target when one is pending and a switch otherwise; and the
+    /// `link` row is in the drawer, so the drawer's own list states it.
+    #[test]
+    fn a_pending_target_changes_what_a_board_row_press_does() {
+        assert!(crate::app::applies_target(Some(crate::app::Target::Link)));
+        assert!(crate::app::applies_target(Some(crate::app::Target::Move)));
+        assert!(!crate::app::applies_target(None));
+        assert!(DRAWER.contains(&ToolbarAction::Link));
+        assert!(picks_from_panel(ToolbarAction::Link));
     }
 
     /// The block whose list is open keeps its square: the list says what it is, so a caption growing
@@ -4808,6 +4880,8 @@ mod tests {
                 ToolbarAction::Shared => {
                     panel_action_for_keysym(keysym) == Some(ToolbarAction::Shared)
                 }
+                // The drawer's `link` row carries the drawer block's key, as its other rows do.
+                ToolbarAction::Link => panel_action_for_keysym(keysym) == Some(ToolbarAction::Link),
                 // A row of the boards panel states its name and no key: it is picked from the list the
                 // `boards` block opened, and that block carries the key.
                 ToolbarAction::Board(_)

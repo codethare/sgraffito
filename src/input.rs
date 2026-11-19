@@ -1083,7 +1083,13 @@ impl App {
             ToolbarAction::Board(index) => {
                 let picked = board.or_else(|| self.doc.names().nth(index).cloned());
                 if let Some(name) = picked {
-                    self.switch_board(acting, &name);
+                    // With a target pending the row picks a board for it; otherwise it picks a screen.
+                    match self.target.take() {
+                        Some(target) => self.apply_target(target, &name),
+                        None => {
+                            self.switch_board(acting, &name);
+                        }
+                    }
                 }
             }
             ToolbarAction::NewBoard => {
@@ -1104,6 +1110,7 @@ impl App {
                     self.begin_rename(index, &name);
                 }
             }
+            ToolbarAction::Link => self.open_link_target(),
             ToolbarAction::Lock => {}
         }
         // One click on something in the drawer both does the thing and puts the list away, the way a menu

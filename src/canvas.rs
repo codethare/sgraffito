@@ -178,6 +178,9 @@ pub enum ToolbarAction {
     NewBoard,
     /// Delete the board at this index of the panel's list, from that board's own row.
     DeleteBoard(usize),
+    /// Link the selected text to a board. The row lives in the drawer, and a press needs one held
+    /// text box.
+    Link,
     /// Rename the board at this index of the panel's list, from that board's own row. The one row
     /// press that leaves its list open: the row it edits is in the list.
     RenameBoard(usize),
@@ -389,6 +392,15 @@ pub struct Board {
     pub shapes: Vec<Shape>,
     #[serde(default)]
     pub notes: Vec<Note>,
+}
+
+/// The text a link press would link: the one text box held, and nothing else. `None` when nothing is
+/// held, more than one thing is, or the held thing is not a text box.
+pub fn link_source(ann: &Board, items: &[ItemId]) -> Option<usize> {
+    match items {
+        [ItemId::Text(index)] if *index < ann.texts.len() => Some(*index),
+        _ => None,
+    }
 }
 
 impl Board {
