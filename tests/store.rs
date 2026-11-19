@@ -2,8 +2,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use sgraffito::canvas::{
-    Board, Doc, ItemId, Note, PEN_WIDTH_MAX, Shape, ShapeKind, Stroke, TEXT_SIZE_MAX, TextItem,
-    stepped_size,
+    Board, ClipEntry, Doc, ItemId, MAX_CLIP_BYTES, MAX_CLIP_ENTRIES, MAX_CLIP_ITEMS, Note,
+    PEN_WIDTH_MAX, Shape, ShapeKind, Stroke, TEXT_SIZE_MAX, TextItem, View, clip_size, link_source,
+    stepped_size, trim_clipboard,
 };
 use sgraffito::store::{self, Store};
 
@@ -30,6 +31,7 @@ fn sample() -> Doc {
                 color: "#ffffff".into(),
                 size: 18.0,
                 text: "买牛奶".into(), // CJK on purpose: multi-byte content must survive
+                link: None,
             }],
             shapes: vec![Shape {
                 kind: ShapeKind::Arrow,
@@ -77,7 +79,7 @@ fn saved_file_has_version_boards_and_the_picked_one() {
     doc.active = "eDP-1".into();
     store::save(&p, &doc).unwrap();
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-    assert_eq!(v["version"], 4);
+    assert_eq!(v["version"], 5);
     assert_eq!(v["active"], "eDP-1");
     assert_eq!(v["boards"]["eDP-1"]["strokes"][0]["points"][0][0], 12.0);
     assert_eq!(v["boards"]["eDP-1"]["texts"][0]["text"], "买牛奶"); // CJK survives the round trip
@@ -289,7 +291,7 @@ fn a_version_3_file_becomes_boards() {
     // The next save is the current version.
     store::save(&p, &doc).unwrap();
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-    assert_eq!(v["version"], 4);
+    assert_eq!(v["version"], 5);
     assert!(v["boards"]["eDP-1"].is_object());
 }
 
@@ -416,6 +418,7 @@ fn stepping_a_selection_steps_its_widths_and_text_sizes() {
             color: "#ffffff".into(),
             size: 18.0,
             text: "hi".into(),
+            link: None,
         }],
         shapes: vec![Shape {
             kind: ShapeKind::Rect,
@@ -470,6 +473,7 @@ fn a_size_step_at_the_bound_writes_nothing() {
             color: "#ffffff".into(),
             size: TEXT_SIZE_MAX,
             text: "hi".into(),
+            link: None,
         }],
         ..Default::default()
     };
@@ -507,6 +511,7 @@ fn a_shrinking_step_reports_the_ink_it_left() {
             color: "#ffffff".into(),
             size: 20.0,
             text: "hi".into(),
+            link: None,
         }],
         ..Default::default()
     };
@@ -540,6 +545,7 @@ fn a_mixed_selection_reports_only_what_changed() {
             color: "#ffffff".into(),
             size: 18.0,
             text: "hi".into(),
+            link: None,
         }],
         ..Default::default()
     };
@@ -605,4 +611,180 @@ fn a_rename_can_move_a_board_row() {
     assert_eq!(doc.names().cloned().collect::<Vec<_>>(), ["a", "z"]);
     assert!(doc.rename_board("a", "zz"));
     assert_eq!(doc.names().cloned().collect::<Vec<_>>(), ["z", "zz"]);
+}
+
+/// A link is the text's, and it is written: a version 4 file has none, and a round trip at the
+/// current version keeps the link.
+#[test]
+fn a_version_4_file_loads_and_a_link_survives_the_round_trip() {
+    let dir = tmpdir("links-roundtrip");
+    let p = dir.join("annotations.json");
+    std::fs::write(
+        &p,
+        r##"{"version":4,"boards":{"a":{"texts":[{"x":8,"y":8,"color":"#ffffff","size":18,"text":"next"}]}},"active":"a"}"##,
+    )
+    .unwrap();
+    let mut doc = store::load(&p);
+    assert_eq!(doc.boards["a"].texts[0].link, None);
+    doc.boards.get_mut("a").unwrap().texts[0].link = Some("b".into());
+    doc.boards.insert("b".into(), Board::default());
+    store::save(&p, &doc).unwrap();
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+    assert_eq!(saved["version"], 5);
+    assert_eq!(store::load(&p).boards["a"].texts[0].link, Some("b".into()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A link names a board by name, so deletion clears every link that named it and a rename moves
+/// them to the new name.
+#[test]
+fn links_follow_a_board_rename_and_are_dropped_with_its_deletion() {
+    let mut doc = Doc::default();
+    for name in ["a", "b", "c"] {
+        doc.boards.insert(name.into(), Board::default());
+    }
+    doc.boards.get_mut("a").unwrap().texts.push(TextItem {
+        x: 0.0,
+        y: 0.0,
+        color: "#ffffff".into(),
+        size: 18.0,
+        text: "go".into(),
+        link: Some("c".into()),
+    });
+    assert!(doc.rename_board("c", "d"));
+    assert_eq!(doc.boards["a"].texts[0].link, Some("d".into()));
+    doc.delete_board("d");
+    assert_eq!(
+        doc.boards["a"].texts[0].link, None,
+        "a link to a gone board survived"
+    );
+}
+
+/// Moving elements removes them from the source and appends copies to the target; links are content
+/// and travel with their text.
+#[test]
+fn moving_elements_leaves_the_source_board_without_them() {
+    let mut doc = Doc::default();
+    doc.boards.insert("a".into(), Board::default());
+    doc.boards.insert("b".into(), Board::default());
+    let board = doc.boards.get_mut("a").unwrap();
+    board.strokes.push(Stroke {
+        color: "#ffffff".into(),
+        width: 3.0,
+        points: vec![[0.0, 0.0], [10.0, 10.0]],
+    });
+    board.texts.push(TextItem {
+        x: 0.0,
+        y: 0.0,
+        color: "#ffffff".into(),
+        size: 18.0,
+        text: "go".into(),
+        link: Some("b".into()),
+    });
+    let moved = doc.move_items("a", "b", &[ItemId::Stroke(0), ItemId::Text(0)]);
+    assert!(moved.is_some());
+    assert!(
+        doc.boards["a"].strokes.is_empty(),
+        "the source kept a stroke"
+    );
+    assert!(doc.boards["a"].texts.is_empty(), "the source kept a text");
+    assert_eq!(doc.boards["b"].strokes.len(), 1);
+    assert_eq!(doc.boards["b"].texts.len(), 1);
+    assert_eq!(doc.boards["b"].texts[0].link, Some("b".into()));
+    assert_eq!(doc.move_items("a", "a", &[ItemId::Stroke(0)]), None);
+}
+
+/// The clipboard caps are both enforced, and a copy over either is refused whole rather than
+/// trimmed: half a drawing pasted is worse than nothing.
+#[test]
+fn a_copy_over_the_cap_is_refused_whole() {
+    assert!(clip_size(&Board::default()).is_some());
+    let board = Board {
+        strokes: (0..=MAX_CLIP_ITEMS)
+            .map(|i| Stroke {
+                color: "#fff".into(),
+                width: 3.0,
+                points: vec![[i as f32, 0.0]],
+            })
+            .collect(),
+        ..Board::default()
+    };
+    assert!(ClipEntry::new(board).is_none(), "the item cap was ignored");
+
+    let mut wordy = Board::default();
+    wordy.texts.push(TextItem {
+        x: 0.0,
+        y: 0.0,
+        color: "#fff".into(),
+        size: 18.0,
+        text: "x".repeat(MAX_CLIP_BYTES),
+        link: None,
+    });
+    assert!(ClipEntry::new(wordy).is_none(), "the byte cap was ignored");
+}
+
+/// Only one text box is a link source, and following a link keeps the zoom and centres the point.
+#[test]
+fn a_link_source_is_one_text_box_and_the_jump_centres_it() {
+    let board = Board {
+        texts: vec![
+            TextItem {
+                x: 0.0,
+                y: 0.0,
+                color: "#fff".into(),
+                size: 18.0,
+                text: "go".into(),
+                link: Some("b".into()),
+            },
+            TextItem {
+                x: 0.0,
+                y: 0.0,
+                color: "#fff".into(),
+                size: 18.0,
+                text: "no".into(),
+                link: None,
+            },
+        ],
+        ..Board::default()
+    };
+    assert_eq!(link_source(&board, &[ItemId::Text(0)]), Some(0));
+    assert_eq!(link_source(&board, &[ItemId::Text(1)]), Some(1));
+    assert_eq!(link_source(&board, &[]), None);
+    assert_eq!(
+        link_source(&board, &[ItemId::Text(0), ItemId::Text(1)]),
+        None
+    );
+    let view = View {
+        zoom: 2.0,
+        offset: [10.0, 20.0],
+    }
+    .centred_on((800.0, 600.0), [100.0, 50.0]);
+    assert_eq!(view.zoom, 2.0);
+    assert_eq!(view.to_screen([100.0, 50.0]), [400.0, 300.0]);
+}
+
+/// The history is capped by entries, elements and bytes together, and evicts oldest-first: the
+/// newest copy is always the one left at the front.
+#[test]
+fn the_clipboard_history_evicts_the_oldest_entry_under_every_cap() {
+    let entry = |items: usize, bytes: usize| ClipEntry {
+        board: Board::default(),
+        items,
+        bytes,
+    };
+    let mut clips = (0..MAX_CLIP_ENTRIES + 3)
+        .map(|_| entry(1, 1))
+        .collect::<Vec<_>>();
+    trim_clipboard(&mut clips);
+    assert_eq!(clips.len(), MAX_CLIP_ENTRIES);
+
+    let mut by_items = vec![entry(120, 1), entry(120, 1)];
+    trim_clipboard(&mut by_items);
+    assert_eq!(by_items.len(), 1, "the element cap did not evict");
+    assert_eq!(by_items[0].items, 120, "the oldest entry survived");
+
+    let mut by_bytes = vec![entry(1, MAX_CLIP_BYTES), entry(1, MAX_CLIP_BYTES)];
+    trim_clipboard(&mut by_bytes);
+    assert_eq!(by_bytes.len(), 1, "the byte cap did not evict");
 }

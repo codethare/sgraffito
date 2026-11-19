@@ -25,6 +25,7 @@ fn text(x: f32, y: f32, s: &str) -> TextItem {
         color: "#ffffff".into(),
         size: 18.0,
         text: s.into(),
+        link: None,
     }
 }
 

@@ -41,12 +41,12 @@ use wayland_client::{
 };
 
 use crate::canvas::{
-    Board, BoardEdit, BoardRow, Doc, ERASER_THRESHOLD, Gesture, Grab, Handle, ItemId, Motion, Note,
-    Overlay, PEN_WIDTH_MAX, PEN_WIDTH_MIN, PEN_WIDTH_STEP, Press, Rect, Selection, Shape,
-    ShapeKind, TEXT_SIZE_MAX, TEXT_SIZE_MIN, TEXT_SIZE_STEP, TextBuffer, TextItem, TextOverlay,
-    Toolbar, Transform, View, ZOOM_STEP, Zoom, date_stamp, marquee_select, note_drag, nudge_delta,
-    selection_bounds, selection_frame, selection_press, snap_square, stepped_size,
-    toggle_selection,
+    Board, BoardEdit, BoardRow, ClipEntry, ClipRow, Doc, ERASER_THRESHOLD, Gesture, Grab, Handle,
+    ItemId, Motion, Note, Overlay, PEN_WIDTH_MAX, PEN_WIDTH_MIN, PEN_WIDTH_STEP, Press, Rect,
+    Selection, Shape, ShapeKind, TEXT_SIZE_MAX, TEXT_SIZE_MIN, TEXT_SIZE_STEP, Target, TextBuffer,
+    TextItem, TextOverlay, Toolbar, Transform, View, ZOOM_STEP, Zoom, date_stamp, link_source,
+    marquee_select, note_drag, nudge_delta, selection_bounds, selection_frame, selection_press,
+    snap_square, stepped_size, toggle_selection,
 };
 
 pub use crate::canvas::{Tool, ToolbarAction};
@@ -61,13 +61,15 @@ use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::ZwpTextIn
 
 use crate::input::{Nav, PinchData};
 use crate::render::{
-    DamageRegion, FrameCache, Renderer, Screen, buffer_format, toolbar_bounds, transient_bounds,
-    transient_damage,
+    DamageRegion, FrameCache, Renderer, Screen, buffer_format, move_button_bounds, toolbar_bounds,
+    transient_bounds, transient_damage,
 };
 use crate::store::{self, Store};
 
 /// Initial stroke width, in logical pixels.
 pub const PEN_WIDTH: f32 = 3.0;
+/// How far a paste lands from the copy it came from, in canvas pixels: enough to be seen on top.
+pub const COPY_OFFSET: f32 = 12.0;
 
 /// The distance the view moves by on an arrow press, in logical pixels: larger than a nudge, because a pan
 /// of one pixel is not a pan.
@@ -353,6 +355,12 @@ pub struct App {
     pub(crate) boards_open: bool,
     /// Whether the rail's width list is open. The readout toggles it; one at a time like the others.
     pub(crate) size_open: bool,
+    /// Whether the clipboard history panel is open.
+    pub(crate) clipboard_open: bool,
+    /// What a pick in the board list applies instead of switching the screen.
+    pub(crate) target: Option<Target>,
+    /// The in-app clipboard history, newest first. Session state: it is never written to the file.
+    pub(crate) clips: Vec<ClipEntry>,
     /// The board's name being edited in the list, if any. A name is typed where it is read, so this is
     /// app-level state and not an output's.
     pub(crate) rename: Option<Rename>,
@@ -448,6 +456,9 @@ impl App {
             shared: false,
             boards_open: false,
             size_open: false,
+            clipboard_open: false,
+            target: None,
+            clips: Vec::new(),
             rename: None,
             panel_open_since: None,
             text_input_manager: None,
@@ -495,6 +506,13 @@ impl App {
 
     pub fn mode(&self) -> Mode {
         self.mode
+    }
+
+    /// Logical size of one output, for the interface geometry that lives on the canvas.
+    pub(crate) fn output_size(&self, key: u32) -> Option<(f32, f32)> {
+        self.outputs
+            .get(&key)
+            .map(|out| (out.width as f32, out.height as f32))
     }
 
     pub fn request_exit(&mut self) {
@@ -677,6 +695,16 @@ impl App {
                     more: self.more,
                     boards_open: self.boards_open,
                     size_open: self.size_open,
+                    clipboard_open: self.clipboard_open,
+                    clips: self
+                        .clips
+                        .iter()
+                        .map(|clip| ClipRow {
+                            items: clip.items,
+                            preview: clip.preview(),
+                        })
+                        .collect(),
+                    target: self.target,
                     rename: self.rename.as_ref().map(|rename| BoardEdit {
                         index: rename.index,
                         text: rename.text.text.clone(),
@@ -875,6 +903,7 @@ impl App {
         // lists the pointer could not be said to be reading from.
         self.boards_open = false;
         self.size_open = false;
+        self.clipboard_open = false;
         self.more = open;
         self.panel_open_since = open.then(Instant::now);
         self.toolbar_hover = None;
@@ -889,7 +918,27 @@ impl App {
         }
         self.more = false;
         self.size_open = false;
+        self.clipboard_open = false;
         self.boards_open = open;
+        if !open {
+            self.target = None;
+        }
+        self.panel_open_since = open.then(Instant::now);
+        self.toolbar_hover = None;
+        self.toolbar_hover_since = None;
+        self.refresh_toolbar();
+    }
+
+    /// Open or close the clipboard history panel. A pick pastes and closes it, like every other panel.
+    pub(crate) fn set_clipboard(&mut self, open: bool) {
+        if self.clipboard_open == open {
+            return;
+        }
+        self.more = false;
+        self.boards_open = false;
+        self.size_open = false;
+        self.clipboard_open = open;
+        self.target = None;
         self.panel_open_since = open.then(Instant::now);
         self.toolbar_hover = None;
         self.toolbar_hover_since = None;
@@ -897,11 +946,13 @@ impl App {
     }
 
     /// Dismiss every panel: what a press outside one, a press on another rail block and a mode switch do.
-    /// The three setters are exclusive, so only the one that changes anything repaints the rail.
+    /// The setters are exclusive, so only the one that changes anything repaints the rail.
     pub(crate) fn close_panels(&mut self) {
         self.set_more(false);
         self.set_boards(false);
         self.set_size(false);
+        self.set_clipboard(false);
+        self.target = None;
     }
 
     pub(crate) fn toggle_boards(&mut self) {
@@ -915,6 +966,7 @@ impl App {
             return;
         }
         self.boards_open = false;
+        self.clipboard_open = false;
         self.more = false;
         self.size_open = open;
         self.panel_open_since = open.then(Instant::now);
@@ -928,6 +980,8 @@ impl App {
             Some(ToolbarAction::Boards)
         } else if self.size_open {
             Some(ToolbarAction::Size)
+        } else if self.clipboard_open {
+            Some(ToolbarAction::Clipboard)
         } else if self.more {
             Some(ToolbarAction::More)
         } else {
@@ -1000,6 +1054,195 @@ impl App {
         self.switch_board(acting, &name);
         // A brand-new board has nothing in it, and the raster of the board it replaced is already gone.
         name
+    }
+
+    /// The board and elements the selection holds on one output, if any.
+    fn held(&self, key: u32) -> Option<(String, Vec<ItemId>)> {
+        let out = self.outputs.get(&key)?;
+        let selection = out.overlay.selection.as_ref()?;
+        (!selection.items.is_empty()).then(|| (out.board.clone(), selection.items.clone()))
+    }
+
+    /// The linked text under a screen point on this output: the board it links to and the canvas
+    /// point its centre sits on, which is where the view goes after the switch.
+    pub(crate) fn linked_text_at(
+        &mut self,
+        key: &u32,
+        x: f32,
+        y: f32,
+    ) -> Option<(String, [f32; 2])> {
+        let out = self.outputs.get(key)?;
+        let board_name = out.board.clone();
+        let (scale, view) = (out.scale, out.view);
+        let point = view.to_canvas([x, y]);
+        let ann = self.doc.boards.get(&board_name)?;
+        let renderer = &mut self.renderer;
+        let text = ann.linked_at(point, |text| {
+            renderer.text_edit_bounds(&text.text, text, Screen { scale, view })
+        })?;
+        let board = text.link.clone()?;
+        let bounds = text.paint_bounds();
+        let centre = [bounds.x + bounds.w / 2.0, bounds.y + bounds.h / 2.0];
+        Some((board, centre))
+    }
+
+    /// Go to a linked text: switch this output to its board and put the text's position in the
+    /// middle. The centre is measured before the switch, on the board the link was read from.
+    pub(crate) fn follow_link(&mut self, key: &u32, board: &str, centre: [f32; 2]) {
+        if !self.switch_board(Some(*key), board) {
+            log(&format!("link names '{board}', which is not a board"));
+            return;
+        }
+        let Some(out) = self.outputs.get(key) else {
+            return;
+        };
+        let size = (out.width as f32, out.height as f32);
+        self.view_changed(*key, |view| *view = view.centred_on(size, centre));
+    }
+
+    /// Open the board list as a target picker: the `link` row, the move button and the keyboard all
+    /// come through here. The target is applied by the row press, not by opening the list.
+    pub(crate) fn open_target(&mut self, acting: Option<u32>, target: Target) {
+        let Some(key) = acting.or(self.keyboard_focus) else {
+            log("a target needs a focused screen");
+            return;
+        };
+        let Some((board_name, items)) = self.held(key) else {
+            log("a target needs a selection");
+            return;
+        };
+        if target == Target::Link {
+            let Some(ann) = self.doc.boards.get(&board_name) else {
+                return;
+            };
+            if link_source(ann, &items).is_none() {
+                log("link needs exactly one text box selected");
+                return;
+            }
+        }
+        self.target = Some(target);
+        if self.boards_open {
+            self.refresh_toolbar();
+        } else {
+            self.set_boards(true);
+        }
+    }
+
+    /// Apply a board pick to the pending target instead of switching the screen.
+    pub(crate) fn apply_target(&mut self, acting: Option<u32>, target: Target, board: &str) {
+        match target {
+            Target::Link => self.link_selected(acting, board),
+            Target::Move => self.move_selected(acting, board),
+        }
+    }
+
+    fn link_selected(&mut self, acting: Option<u32>, board: &str) {
+        let Some(key) = acting.or(self.keyboard_focus) else {
+            return;
+        };
+        let Some((source, items)) = self.held(key) else {
+            return;
+        };
+        let Some(ann) = self.doc.boards.get_mut(&source) else {
+            return;
+        };
+        let Some(index) = link_source(ann, &items) else {
+            return;
+        };
+        ann.texts[index].link = Some(board.to_string());
+        self.doc_changed();
+        log(&format!("text linked to {board}"));
+    }
+
+    /// Move the held elements onto the board a target press picked. Two boards changed, so every
+    /// raster goes and the selection, whose indices name the source board, is dropped.
+    fn move_selected(&mut self, acting: Option<u32>, board: &str) {
+        let Some(key) = acting.or(self.keyboard_focus) else {
+            return;
+        };
+        let Some((source, items)) = self.held(key) else {
+            return;
+        };
+        if self.doc.move_items(&source, board, &items).is_none() {
+            return;
+        }
+        self.drop_selection();
+        self.doc_changed();
+        log(&format!("moved {} elements to {board}", items.len()));
+    }
+
+    /// Copy the held elements into the app's own clipboard history. The newest copy is the one
+    /// `Ctrl+V` pastes; the panel lists the rest. An over-cap copy is refused whole.
+    pub(crate) fn copy_selection(&mut self) {
+        let Some(key) = self.keyboard_focus else {
+            return;
+        };
+        let Some((board_name, items)) = self.held(key) else {
+            log("copy needs a selection");
+            return;
+        };
+        let Some(ann) = self.doc.boards.get(&board_name) else {
+            return;
+        };
+        let copy = ann.copied(&items);
+        let Some(entry) = ClipEntry::new(copy) else {
+            log("copy refused: too large for the clipboard");
+            return;
+        };
+        // A repeat copy of the same shape is not a second history entry: it moves to the front.
+        if let Some(index) = self.clips.iter().position(|clip| clip.board == entry.board) {
+            self.clips.remove(index);
+        }
+        let count = entry.items;
+        self.clips.insert(0, entry);
+        crate::canvas::trim_clipboard(&mut self.clips);
+        self.refresh_toolbar();
+        log(&format!("copied {count} elements"));
+    }
+
+    /// Paste clipboard entry `index`, newest first, onto the board this screen shows, a little offset.
+    pub(crate) fn paste_clip(&mut self, index: usize) {
+        let Some(clip) = self.clips.get(index).map(|clip| clip.board.clone()) else {
+            return;
+        };
+        let Some(key) = self.keyboard_focus else {
+            log("paste needs a focused screen");
+            return;
+        };
+        let Some(out) = self.outputs.get(&key) else {
+            return;
+        };
+        let board_name = out.board.clone();
+        let copy = clip.shifted(COPY_OFFSET, COPY_OFFSET);
+        let count = copy.strokes.len() + copy.texts.len() + copy.shapes.len() + copy.notes.len();
+        let Some(ann) = self.doc.boards.get_mut(&board_name) else {
+            return;
+        };
+        let (ids, _) = ann.append(&copy);
+        if ids.is_empty() {
+            return;
+        }
+        self.set_selection(key, ids, None);
+        self.doc_changed();
+        log(&format!("pasted {count} elements"));
+    }
+
+    /// Paste the newest clipboard entry: what `Ctrl+V` does outside a text box.
+    pub(crate) fn paste_newest(&mut self) {
+        if self.clips.is_empty() {
+            log("paste needs a clipboard entry");
+            return;
+        }
+        self.paste_clip(0);
+    }
+
+    /// Open the clipboard history panel, if there is a history to choose from.
+    pub(crate) fn open_clipboard(&mut self) {
+        if self.clips.is_empty() {
+            log("the clipboard is empty");
+            return;
+        }
+        self.set_clipboard(true);
     }
 
     /// Delete a board by name, from the panel's row that owns it. Everything the board holds goes with
@@ -2200,6 +2443,7 @@ impl App {
                     color: crate::config::current().colors[self.color_idx].clone(),
                     size: self.text_size,
                     text: String::new(),
+                    link: None,
                 },
                 None,
             ),
@@ -2757,6 +3001,14 @@ impl App {
         let transient = match (transient, selected) {
             (Some(a), Some(b)) => Some(a.union(selection_bounds(view.screen_rect(b), handle_hit))),
             (a, b) => a.or(b.map(|b| selection_bounds(view.screen_rect(b), handle_hit))),
+        };
+        // The move button exists exactly while a selection does, so its box joins the transient
+        // damage and the frame that removes it paints over the capsule.
+        let transient = if out.overlay.selection.is_some() {
+            let button = move_button_bounds((w as f32, h as f32));
+            Some(transient.map_or(button, |box_| box_.union(button)))
+        } else {
+            transient
         };
         let current_text_bounds = out.overlay.text.as_ref().and_then(|edit| {
             (edit.preedit.is_empty()).then(|| {

@@ -147,19 +147,26 @@ A press anywhere on the rail, or on the capsule a block has stretched into, belo
 
 The pointer follows the armed tool through `wp_cursor_shape_v1`: a crosshair for the pen, a cell for the eraser, an I-beam for the text tool and the compositor's default arrow for the selection tool, which creates nothing of its own. With a selection held, the arrow becomes the resize shape of the handle under it, a grab shape over the rotation handle, and the protocol's held-gesture shape while a drag is in flight. The compositor's own cursor is used while the pointer is on the rail and once the daemon is locked again. A compositor that does not advertise the protocol keeps its own cursor and the daemon says so in its log.
 
+## Links, moving and the clipboard
+
+- A text box can link to a board. Select exactly one text box, open the drawer (`M`) and pick `link text to board`, then a board from the list. The text is underlined in the accent colour; `Ctrl`+click switches to that board and centres the text's canvas position. A plain click still selects or edits it. Deleting the target board clears the links that named it, and renaming the board moves them.
+- With a selection held, `move to board` appears at the bottom centre of the canvas. It opens the same board list and moves every held element to the picked board, then lets go of the selection.
+- `Ctrl+C` copies the held elements into sgraffito's own clipboard history; `Ctrl+V` pastes the newest copy onto the board the screen shows, offset slightly and selected; `Ctrl+Shift+V` opens the history panel, where a row pastes that copy. Inside a text box or a board name, `Ctrl+C`/`Ctrl+V` keep the compositor's text semantics.
+- The clipboard is session state, never written to the file. It keeps at most 8 entries, 200 elements and 1 MB of JSON in total; adding a copy drops the oldest entries until all three hold. A copy that alone exceeds the element or byte cap is refused whole.
+
 ## Data
 
 `$XDG_DATA_HOME/sgraffito/annotations.json` (default `~/.local/share/sgraffito/`):
 
 ```json
-{"version":4,
+{"version":5,
  "boards":{"office":{"strokes":[{"color":"#e01b24","width":3,"points":[[12,40],[14,44]]}],
-  "texts":[{"x":100,"y":200,"color":"#ffffff","size":18,"text":"buy milk"}],
+  "texts":[{"x":100,"y":200,"color":"#ffffff","size":18,"text":"buy milk","link":"desk"}],
   "shapes":[{"kind":"arrow","color":"#3584e4","width":3,"from":[30,400],"to":[180,260]}]}},
  "active":"office"}
 ```
 
-A shape is a `kind` (`circle`, `rect`, `diamond`, `line` or `arrow`), its colour, its width and its two points — never its outline, and never a box. Versions 1, 2 and 3 load as well: their `outputs` map, keyed by output name, becomes boards of the same name, so each screen comes back on the board named after it and nothing moves. `active` is the board picked last — what a screen connected after a restart shows. An unknown version is still backed up rather than guessed at.
+A shape is a `kind` (`circle`, `rect`, `diamond`, `line` or `arrow`), its colour, its width and its two points — never its outline, and never a box. A text's optional `link` is the board it jumps to; it is absent from files written before version 5. Versions 1 to 4 load as well: their `outputs` map, keyed by output name, becomes boards of the same name, so each screen comes back on the board named after it and nothing moves. `active` is the board picked last — what a screen connected after a restart shows. An unknown version is still backed up rather than guessed at.
 
 - Coordinates are **canvas coordinates** — the canvas is unbounded and a board is one canvas — and annotations are bucketed by **board name**, not by output.
 - Changes land on disk within 1 second at most, written through a temp file in the same directory plus `rename`; `clear` and shutdown flush immediately. If a write fails, the change stays pending and the daemon retries without dropping the in-memory annotations.
@@ -190,7 +197,7 @@ The file is read once when the daemon starts.
 
 ## Known limitations
 
-- v1 has no undo/redo — a gesture cannot be undone once the pointer is released, and the eraser is the only way back — no copy, cut or duplicate, no z-order, no layers, no PNG export and no pressure or touch support.
+- v1 has no undo/redo — a gesture cannot be undone once the pointer is released, and the eraser is the only way back — no cut, no z-order, no layers, no PNG export and no pressure or touch support. A link points at a board and the linked text's position, not at a particular element inside that board; the clipboard history is session state, so it is lost when the daemon restarts.
 - The toolbar is part of the full-screen edit overlay, not a surface of its own, so it cannot respect another layer surface's exclusive zone: a compositor bar or dock that occupies the left edge, or the optical-centre band, is covered by it while editing. Its position is fixed; it cannot be dragged.
 - A block shows an icon of what it does and says what it does only while the pointer is on it, so a first-time user learns the rail by hovering, or from this README's key table. Each block's text ends with its key, and that is the only place a key appears: when a block's text does not fit the room reserved for the rail, the block stays a square showing its icon and no text, and its key is then only in this README. The longest text is `text: click to place (T)`, about 177 logical pixels of capsule, which fits the 320-pixel reserve on any output at least 336 pixels wide.
 - A drawer shows the rows that fit the output. A very short screen folds almost the whole rail into it, and a panel taller than the screen would be rows nobody could click or read, so the rows nearest the `more` block are kept and the rest stay on their keys — a folded control never loses its key.

@@ -16,7 +16,7 @@ use crate::canvas::{Board, Doc};
 /// read, because a version 1 file is a version 2 file with no shapes in it, and an older build
 /// reading a version 2 file would silently drop every shape on its next save — which is what the
 /// number is for.
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 /// The oldest version whose files still load.
 pub const MIN_VERSION: u32 = 1;
 pub const DEBOUNCE: Duration = Duration::from_secs(1);

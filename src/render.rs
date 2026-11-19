@@ -38,6 +38,10 @@ const TOOLBAR_GROUP_GAP: f32 = 10.0;
 const TOOLBAR_PAD: f32 = 6.0;
 const TOOLBAR_RADIUS: f32 = 8.0;
 const TOOLBAR_HAIRLINE: f32 = 1.0;
+/// The move button's width and height, in logical pixels. The width fits its label with the same
+/// padding the rail's capsules use.
+const MOVE_BUTTON_W: f32 = 150.0;
+const MOVE_BUTTON_H: f32 = 30.0;
 /// One size for every piece of text a block carries — its label, and the size readout's number:
 /// the HIG's 13 pt macOS control size, so they share a size and a baseline instead of being matched
 /// by eye. An icon is geometry rather than text and is not sized by this.
@@ -137,6 +141,10 @@ enum Icon {
     Plus,
     /// Every screen sharing one board.
     Shared,
+    /// The link row: two chain links.
+    Link,
+    /// A clipboard entry.
+    Clipboard,
 }
 
 /// What a canvas coordinate has to be multiplied by to become a device pixel: the output's scale, and
@@ -222,6 +230,10 @@ fn key_of(action: ToolbarAction) -> Option<&'static str> {
         | ToolbarAction::DeleteBoard(_)
         | ToolbarAction::RenameBoard(_) => "C",
         ToolbarAction::Shared => "F",
+        // No single letter: `Ctrl+Shift+V` opens the history, and the row says so in the drawer.
+        ToolbarAction::Clipboard => "Ctrl+Shift+V",
+        ToolbarAction::Link => return None,
+        ToolbarAction::Clip(_) => return None,
         ToolbarAction::Color(index) => ["1", "2", "3", "4", "5"].get(index).copied().unwrap_or("?"),
         ToolbarAction::SizeStep(dir) => {
             if dir < 0.0 {
@@ -487,7 +499,12 @@ fn toolbar_blocks(toolbar: &Toolbar, height: f32) -> Vec<Block> {
 /// The controls the drawer holds: the rail has no room for them, so they live in the list the `more`
 /// block opens. This is the one list of who they are — `drawer_blocks` is what they look like — so the
 /// rules that open and close the drawer cannot disagree with what it shows.
-pub const DRAWER: [ToolbarAction; 2] = [ToolbarAction::Scrim, ToolbarAction::Shared];
+pub const DRAWER: [ToolbarAction; 4] = [
+    ToolbarAction::Scrim,
+    ToolbarAction::Shared,
+    ToolbarAction::Link,
+    ToolbarAction::Clipboard,
+];
 
 /// How many boards the panel lists before the rest are only reachable from the command line. The rail
 /// declares a fixed box for damage accounting and a frame that repaints only the rail has to repaint the
@@ -504,6 +521,8 @@ fn open_panel(
         Some((ToolbarAction::Boards, board_rows(toolbar)))
     } else if toolbar.size_open {
         Some((ToolbarAction::Size, size_rows(toolbar)))
+    } else if toolbar.clipboard_open {
+        Some((ToolbarAction::More, clip_rows(toolbar)))
     } else if toolbar.more {
         Some((ToolbarAction::More, drawer_blocks(toolbar, overflow)))
     } else {
@@ -528,6 +547,7 @@ pub fn picks_from_panel(action: ToolbarAction) -> bool {
                 | ToolbarAction::DeleteBoard(_)
                 | ToolbarAction::RenameBoard(_)
                 | ToolbarAction::SizeStep(_)
+                | ToolbarAction::Clip(_)
         )
 }
 
@@ -537,11 +557,13 @@ pub fn picks_from_panel(action: ToolbarAction) -> bool {
 /// dismissed by their own rules — a pick that closes them, a press elsewhere, `Esc` — so no hover state
 /// closes them.
 pub fn panel_stays_open(hover: Option<ToolbarAction>, owner: Option<ToolbarAction>) -> bool {
-    matches!(owner, Some(ToolbarAction::Boards | ToolbarAction::Size))
-        || match owner {
-            Some(owner) => hover == Some(owner) || hover.is_some_and(picks_from_panel),
-            None => false,
-        }
+    matches!(
+        owner,
+        Some(ToolbarAction::Boards | ToolbarAction::Size | ToolbarAction::Clipboard)
+    ) || match owner {
+        Some(owner) => hover == Some(owner) || hover.is_some_and(picks_from_panel),
+        None => false,
+    }
 }
 
 /// Whether a pick out of a panel closes it: every pick does, except a width step, which is a command you
@@ -553,7 +575,10 @@ pub fn closes_panel_on_pick(action: ToolbarAction) -> bool {
     picks_from_panel(action)
         && !matches!(
             action,
-            ToolbarAction::SizeStep(_) | ToolbarAction::RenameBoard(_)
+            ToolbarAction::SizeStep(_)
+                | ToolbarAction::RenameBoard(_)
+                | ToolbarAction::Link
+                | ToolbarAction::Clipboard
         )
 }
 
@@ -601,6 +626,22 @@ fn drawer_blocks(toolbar: &Toolbar, overflow: &[Block]) -> Vec<Block> {
                 ),
                 action: Some(*action),
                 active: toolbar.shared,
+                gap: TOOLBAR_GAP,
+            }),
+            ToolbarAction::Link => Some(Block {
+                mark: Mark::Icon(Icon::Link),
+                column: 1,
+                label: labelled(*action, "link text to board"),
+                action: Some(*action),
+                active: false,
+                gap: TOOLBAR_GAP,
+            }),
+            ToolbarAction::Clipboard => Some(Block {
+                mark: Mark::Icon(Icon::Clipboard),
+                column: 1,
+                label: labelled(*action, "clipboard history"),
+                action: Some(*action),
+                active: false,
                 gap: TOOLBAR_GAP,
             }),
             _ => None,
@@ -658,7 +699,11 @@ fn board_rows(toolbar: &Toolbar) -> Vec<Block> {
         .map(|(index, board)| Block {
             mark: Mark::None,
             column: 1,
-            label: board.name.clone(),
+            label: if toolbar.target.is_some() {
+                format!("→ {}", board.name)
+            } else {
+                board.name.clone()
+            },
             action: Some(ToolbarAction::Board(index)),
             active: board.current,
             gap: TOOLBAR_GAP,
@@ -701,15 +746,58 @@ fn size_rows(toolbar: &Toolbar) -> Vec<Block> {
         .collect()
 }
 
+/// The clipboard history's rows, newest first. Every row is a pick: a press pastes that entry and
+/// closes the panel.
+fn clip_rows(toolbar: &Toolbar) -> Vec<Block> {
+    toolbar
+        .clips
+        .iter()
+        .enumerate()
+        .map(|(index, clip)| {
+            let label = if clip.preview.is_empty() {
+                format!("{}: {} items", index + 1, clip.items)
+            } else {
+                format!("{}: {} items · {}", index + 1, clip.items, clip.preview)
+            };
+            Block {
+                mark: Mark::Icon(Icon::Clipboard),
+                column: 1,
+                label,
+                action: Some(ToolbarAction::Clip(index)),
+                active: false,
+                gap: TOOLBAR_GAP,
+            }
+        })
+        .collect()
+}
+
 /// What the `more` block reports while the pointer is on it: what is in the drawer, or `None` while the
 /// drawer is open, because then its controls are on screen and each is named by its own block.
 fn drawer_legend(toolbar: &Toolbar, overflow: &[Block]) -> Option<String> {
     (!toolbar.more).then(|| {
         drawer_blocks(toolbar, overflow)
             .iter()
-            .map(|block| block.label.clone())
+            .map(|block| {
+                block
+                    .action
+                    .and_then(drawer_caption)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| block.label.clone())
+            })
             .collect::<Vec<_>>()
-            .join("   ")
+            .join(" · ")
+    })
+}
+
+/// The one-word name the `more` block's legend gives a drawer control. The rows themselves state
+/// the full label and key; the legend only has the one line under the capsule and has to fit it.
+fn drawer_caption(action: ToolbarAction) -> Option<&'static str> {
+    Some(match action {
+        ToolbarAction::Scrim => "backdrop",
+        ToolbarAction::Shared => "boards",
+        ToolbarAction::Link => "link",
+        ToolbarAction::Clipboard => "clipboard",
+        _ => return None,
     })
 }
 
@@ -1131,6 +1219,48 @@ impl Renderer {
             if damage.is_none_or(|d| box_.intersects(d)) {
                 self.draw_toolbar(&mut pixmap, toolbar, scale);
             }
+        }
+        // Interface on the canvas: only while something is held, so a press on it can be told from
+        // a press on the drawing by the same rule that says the button is there.
+        if overlay.selection.is_some() && overlay.toolbar.is_some() {
+            let (w, h) = (
+                pixmap.width() as f32 / scale,
+                pixmap.height() as f32 / scale,
+            );
+            let box_ = move_button_bounds((w, h));
+            round_rect(
+                &mut pixmap,
+                Rect {
+                    x: box_.x * scale,
+                    y: box_.y * scale,
+                    w: box_.w * scale,
+                    h: box_.h * scale,
+                },
+                (MOVE_BUTTON_H / 2.0) * scale,
+                parse_hex(TOOLBAR_BLOCK_FILL),
+                Some((parse_hex(TOOLBAR_BLOCK_EDGE), TOOLBAR_HAIRLINE * scale)),
+            );
+            let label = "move to board";
+            let width = self.text_width(label, TOOLBAR_TEXT_SIZE);
+            let item = toolbar_text(
+                box_.x + (box_.w - width) / 2.0,
+                box_.y,
+                box_.h,
+                TOOLBAR_TEXT_SIZE,
+                TOOLBAR_LABEL_TEXT,
+                label,
+            );
+            self.draw_text(
+                &mut pixmap,
+                &item,
+                Screen {
+                    scale,
+                    view: View::default(),
+                },
+                None,
+                None,
+                None,
+            );
         }
         if let Some(at) = overlay.eraser {
             // The marker is what the pointer aims with, so its size is a screen length even though
@@ -1980,6 +2110,7 @@ impl Renderer {
         let item = TextItem {
             x: box_.x + box_.w - width,
             y: box_.y,
+            link: None,
             ..date
         };
         self.draw_text(pixmap, &item, screen, None, None, None);
@@ -2031,6 +2162,19 @@ impl Renderer {
                 )
             },
         );
+        // A link is visible without hovering it: one accent hairline under the measured line.
+        if item.link.is_some() {
+            let size = screen.len(item.size);
+            let c = parse_hex(TOOLBAR_ACCENT);
+            fill(
+                pixmap,
+                ox,
+                oy + prepared.baseline + size * 0.15,
+                prepared.line_w,
+                screen.ui(UNDERLINE_HEIGHT),
+                Color::rgba(c[0], c[1], c[2], c[3]),
+            );
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2313,6 +2457,9 @@ fn same_layout(a: &Toolbar, b: &Toolbar) -> bool {
         && a.more == b.more
         && a.boards_open == b.boards_open
         && a.size_open == b.size_open
+        && a.clipboard_open == b.clipboard_open
+        && a.clips == b.clips
+        && a.target == b.target
         && a.rename == b.rename
         && a.boards == b.boards
         && a.shared == b.shared
@@ -2358,6 +2505,7 @@ fn toolbar_text(x: f32, top: f32, height: f32, size: f32, color: &str, text: &st
         color: color.into(),
         size,
         text: text.into(),
+        link: None,
     }
 }
 
@@ -2394,6 +2542,17 @@ pub fn toolbar_bounds(toolbar: &Toolbar, width: f32, height: f32) -> Rect {
         w: (width - 2.0 * TOOLBAR_MARGIN).clamp(0.0, TOOLBAR_RESERVE)
             + 2.0 * (TOOLBAR_PAD + TOOLBAR_HAIRLINE),
         h: layout.height + 2.0 * TOOLBAR_HAIRLINE,
+    }
+}
+
+/// The move-to-board button: a capsule at the bottom centre of the canvas, present only while a
+/// selection is held. Logical pixels, like the rail.
+pub fn move_button_bounds(size: (f32, f32)) -> Rect {
+    Rect {
+        x: size.0 / 2.0 - MOVE_BUTTON_W / 2.0,
+        y: size.1 - TOOLBAR_MARGIN - MOVE_BUTTON_H,
+        w: MOVE_BUTTON_W,
+        h: MOVE_BUTTON_H,
     }
 }
 
@@ -2805,6 +2964,47 @@ fn draw_icon(pixmap: &mut PixmapMut, icon: Icon, square: Rect, scale: f32, color
                     2.0 * scale,
                 ) {
                     path.push_path(&plate);
+                }
+            }
+        }
+        Icon::Clipboard => {
+            // A board with a clip over its top edge.
+            if let Some(body) = rounded_rect_path(
+                Rect {
+                    x: x + w * 0.2,
+                    y: y + h * 0.2,
+                    w: w * 0.6,
+                    h: h * 0.7,
+                },
+                2.0 * scale,
+            ) {
+                path.push_path(&body);
+            }
+            if let Some(clip) = rounded_rect_path(
+                Rect {
+                    x: x + w * 0.38,
+                    y: y + h * 0.1,
+                    w: w * 0.24,
+                    h: h * 0.2,
+                },
+                1.0 * scale,
+            ) {
+                path.push_path(&clip);
+            }
+        }
+        Icon::Link => {
+            // Two chain links, overlapping at the middle.
+            for dx in [0.1, 0.4] {
+                if let Some(link) = rounded_rect_path(
+                    Rect {
+                        x: x + w * dx,
+                        y: y + h * 0.38,
+                        w: w * 0.5,
+                        h: h * 0.28,
+                    },
+                    h * 0.14,
+                ) {
+                    path.push_path(&link);
                 }
             }
         }
@@ -3902,7 +4102,8 @@ mod tests {
     }
 
     /// The `more` block reports the drawer's own controls, and only while the drawer is shut: its one
-    /// list is the drawer's, so the two cannot disagree.
+    /// list is the drawer's, so the two cannot disagree. The legend uses the one-word captions because
+    /// four full labels and keys do not fit the line the rail reserves for it.
     #[test]
     fn the_more_block_lists_what_is_in_the_drawer() {
         let rail = |more: bool| Toolbar {
@@ -3912,13 +4113,13 @@ mod tests {
         let closed = drawer_legend(&rail(false), &[]).expect("a list while the drawer is shut");
         let residents: Vec<String> = drawer_blocks(&rail(false), &[])
             .iter()
-            .map(|block| block.label.clone())
+            .filter_map(|block| block.action.and_then(drawer_caption))
+            .map(str::to_string)
             .collect();
         assert!(!residents.is_empty(), "the drawer has no residents");
         for name in residents {
             assert!(closed.contains(&name), "{closed} does not name {name}");
         }
-        assert!(closed.contains("(B)"), "the key is not stated: {closed}");
         assert_eq!(
             drawer_legend(&rail(true), &[]),
             None,
@@ -3938,6 +4139,9 @@ mod tests {
             more: false,
             boards_open: false,
             size_open: false,
+            clipboard_open: false,
+            clips: Vec::new(),
+            target: None,
             rename: None,
             boards: Vec::new(),
             shared: false,
@@ -4021,6 +4225,7 @@ mod tests {
             color: "#ffffff".into(),
             size: 24.0,
             text: text.into(),
+            link: None,
         }
     }
 
@@ -4228,6 +4433,9 @@ mod tests {
                 more: false,
                 boards_open: false,
                 size_open: false,
+                clipboard_open: false,
+                clips: Vec::new(),
+                target: None,
                 rename: None,
                 boards: Vec::new(),
                 shared: false,
@@ -4570,6 +4778,9 @@ mod tests {
             more: false,
             boards_open: false,
             size_open: false,
+            clipboard_open: false,
+            clips: Vec::new(),
+            target: None,
             rename: None,
             boards: Vec::new(),
             shared: false,
@@ -4792,6 +5003,9 @@ mod tests {
                 | ToolbarAction::NewBoard
                 | ToolbarAction::DeleteBoard(_)
                 | ToolbarAction::RenameBoard(_) => keysym == Keysym::C || keysym == Keysym::c,
+                // These live in the drawer (closed here) or in the clipboard list, and name no
+                // single key: their block labels are never walked by this test.
+                ToolbarAction::Link | ToolbarAction::Clipboard | ToolbarAction::Clip(_) => false,
                 ToolbarAction::Size => unreachable!("no key, filtered above"),
             };
             assert!(applies, "'{}' names a key that does not do it", block.label);

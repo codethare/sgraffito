@@ -32,10 +32,12 @@ use crate::app::{
     App, BTN_LEFT, BTN_MIDDLE, Mode, Tool, ToolbarAction, log, read_selection, text_mime,
 };
 use crate::canvas::{
-    Board, Caret, ERASER_THRESHOLD, Rect, SELECT_HANDLE_HIT, ShapeKind, Stroke, TextBuffer,
+    Board, Caret, ERASER_THRESHOLD, Rect, SELECT_HANDLE_HIT, ShapeKind, Stroke, Target, TextBuffer,
     ZOOM_STEP, constrained_drag, grab_at, selection_frame,
 };
-use crate::render::{closes_panel_on_pick, panel_stays_open, press_dismisses_panel};
+use crate::render::{
+    closes_panel_on_pick, move_button_bounds, panel_stays_open, press_dismisses_panel,
+};
 
 /// The input method's own log, off unless `SGRAFFITO_IM_TRACE` is set: a commit that does not appear is a
 /// question about which batch the compositor sent, and the answer has to come from the session where it
@@ -412,6 +414,14 @@ impl KeyboardHandler for App {
         }
         if event.keysym == Keysym::Escape {
             self.escape();
+        } else if self.ctrl && matches!(event.keysym, Keysym::c | Keysym::C) {
+            self.copy_selection();
+        } else if self.ctrl && matches!(event.keysym, Keysym::v | Keysym::V) {
+            if self.shift {
+                self.open_clipboard();
+            } else {
+                self.paste_newest();
+            }
         } else if deletes_selection(event.keysym) {
             // The only key that removes content. It acts on the selection, so with nothing selected
             // it does nothing.
@@ -877,6 +887,26 @@ impl App {
         // open — and `Esc` then went to the edit, because a focused box handles `Esc` before the rail does, so
         // the first `Esc` ended the edit and left the menu up.
         self.close_panels();
+        // `Ctrl`+click on a link is navigation, not a drawing gesture: follow it before any tool
+        // sees the press. A plain click keeps doing what the armed tool does.
+        if self.ctrl
+            && let Some((board, centre)) = self.linked_text_at(key, x, y)
+            && self.doc.boards.contains_key(&board)
+        {
+            self.follow_link(key, &board, centre);
+            return;
+        }
+        // The move button is interface: a press on it must not also start a stroke.
+        if let Some(size) = self.output_size(*key)
+            && self
+                .outputs
+                .get(key)
+                .is_some_and(|out| out.overlay.selection.is_some())
+            && move_button_bounds(size).contains(x, y)
+        {
+            self.open_target(Some(*key), Target::Move);
+            return;
+        }
         // A pan owns the pointer while it runs: nothing else may start under it.
         if self.panning() {
             return;
@@ -1071,11 +1101,17 @@ impl App {
             ToolbarAction::Scrim => self.toggle_scrim(),
             ToolbarAction::Boards => self.toggle_boards(),
             ToolbarAction::Shared => self.toggle_shared(),
+            ToolbarAction::Link => self.open_target(acting, Target::Link),
+            ToolbarAction::Clipboard => self.open_clipboard(),
+            ToolbarAction::Clip(index) => self.paste_clip(index),
             // The panel's rows are the document's boards in name order, which is the order the rail was
             // drawn from, so an index names the same board it was drawn as.
             ToolbarAction::Board(index) => {
                 let picked = board.or_else(|| self.doc.names().nth(index).cloned());
-                if let Some(name) = picked {
+                let Some(name) = picked else { return };
+                if let Some(target) = self.target.take() {
+                    self.apply_target(acting, target, &name);
+                } else {
                     self.switch_board(acting, &name);
                 }
             }

@@ -183,6 +183,20 @@ pub enum ToolbarAction {
     RenameBoard(usize),
     /// Switch between every screen sharing one board and each screen picking its own.
     Shared,
+    /// Link the selected text box to a board: opens the board list as a target picker.
+    Link,
+    /// Open the clipboard history panel.
+    Clipboard,
+    /// Paste clipboard entry `index`, newest first.
+    Clip(usize),
+}
+
+/// What a press in the board list applies, when the list opened to pick a target rather than to
+/// switch the screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    Link,
+    Move,
 }
 
 impl Tool {
@@ -227,6 +241,10 @@ pub struct TextItem {
     pub color: String,
     pub size: f32,
     pub text: String,
+    /// The board this text links to, when it is a link: `Ctrl`+click follows it. Absent in a file
+    /// written before links existed.
+    #[serde(default)]
+    pub link: Option<String>,
 }
 
 /// Padding between a note's text and its edges, its smallest side, the size a click creates, and the
@@ -316,6 +334,7 @@ impl Note {
             color: self.ink().to_string(),
             size: NOTE_TEXT_SIZE,
             text: self.text.clone(),
+            link: None,
         }
     }
 
@@ -387,6 +406,18 @@ pub struct Board {
 }
 
 impl Board {
+    /// The linked text under a point, measured with the renderer's boxes rather than the font-size
+    /// estimate: a link is a thing you aim at.
+    pub fn linked_at(
+        &self,
+        point: [f32; 2],
+        mut bounds: impl FnMut(&TextItem) -> Rect,
+    ) -> Option<&TextItem> {
+        self.texts
+            .iter()
+            .find(|text| text.link.is_some() && bounds(text).contains(point[0], point[1]))
+    }
+
     /// Eraser hit test: text boxes win over everything, then the nearest stroke or shape within the
     /// threshold. A shape is hit by its outline, never from inside it, so a rectangle's interior
     /// keeps belonging to whatever is drawn inside it.
@@ -491,6 +522,65 @@ impl Board {
             }
         }
         (copies, box_)
+    }
+
+    /// A new board holding copies of exactly the named elements, in the order the ids give them.
+    /// The source is untouched; the copy is what a clipboard entry holds.
+    pub fn copied(&self, items: &[ItemId]) -> Board {
+        let mut out = Board::default();
+        for id in items {
+            match *id {
+                ItemId::Stroke(i) => {
+                    if let Some(s) = self.strokes.get(i) {
+                        out.strokes.push(s.clone());
+                    }
+                }
+                ItemId::Text(i) => {
+                    if let Some(t) = self.texts.get(i) {
+                        out.texts.push(t.clone());
+                    }
+                }
+                ItemId::Shape(i) => {
+                    if let Some(s) = self.shapes.get(i) {
+                        out.shapes.push(s.clone());
+                    }
+                }
+                ItemId::Note(i) => {
+                    if let Some(n) = self.notes.get(i) {
+                        out.notes.push(n.clone());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Append every element of `other`, returning their new ids and the box they occupy. Links on
+    /// the copies are kept; a text linked to a board can move with its link.
+    pub fn append(&mut self, other: &Board) -> (Vec<ItemId>, Option<Rect>) {
+        let mut ids = Vec::new();
+        let mut box_: Option<Rect> = None;
+        for s in &other.strokes {
+            ids.push(ItemId::Stroke(self.strokes.len()));
+            union_into(&mut box_, s.paint_bounds());
+            self.strokes.push(s.clone());
+        }
+        for t in &other.texts {
+            ids.push(ItemId::Text(self.texts.len()));
+            union_into(&mut box_, Some(t.paint_bounds()));
+            self.texts.push(t.clone());
+        }
+        for s in &other.shapes {
+            ids.push(ItemId::Shape(self.shapes.len()));
+            union_into(&mut box_, Some(s.paint_bounds()));
+            self.shapes.push(s.clone());
+        }
+        for n in &other.notes {
+            ids.push(ItemId::Note(self.notes.len()));
+            union_into(&mut box_, Some(n.bounds()));
+            self.notes.push(n.clone());
+        }
+        (ids, box_)
     }
 
     /// Recolour every element `items` names, returning the box they occupy, which is what the frame that
@@ -1312,6 +1402,18 @@ impl Default for View {
 }
 
 impl View {
+    /// The same view moved so a canvas point sits in the middle of an output of this size. The zoom
+    /// is untouched: a link says where to look, not how closely.
+    pub fn centred_on(self, size: (f32, f32), canvas: [f32; 2]) -> View {
+        View {
+            zoom: self.zoom,
+            offset: [
+                size.0 / 2.0 - canvas[0] * self.zoom,
+                size.1 / 2.0 - canvas[1] * self.zoom,
+            ],
+        }
+    }
+
     /// Whether this view is the one a frame drawn before the view existed would have used.
     pub fn is_identity(self) -> bool {
         self.zoom == 1.0 && self.offset == [0.0, 0.0]
@@ -1582,6 +1684,130 @@ pub fn item_bounds(ann: &Board, id: ItemId) -> Option<Rect> {
     }
 }
 
+/// Most elements one clipboard entry may hold, and most bytes of JSON it may be. A clip is memory,
+/// not the file: these bound the one case where a copy is a whole busy board.
+pub const MAX_CLIP_ITEMS: usize = 200;
+pub const MAX_CLIP_BYTES: usize = 1_000_000;
+/// Most entries the clipboard history keeps; an older entry is dropped to make room for a newer one.
+pub const MAX_CLIP_ENTRIES: usize = 8;
+
+/// The text a link action would link: the one text box held, and nothing else. `None` when nothing
+/// is held, more than one thing is, or the held thing is not a text box.
+pub fn link_source(ann: &Board, items: &[ItemId]) -> Option<usize> {
+    match items {
+        [ItemId::Text(index)] if *index < ann.texts.len() => Some(*index),
+        _ => None,
+    }
+}
+
+/// The element count and JSON byte count of a clipboard copy, or `None` when either cap would be
+/// exceeded. Both caps matter: a few huge strokes and a thousand tiny ones are the same problem.
+pub fn clip_size(board: &Board) -> Option<(usize, usize)> {
+    let items = board.strokes.len() + board.texts.len() + board.shapes.len() + board.notes.len();
+    if items > MAX_CLIP_ITEMS {
+        return None;
+    }
+    let bytes = serde_json::to_vec(board).ok()?.len();
+    (bytes <= MAX_CLIP_BYTES).then_some((items, bytes))
+}
+
+/// Drop the oldest clipboard entries until the history is within all three caps. The newest entry
+/// is assumed to fit on its own: [`ClipEntry::new`] refused it otherwise, so the tail is always the
+/// part that goes.
+pub fn trim_clipboard(clips: &mut Vec<ClipEntry>) {
+    while clips.len() > MAX_CLIP_ENTRIES {
+        clips.pop();
+    }
+    let mut items: usize = clips.iter().map(|clip| clip.items).sum();
+    let mut bytes: usize = clips.iter().map(|clip| clip.bytes).sum();
+    while (items > MAX_CLIP_ITEMS || bytes > MAX_CLIP_BYTES) && clips.len() > 1 {
+        if let Some(old) = clips.pop() {
+            items -= old.items;
+            bytes -= old.bytes;
+        }
+    }
+}
+
+/// One entry in the clipboard history, with the measurements its cap was decided from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClipEntry {
+    pub board: Board,
+    pub items: usize,
+    pub bytes: usize,
+}
+
+impl ClipEntry {
+    /// A new entry when both caps allow it; `None` when the copy is too big to be stored at all.
+    pub fn new(board: Board) -> Option<Self> {
+        let (items, bytes) = clip_size(&board)?;
+        Some(Self {
+            board,
+            items,
+            bytes,
+        })
+    }
+
+    pub fn preview(&self) -> String {
+        self.board.clip_preview()
+    }
+}
+
+/// One entry in the clipboard history, as the panel lists it: how many elements it holds and a short
+/// preview so two similar copies can be told apart.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClipRow {
+    pub items: usize,
+    pub preview: String,
+}
+
+impl Board {
+    /// A copy moved by `(dx, dy)`, so a paste is visible on top of what it copies.
+    pub fn shifted(&self, dx: f32, dy: f32) -> Board {
+        let mut out = self.clone();
+        for stroke in &mut out.strokes {
+            for point in &mut stroke.points {
+                point[0] += dx;
+                point[1] += dy;
+            }
+        }
+        for text in &mut out.texts {
+            text.x += dx;
+            text.y += dy;
+        }
+        for shape in &mut out.shapes {
+            shape.from[0] += dx;
+            shape.from[1] += dy;
+            shape.to[0] += dx;
+            shape.to[1] += dy;
+        }
+        for note in &mut out.notes {
+            note.x += dx;
+            note.y += dy;
+        }
+        out
+    }
+}
+
+impl Board {
+    /// A one-line description of a clipboard entry, taken from its first non-empty text or note.
+    pub fn clip_preview(&self) -> String {
+        let text = self
+            .texts
+            .iter()
+            .map(|t| t.text.as_str())
+            .chain(self.notes.iter().map(|n| n.text.as_str()))
+            .find(|text| !text.trim().is_empty());
+        let mut preview = match text {
+            Some(text) => text.lines().next().unwrap_or("").trim().to_string(),
+            None => String::new(),
+        };
+        if preview.chars().count() > 24 {
+            preview = preview.chars().take(24).collect::<String>() + "…";
+        }
+        preview
+    }
+}
+
 /// The box the frame is drawn on: the union of the held elements' boxes as the live transform
 /// would leave them, so the frame follows a drag. `None` when nothing held is still in the
 /// document.
@@ -1787,11 +2013,36 @@ impl Doc {
             return None;
         }
         self.boards.remove(name);
+        // A link names a board, so a board that is gone must not leave texts pointing at nothing.
+        for board in self.boards.values_mut() {
+            for text in &mut board.texts {
+                if text.link.as_deref() == Some(name) {
+                    text.link = None;
+                }
+            }
+        }
         let successor = self.boards.keys().next().cloned()?;
         if self.active == name {
             self.active = successor.clone();
         }
         Some(successor)
+    }
+
+    /// Move the named elements from one board to another, returning the box the source lost and the
+    /// one the target gained. `None` when either board is missing, the boards are the same, or
+    /// nothing was named. Links that name the source board keep naming it; a link is text content,
+    /// not a place.
+    pub fn move_items(&mut self, from: &str, to: &str, items: &[ItemId]) -> Option<(Rect, Rect)> {
+        if from == to {
+            return None;
+        }
+        // The target is checked before the source is touched: a move into a board that is gone must
+        // not remove the elements and then fail to put them anywhere.
+        self.boards.get(to)?;
+        let copy = self.boards.get(from)?.copied(items);
+        let lost = self.boards.get_mut(from)?.remove(items)?;
+        let (_, gained) = self.boards.get_mut(to)?.append(&copy);
+        Some((lost, gained.unwrap_or_default()))
     }
 
     /// Rename `old` to `new`, moving its drawing and the picked board with it. `false` when the new
@@ -1805,6 +2056,14 @@ impl Doc {
             return false;
         };
         self.boards.insert(new.to_string(), board);
+        // A link names a board, so a rename has to move every link that named the old one.
+        for board in self.boards.values_mut() {
+            for text in &mut board.texts {
+                if text.link.as_deref() == Some(old) {
+                    text.link = Some(new.to_string());
+                }
+            }
+        }
         if self.active == old {
             self.active = new.to_string();
         }
@@ -1922,6 +2181,12 @@ pub struct Toolbar {
     /// Whether the width list is open. The readout toggles it, and it obeys the same one-panel rule as the
     /// other two.
     pub size_open: bool,
+    /// Whether the clipboard history panel is open.
+    pub clipboard_open: bool,
+    /// The clipboard history, newest first, as the panel lists it.
+    pub clips: Vec<ClipRow>,
+    /// What a board pick applies while a target picker is open. `None` means a pick switches the screen.
+    pub target: Option<Target>,
     /// The board's name being edited in the list, which its row draws instead of the name.
     pub rename: Option<BoardEdit>,
     /// The boards the panel lists, in name order, with the one this output shows marked. Carried in the

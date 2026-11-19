@@ -4,8 +4,8 @@ use sgraffito::canvas::{
     View,
 };
 use sgraffito::render::{
-    DAMAGE_SLACK, DamageRegion, FrameCache, Renderer, Screen, buffer_format, rail_column,
-    toolbar_bounds, transient_bounds, transient_damage,
+    DAMAGE_SLACK, DamageRegion, FrameCache, Renderer, Screen, buffer_format, move_button_bounds,
+    rail_column, toolbar_bounds, transient_bounds, transient_damage,
 };
 use wayland_client::protocol::wl_shm::Format;
 
@@ -117,6 +117,7 @@ fn text_item_draws_ink() {
             color: "#ffffff".into(),
             size: 32.0,
             text: "H".into(),
+            link: None,
         }],
     );
     Renderer::new().render(
@@ -185,6 +186,7 @@ fn overlay_text_box_draws_text_and_cursor() {
                 color: "#ffffff".into(),
                 size: 32.0,
                 text: "ab".into(),
+                link: None,
             },
             buffer: TextBuffer::new("ab"),
             index: None,
@@ -220,6 +222,7 @@ fn the_caret_spans_the_whole_line_box() {
                 color: "#ffffff".into(),
                 size: 32.0,
                 text: String::new(),
+                link: None,
             },
             buffer: TextBuffer::new(""),
             index: None,
@@ -257,6 +260,7 @@ fn preedit_renders_more_ink_than_committed_text_alone() {
         color: "#ffffff".into(),
         size: 32.0,
         text: "ab".into(),
+        link: None,
     };
     let mut plain = buffer(W, H);
     let mut with_preedit = buffer(W, H);
@@ -377,6 +381,9 @@ fn toolbar(tool: Tool, color: &'static str, size: f32, hover: Option<ToolbarActi
         more: false,
         boards_open: false,
         size_open: false,
+        clipboard_open: false,
+        clips: Vec::new(),
+        target: None,
         rename: None,
         boards: Vec::new(),
         shared: false,
@@ -832,6 +839,7 @@ fn bounding_box_frame_is_pixel_identical_to_a_whole_surface_frame() {
             color: "#ffffff".into(),
             size: 18.0,
             text: "note".into(),
+            link: None,
         }],
     );
     let first = dot(100.0, 45.0);
@@ -965,6 +973,7 @@ fn long_text_damage_contains_everything_rasterised() {
             color: "#ffffff".into(),
             size: 24.0,
             text: "a long text line that exceeds the output width. ".repeat(3),
+            link: None,
         }],
     );
     let first = dot(100.0, 50.0);
@@ -1202,6 +1211,7 @@ fn edit_frame(w: u32, h: u32, text: &str, cursor: usize, preedit: &str) -> Vec<u
                 color: "#ffffff".into(),
                 size: 24.0,
                 text: text.into(),
+                link: None,
             },
             buffer: TextBuffer {
                 text: text.into(),
@@ -1288,6 +1298,7 @@ fn a_cjk_click_lands_inside_the_measured_box() {
         color: "#ffffff".into(),
         size: 24.0,
         text: "买牛奶".into(),
+        link: None,
     };
     let mut renderer = Renderer::new();
     let measured = renderer.text_edit_bounds(
@@ -1690,6 +1701,7 @@ fn the_default_view_draws_what_no_view_drew() {
             color: "#ffffff".into(),
             size: 20.0,
             text: "milk".into(),
+            link: None,
         }],
         shapes: vec![Shape {
             kind: ShapeKind::Circle,
@@ -2442,6 +2454,9 @@ fn a_row_of_the_panel_can_be_clicked_with_the_pointer_on_the_block_that_opened_i
         more: true,
         boards_open: false,
         size_open: false,
+        clipboard_open: false,
+        clips: Vec::new(),
+        target: None,
         rename: None,
         boards: Vec::new(),
         shared: false,
@@ -2465,7 +2480,7 @@ fn a_row_of_the_panel_can_be_clicked_with_the_pointer_on_the_block_that_opened_i
     // The panel's control answers on a row, and the block's own strip covers the rail's column beside it.
     assert_eq!(
         hit(&mut renderer, 60.0, last_row - 5.0),
-        Some(ToolbarAction::Shared)
+        Some(ToolbarAction::Clipboard)
     );
     assert_eq!(
         hit(&mut renderer, 20.0, last_row - 5.0),
@@ -3010,6 +3025,7 @@ fn cached_document() -> Board {
             color: "#ffffff".into(),
             size: 18.0,
             text: "cached".into(),
+            link: None,
         }],
         shapes: vec![],
         notes: vec![],
@@ -3829,4 +3845,52 @@ fn a_panel_paints_no_plate_behind_its_rows() {
     }
     // The rows themselves are still painted, so this is not a test of an empty panel.
     assert!(alpha(&buf, w, probe as u32, row as u32 + 10) > 0);
+}
+
+/// A link is visible as an underline without hovering, and the move button stays in the middle of
+/// the bottom of the canvas at every output size.
+#[test]
+fn a_link_draws_an_underline_and_the_move_button_is_bottom_centred() {
+    let (w, h) = (400u32, 200u32);
+    let text = TextItem {
+        x: 20.0,
+        y: 20.0,
+        color: "#ffffff".into(),
+        size: 24.0,
+        text: "linked".into(),
+        link: None,
+    };
+    let draw = |linked: bool| {
+        let mut board = Board::default();
+        board.texts.push(TextItem {
+            link: linked.then(|| "other".to_string()),
+            ..text.clone()
+        });
+        let mut buf = buffer(w, h);
+        Renderer::new().render(
+            &mut buf,
+            w,
+            h,
+            1.0,
+            View::default(),
+            &board,
+            &Overlay::default(),
+            None,
+        );
+        buf
+    };
+    let (plain, linked) = (draw(false), draw(true));
+    let changed = plain
+        .chunks(4)
+        .zip(linked.chunks(4))
+        .filter(|(a, b)| a != b)
+        .count();
+    assert!(changed > 0, "the link changed no pixel");
+
+    for size in [(640.0, 480.0), (1920.0, 1080.0)] {
+        let box_ = move_button_bounds(size);
+        assert!((box_.x + box_.w / 2.0 - size.0 / 2.0).abs() < 1.0);
+        assert!(box_.y > size.1 / 2.0);
+        assert!(box_.y + box_.h < size.1);
+    }
 }
