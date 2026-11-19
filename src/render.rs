@@ -1148,6 +1148,45 @@ impl Renderer {
                 self.draw_toolbar(&mut pixmap, toolbar, scale);
             }
         }
+        if overlay.selection.is_some() && overlay.toolbar.is_some() {
+            let (w, h) = (
+                pixmap.width() as f32 / scale,
+                pixmap.height() as f32 / scale,
+            );
+            let box_ = move_button_bounds((w, h));
+            // The capsule a rail row is: the interface gains no shape it did not have.
+            round_rect(
+                &mut pixmap,
+                Rect {
+                    x: box_.x * scale,
+                    y: box_.y * scale,
+                    w: box_.w * scale,
+                    h: box_.h * scale,
+                },
+                (TOOLBAR_BLOCK / 2.0) * scale,
+                parse_hex(TOOLBAR_BLOCK_FILL),
+                Some((parse_hex(TOOLBAR_BLOCK_EDGE), TOOLBAR_HAIRLINE * scale)),
+            );
+            let item = toolbar_text(
+                box_.x + TOOLBAR_LABEL_PAD,
+                box_.y,
+                TOOLBAR_BLOCK,
+                TOOLBAR_TEXT_SIZE,
+                TOOLBAR_LABEL_TEXT,
+                "move to board",
+            );
+            self.draw_text(
+                &mut pixmap,
+                &item,
+                Screen {
+                    scale,
+                    view: View::default(),
+                },
+                None,
+                None,
+                None,
+            );
+        }
         if let Some(at) = overlay.eraser {
             // The marker is what the pointer aims with, so its size is a screen length even though
             // the point it sits on is the canvas point it will erase.
@@ -2256,6 +2295,21 @@ pub fn transient_damage(last: Option<Rect>, now: Option<Rect>, rail: Option<Rect
 /// in-progress stroke, the shape being dragged out, the eraser marker and the marquee. `None` when
 /// the overlay draws none of them. The selection's own box needs the document, so the caller adds
 /// it.
+/// The move button: a capsule at the bottom centre of the canvas, wide enough for `move to board` and
+/// inside every output's width.
+pub const MOVE_BUTTON_W: f32 = 132.0;
+
+/// Where the move button sits on an output of this size, in logical pixels. It is interface, not
+/// canvas: it stays the same size at every zoom, like the rail.
+pub fn move_button_bounds(size: (f32, f32)) -> Rect {
+    Rect {
+        x: size.0 / 2.0 - MOVE_BUTTON_W / 2.0,
+        y: size.1 - TOOLBAR_BLOCK - 2.0 * TOOLBAR_PAD,
+        w: MOVE_BUTTON_W,
+        h: TOOLBAR_BLOCK,
+    }
+}
+
 pub fn transient_bounds(overlay: &Overlay) -> Option<Rect> {
     let stroke = overlay.stroke.as_ref().and_then(Stroke::paint_bounds);
     let shape = overlay.shape.as_ref().map(Shape::paint_bounds);
@@ -3805,6 +3859,28 @@ mod tests {
         assert!(!crate::app::applies_target(None));
         assert!(DRAWER.contains(&ToolbarAction::Link));
         assert!(picks_from_panel(ToolbarAction::Link));
+    }
+
+    /// The move button sits in the middle of the bottom of the canvas, inside the width on any screen,
+    /// and clear of the very bottom edge.
+    #[test]
+    fn the_move_button_is_in_the_bottom_middle() {
+        for size in [(800.0, 600.0), (1920.0, 1080.0)] {
+            let box_ = move_button_bounds(size);
+            assert!(
+                box_.x > 0.0 && box_.x + box_.w < size.0,
+                "the button left the width"
+            );
+            assert!(
+                box_.y + box_.h < size.1 && box_.y > size.1 / 2.0,
+                "the button left the bottom"
+            );
+            let centre = box_.x + box_.w / 2.0;
+            assert!(
+                (centre - size.0 / 2.0).abs() < 1.0,
+                "the button is not centred"
+            );
+        }
     }
 
     /// The block whose list is open keeps its square: the list says what it is, so a caption growing

@@ -236,6 +236,11 @@ impl Output {
     pub(crate) fn board(&self) -> &str {
         &self.board
     }
+
+    /// This output's size in logical pixels, which is what the interface is placed from.
+    pub(crate) fn size(&self) -> (f32, f32) {
+        (self.width as f32, self.height as f32)
+    }
 }
 
 /// What a press in the board list applies, when the list was opened to pick a target rather than to
@@ -1263,8 +1268,28 @@ impl App {
     pub(crate) fn apply_target(&mut self, target: Target, board: &str) {
         match target {
             Target::Link => self.link_selected(board),
-            Target::Move => {}
+            Target::Move => self.move_selected(board),
         }
+    }
+
+    /// Move the held elements onto the board a target press picked.
+    pub(crate) fn move_selected(&mut self, board: &str) {
+        let Some(key) = self.keyboard_focus else {
+            return;
+        };
+        let Some((board_name, items)) = self.held(key) else {
+            return;
+        };
+        if board_name == board {
+            return;
+        }
+        if self.doc.move_items(&board_name, board, &items).is_none() {
+            return;
+        }
+        // Two boards changed, and the selection named the source's indices, so it goes.
+        self.drop_selection();
+        self.doc_changed();
+        log(&format!("moved {} elements to {board}", items.len()));
     }
 
     /// Rename a board and keep every screen that shows it on it. Unlike a pick, a name is document
@@ -2949,6 +2974,14 @@ impl App {
             .selection
             .as_ref()
             .and_then(|s| selection_frame(ann, &s.items, s.transform));
+        // The move button is interface, screen-space and fixed: it is unioned in after the document
+        // boxes are mapped, so the frame that removes it repaints where it was.
+        let transient = if out.overlay.selection.is_some() {
+            let button = crate::render::move_button_bounds((w as f32, h as f32));
+            Some(transient.map_or(button, |box_| box_.union(button)))
+        } else {
+            transient
+        };
         let transient = match (transient, selected) {
             (Some(a), Some(b)) => Some(a.union(selection_bounds(view.screen_rect(b), handle_hit))),
             (a, b) => a.or(b.map(|b| selection_bounds(view.screen_rect(b), handle_hit))),

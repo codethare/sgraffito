@@ -890,8 +890,16 @@ impl App {
             self.apply_toolbar_action_on(Some(*key), action, board);
             return;
         }
-        // A press anywhere else is a press outside the name too, and it commits it before it applies.
         self.commit_rename();
+        // The move button is interface: a press on it must not also start a stroke.
+        if self.selection_held()
+            && let Some(out) = self.outputs.get(key)
+            && crate::render::move_button_bounds(out.size()).contains(x, y)
+        {
+            self.target = Some(crate::app::Target::Move);
+            self.set_boards(true);
+            return;
+        }
         // A press anywhere else is a press outside the menu, and clicking outside a menu dismisses it. This
         // is also what keeps an open panel and a live text edit from existing at once: a press is what starts
         // an edit, and the panel has already gone by the time the tool below sees it. Without it, `M` with the

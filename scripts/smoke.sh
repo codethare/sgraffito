@@ -211,7 +211,7 @@ python3 -c "
 import json,os
 p=os.environ['XDG_DATA_HOME']+'/sgraffito/annotations.json'
 d=json.load(open(p))
-assert d['version']==4, d['version']
+assert d['version']==5, d['version']
 # The seed file is version 3, so this is the migration as well: each old output bucket came back as a
 # board of the same name, and `clear` emptied them without forgetting the names.
 assert sorted(d['boards'])==['HEADLESS-1','HEADLESS-2'], sorted(d['boards'])
