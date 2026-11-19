@@ -392,6 +392,18 @@ pub struct Board {
 }
 
 impl Board {
+    /// The linked text under a point, tested with the boxes the click test measures rather than the
+    /// font-size estimate: a link is a thing you aim at.
+    pub fn linked_at(
+        &self,
+        point: [f32; 2],
+        bounds: impl Fn(&TextItem) -> Rect,
+    ) -> Option<&TextItem> {
+        self.texts
+            .iter()
+            .find(|text| text.link.is_some() && bounds(text).contains(point[0], point[1]))
+    }
+
     /// Eraser hit test: text boxes win over everything, then the nearest stroke or shape within the
     /// threshold. A shape is hit by its outline, never from inside it, so a rectangle's interior
     /// keeps belonging to whatever is drawn inside it.
@@ -1315,6 +1327,20 @@ pub struct View {
     pub zoom: f32,
     /// Where the canvas origin is on screen, in logical pixels.
     pub offset: [f32; 2],
+}
+
+impl View {
+    /// The same view moved so a canvas point sits in the middle of an output of this size. The zoom is
+    /// untouched: a link says where to look, not how closely.
+    pub fn centred_on(self, size: (f32, f32), canvas: [f32; 2]) -> View {
+        View {
+            zoom: self.zoom,
+            offset: [
+                size.0 / 2.0 - canvas[0] * self.zoom,
+                size.1 / 2.0 - canvas[1] * self.zoom,
+            ],
+        }
+    }
 }
 
 impl Default for View {

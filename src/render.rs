@@ -2069,6 +2069,26 @@ impl Renderer {
         let mut prepared = self.prepare_text(display.as_ref(), item, screen, wrap);
         let geometry = caret_geometry(&prepared, caret.unwrap_or(committed.len()), preedit.len());
         self.draw_prepared_text(pixmap, item, screen, &mut prepared, reveal);
+        // A link states itself: a hairline under the text, measured the way the text is drawn so a
+        // wide script is underlined for its whole width.
+        if item.link.is_some() {
+            let width = self.text_width(&item.text, screen.len(item.size));
+            let at = screen.point([item.x, item.y + item.size * LINE_HEIGHT_SCALE]);
+            let mut line = PathBuilder::new();
+            line.move_to(at[0], at[1]);
+            line.line_to(at[0] + width, at[1]);
+            if let Some(path) = line.finish() {
+                let c = parse_hex(TOOLBAR_ACCENT);
+                let mut paint = Paint::default();
+                paint.set_color_rgba8(c[0], c[1], c[2], c[3]);
+                paint.anti_alias = true;
+                let stroke = SkStroke {
+                    width: screen.ui(TOOLBAR_HAIRLINE).max(1.0),
+                    ..Default::default()
+                };
+                pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+            }
+        }
 
         if edit.is_some() {
             let size = screen.len(item.size);

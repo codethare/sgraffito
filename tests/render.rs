@@ -3840,3 +3840,42 @@ fn a_panel_paints_no_plate_behind_its_rows() {
     // The rows themselves are still painted, so this is not a test of an empty panel.
     assert!(alpha(&buf, w, probe as u32, row as u32 + 10) > 0);
 }
+
+/// Only a linked text follows a click, and only the one under the pointer.
+#[test]
+fn a_click_follows_only_the_linked_text_under_it() {
+    let ann = Board {
+        texts: vec![
+            TextItem {
+                x: 0.0,
+                y: 0.0,
+                color: "#fff".into(),
+                size: 18.0,
+                text: "plain".into(),
+                link: None,
+            },
+            TextItem {
+                x: 0.0,
+                y: 40.0,
+                color: "#fff".into(),
+                size: 18.0,
+                text: "go".into(),
+                link: Some("b".into()),
+            },
+        ],
+        ..Board::default()
+    };
+    let bounds = |t: &TextItem| t.paint_bounds();
+    assert_eq!(
+        ann.linked_at([4.0, 4.0], bounds)
+            .and_then(|t| t.link.clone()),
+        None,
+        "an unlinked text was followed"
+    );
+    assert_eq!(
+        ann.linked_at([4.0, 44.0], bounds)
+            .and_then(|t| t.link.clone()),
+        Some("b".into())
+    );
+    assert!(ann.linked_at([400.0, 400.0], bounds).is_none());
+}

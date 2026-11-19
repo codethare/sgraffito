@@ -1073,6 +1073,48 @@ impl App {
         self.refresh_toolbar();
     }
 
+    /// The linked text under a screen point on this output, with the board it links to.
+    pub(crate) fn linked_text_at(&mut self, key: &u32, x: f32, y: f32) -> Option<(usize, String)> {
+        let out = self.outputs.get(key)?;
+        let board_name = out.board.clone();
+        let (scale, view) = (out.scale, out.view);
+        let point = view.to_canvas([x, y]);
+        let ann = self.doc.boards.get(&board_name)?;
+        // The renderer and the document are separate fields, so the boxes can be measured while the
+        // board is borrowed.
+        let renderer = &mut self.renderer;
+        let index = ann.texts.iter().position(|text| {
+            text.link.is_some()
+                && renderer
+                    .text_edit_bounds(&text.text, text, Screen { scale, view })
+                    .contains(point[0], point[1])
+        })?;
+        let board = ann.texts[index].link.clone()?;
+        Some((index, board))
+    }
+
+    /// Go to a linked text: switch this output to its board and put the text in the middle.
+    pub(crate) fn follow_link(&mut self, key: &u32, index: usize, board: &str) {
+        if !self.switch_board(Some(*key), board) {
+            return;
+        }
+        let Some(out) = self.outputs.get(key) else {
+            return;
+        };
+        let size = (out.width as f32, out.height as f32);
+        let Some(text) = self
+            .doc
+            .boards
+            .get(board)
+            .and_then(|ann| ann.texts.get(index))
+        else {
+            return;
+        };
+        let bounds = text.paint_bounds();
+        let centre = [bounds.x + bounds.w / 2.0, bounds.y + bounds.h / 2.0];
+        self.view_changed(*key, |view| *view = view.centred_on(size, centre));
+    }
+
     /// Rename a board and keep every screen that shows it on it. Unlike a pick, a name is document
     /// content, so it goes to the file.
     pub(crate) fn rename_board(&mut self, old: &str, new: &str) -> bool {

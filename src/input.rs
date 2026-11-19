@@ -851,6 +851,13 @@ impl App {
         if self.mode != Mode::Edit {
             return;
         }
+        // `Ctrl`+click on a linked text goes to its board; a plain click keeps belonging to the tool.
+        if self.ctrl
+            && let Some((index, board)) = self.linked_text_at(key, x, y)
+        {
+            self.follow_link(key, index, &board);
+            return;
+        }
         if let Some(action) = self.toolbar_hit(key, x, y) {
             // The rows were drawn from the list as it stands, and committing a name can re-sort it, so
             // the board the press means is named before the commit moves anything.

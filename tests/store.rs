@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use sgraffito::canvas::{
     Board, Doc, ItemId, Note, PEN_WIDTH_MAX, Shape, ShapeKind, Stroke, TEXT_SIZE_MAX, TextItem,
-    stepped_size,
+    View, stepped_size,
 };
 use sgraffito::store::{self, Store};
 
@@ -677,4 +677,20 @@ fn moving_elements_leaves_the_source_board_without_them() {
     assert!(doc.move_items("a", "a", &[ItemId::Stroke(0)]).is_none());
     assert!(doc.move_items("a", "gone", &[ItemId::Stroke(0)]).is_none());
     assert!(doc.move_items("a", "b", &[]).is_none());
+}
+
+/// A link puts its text in the middle of the output: the view moves so the text's centre is the
+/// output's centre, at whatever zoom is in hand.
+#[test]
+fn going_to_a_link_centres_the_text() {
+    let view = View {
+        zoom: 2.0,
+        offset: [30.0, -10.0],
+    };
+    let centred = view.centred_on((800.0, 600.0), [100.0, 50.0]);
+    assert_eq!(centred.zoom, 2.0, "a link changed the zoom");
+    assert_eq!(
+        centred.offset,
+        [800.0 / 2.0 - 100.0 * 2.0, 600.0 / 2.0 - 50.0 * 2.0]
+    );
 }
