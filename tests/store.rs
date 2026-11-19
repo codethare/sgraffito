@@ -675,7 +675,13 @@ fn moving_elements_leaves_the_source_board_without_them() {
     assert_eq!(doc.boards["b"].strokes.len(), 1);
     // Onto the board it is already on, a board that is not there, or nothing to move: no move.
     assert!(doc.move_items("a", "a", &[ItemId::Stroke(0)]).is_none());
-    assert!(doc.move_items("a", "gone", &[ItemId::Stroke(0)]).is_none());
+    // A target that is not a board must change nothing at all: the elements stay on the source.
+    let before = doc.clone();
+    assert!(doc.move_items("b", "gone", &[ItemId::Stroke(0)]).is_none());
+    assert_eq!(
+        doc, before,
+        "the source lost the element to a board that is not there"
+    );
     assert!(doc.move_items("a", "b", &[]).is_none());
 }
 
@@ -720,4 +726,23 @@ fn a_copy_over_the_cap_is_refused_whole() {
         link: None,
     });
     assert!(!clipboard_fits(&wordy), "the byte cap did not refuse it");
+}
+
+/// A board's links follow it through a rename: a link names a board, so the name it holds is the one
+/// the board has.
+#[test]
+fn a_renamed_board_takes_its_links_with_it() {
+    let mut doc = Doc::default();
+    doc.boards.insert("a".into(), Board::default());
+    doc.boards.insert("b".into(), Board::default());
+    doc.boards.get_mut("a").unwrap().texts.push(TextItem {
+        x: 0.0,
+        y: 0.0,
+        color: "#ffffff".into(),
+        size: 18.0,
+        text: "go".into(),
+        link: Some("b".into()),
+    });
+    assert!(doc.rename_board("b", "office"));
+    assert_eq!(doc.boards["a"].texts[0].link, Some("office".into()));
 }

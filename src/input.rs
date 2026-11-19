@@ -866,11 +866,13 @@ impl App {
         if self.mode != Mode::Edit {
             return;
         }
-        // `Ctrl`+click on a linked text goes to its board; a plain click keeps belonging to the tool.
+        // `Ctrl`+click on a linked text goes to its board; a plain click keeps belonging to the tool,
+        // and a link whose board is gone falls through to it.
         if self.ctrl
-            && let Some((index, board)) = self.linked_text_at(key, x, y)
+            && let Some((board, centre)) = self.linked_text_at(key, x, y)
+            && self.doc.boards.contains_key(&board)
         {
-            self.follow_link(key, index, &board);
+            self.follow_link(key, &board, centre);
             return;
         }
         if let Some(action) = self.toolbar_hit(key, x, y) {

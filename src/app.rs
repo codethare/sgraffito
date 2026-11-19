@@ -251,11 +251,6 @@ pub enum Target {
     Move,
 }
 
-/// Whether a press in the board list applies a target instead of switching the screen.
-pub fn applies_target(target: Option<Target>) -> bool {
-    target.is_some()
-}
-
 /// Whether the caret is on at `elapsed` since the edit began: on for one blink, off for the next.
 fn caret_visible(elapsed: Duration) -> bool {
     (elapsed.as_millis() / CARET_BLINK.as_millis()).is_multiple_of(2)
@@ -912,6 +907,8 @@ impl App {
         if self.boards_open == open {
             return;
         }
+        // A pending target lives only as long as the list that was opened to pick one.
+        self.target = None;
         self.more = false;
         self.size_open = false;
         self.boards_open = open;
@@ -1182,8 +1179,14 @@ impl App {
         self.refresh_toolbar();
     }
 
-    /// The linked text under a screen point on this output, with the board it links to.
-    pub(crate) fn linked_text_at(&mut self, key: &u32, x: f32, y: f32) -> Option<(usize, String)> {
+    /// The linked text under a screen point on this output: the board it links to and the canvas
+    /// point its centre sits on, which is where the view goes after the switch.
+    pub(crate) fn linked_text_at(
+        &mut self,
+        key: &u32,
+        x: f32,
+        y: f32,
+    ) -> Option<(String, [f32; 2])> {
         let out = self.outputs.get(key)?;
         let board_name = out.board.clone();
         let (scale, view) = (out.scale, out.view);
@@ -1192,18 +1195,18 @@ impl App {
         // The renderer and the document are separate fields, so the boxes can be measured while the
         // board is borrowed.
         let renderer = &mut self.renderer;
-        let index = ann.texts.iter().position(|text| {
-            text.link.is_some()
-                && renderer
-                    .text_edit_bounds(&text.text, text, Screen { scale, view })
-                    .contains(point[0], point[1])
+        let text = ann.linked_at(point, |text| {
+            renderer.text_edit_bounds(&text.text, text, Screen { scale, view })
         })?;
-        let board = ann.texts[index].link.clone()?;
-        Some((index, board))
+        let board = text.link.clone()?;
+        let bounds = text.paint_bounds();
+        let centre = [bounds.x + bounds.w / 2.0, bounds.y + bounds.h / 2.0];
+        Some((board, centre))
     }
 
-    /// Go to a linked text: switch this output to its board and put the text in the middle.
-    pub(crate) fn follow_link(&mut self, key: &u32, index: usize, board: &str) {
+    /// Go to a linked text: switch this output to its board and put the text in the middle. The centre
+    /// is the clicked text's, measured before the switch: after it, the same index names another text.
+    pub(crate) fn follow_link(&mut self, key: &u32, board: &str, centre: [f32; 2]) {
         if !self.switch_board(Some(*key), board) {
             return;
         }
@@ -1211,16 +1214,6 @@ impl App {
             return;
         };
         let size = (out.width as f32, out.height as f32);
-        let Some(text) = self
-            .doc
-            .boards
-            .get(board)
-            .and_then(|ann| ann.texts.get(index))
-        else {
-            return;
-        };
-        let bounds = text.paint_bounds();
-        let centre = [bounds.x + bounds.w / 2.0, bounds.y + bounds.h / 2.0];
         self.view_changed(*key, |view| *view = view.centred_on(size, centre));
     }
 
@@ -1505,11 +1498,21 @@ impl App {
     /// the whole surface, because nothing outside it changed.
     pub(crate) fn doc_changed_at(&mut self, key: u32, box_: Rect) {
         self.doc_changed();
+        let board = self.outputs.get(&key).map(|out| out.board.clone());
         if let Some(out) = self.outputs.get_mut(&key) {
             out.pending = Some(match out.pending {
                 Some(pending) => pending.union(box_),
                 None => box_,
             });
+        }
+        // Another screen can show the same board, and its raster was just dropped: without this it
+        // keeps the pixels of the document as it was until something else damages its region.
+        if let Some(board) = board {
+            for (other, out) in self.outputs.iter_mut() {
+                if *other != key && out.board == board {
+                    out.dirty = true;
+                }
+            }
         }
     }
 

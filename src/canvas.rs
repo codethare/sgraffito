@@ -231,8 +231,8 @@ pub struct TextItem {
     pub size: f32,
     pub text: String,
     /// The board this text links to, when it is a link: `Ctrl`+click follows it. Absent in a file
-    /// written before links existed.
-    #[serde(default)]
+    /// written before links existed, and not written when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<String>,
 }
 
@@ -425,7 +425,7 @@ impl Board {
     pub fn linked_at(
         &self,
         point: [f32; 2],
-        bounds: impl Fn(&TextItem) -> Rect,
+        mut bounds: impl FnMut(&TextItem) -> Rect,
     ) -> Option<&TextItem> {
         self.texts
             .iter()
@@ -1875,7 +1875,7 @@ impl Doc {
     /// gained. `None` when either board is missing, when both names are one board, or when nothing was
     /// there to move.
     pub fn move_items(&mut self, from: &str, to: &str, items: &[ItemId]) -> Option<(Rect, Rect)> {
-        if from == to || items.is_empty() {
+        if from == to || items.is_empty() || !self.boards.contains_key(to) {
             return None;
         }
         let copy = self.boards.get(from)?.copied(items);
@@ -1897,6 +1897,14 @@ impl Doc {
         self.boards.insert(new.to_string(), board);
         if self.active == old {
             self.active = new.to_string();
+        }
+        // A link names a board, so a renamed board takes the links that named it.
+        for board in self.boards.values_mut() {
+            for text in &mut board.texts {
+                if text.link.as_deref() == Some(old) {
+                    text.link = Some(new.to_string());
+                }
+            }
         }
         true
     }

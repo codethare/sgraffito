@@ -561,7 +561,7 @@ pub fn closes_panel_on_pick(action: ToolbarAction) -> bool {
     picks_from_panel(action)
         && !matches!(
             action,
-            ToolbarAction::SizeStep(_) | ToolbarAction::RenameBoard(_)
+            ToolbarAction::SizeStep(_) | ToolbarAction::RenameBoard(_) | ToolbarAction::Link
         )
 }
 
@@ -2310,6 +2310,9 @@ pub fn move_button_bounds(size: (f32, f32)) -> Rect {
     }
 }
 
+/// The box the transient overlay covers in canvas coordinates: a live stroke, shape or note, the
+/// eraser marker and the marquee, unioned. The selection frame and the interface are screen-space and
+/// are unioned in where the frame is reported, not here.
 pub fn transient_bounds(overlay: &Overlay) -> Option<Rect> {
     let stroke = overlay.stroke.as_ref().and_then(Stroke::paint_bounds);
     let shape = overlay.shape.as_ref().map(Shape::paint_bounds);
@@ -3854,11 +3857,16 @@ mod tests {
     /// `link` row is in the drawer, so the drawer's own list states it.
     #[test]
     fn a_pending_target_changes_what_a_board_row_press_does() {
-        assert!(crate::app::applies_target(Some(crate::app::Target::Link)));
-        assert!(crate::app::applies_target(Some(crate::app::Target::Move)));
-        assert!(!crate::app::applies_target(None));
         assert!(DRAWER.contains(&ToolbarAction::Link));
         assert!(picks_from_panel(ToolbarAction::Link));
+        // A pick out of the panel, but the one that opens the picker: closing it here would close the
+        // list the row just opened.
+        assert!(
+            !closes_panel_on_pick(ToolbarAction::Link),
+            "the link row closed the picker it opened"
+        );
+        assert!(!closes_panel_on_pick(ToolbarAction::RenameBoard(0)));
+        assert!(closes_panel_on_pick(ToolbarAction::DeleteBoard(0)));
     }
 
     /// The move button sits in the middle of the bottom of the canvas, inside the width on any screen,
