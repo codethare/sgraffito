@@ -117,6 +117,7 @@ fn text_item_draws_ink() {
             color: "#ffffff".into(),
             size: 32.0,
             text: "H".into(),
+            link: None,
         }],
     );
     Renderer::new().render(
@@ -185,6 +186,7 @@ fn overlay_text_box_draws_text_and_cursor() {
                 color: "#ffffff".into(),
                 size: 32.0,
                 text: "ab".into(),
+                link: None,
             },
             buffer: TextBuffer::new("ab"),
             index: None,
@@ -220,6 +222,7 @@ fn the_caret_spans_the_whole_line_box() {
                 color: "#ffffff".into(),
                 size: 32.0,
                 text: String::new(),
+                link: None,
             },
             buffer: TextBuffer::new(""),
             index: None,
@@ -257,6 +260,7 @@ fn preedit_renders_more_ink_than_committed_text_alone() {
         color: "#ffffff".into(),
         size: 32.0,
         text: "ab".into(),
+        link: None,
     };
     let mut plain = buffer(W, H);
     let mut with_preedit = buffer(W, H);
@@ -832,6 +836,7 @@ fn bounding_box_frame_is_pixel_identical_to_a_whole_surface_frame() {
             color: "#ffffff".into(),
             size: 18.0,
             text: "note".into(),
+            link: None,
         }],
     );
     let first = dot(100.0, 45.0);
@@ -965,6 +970,7 @@ fn long_text_damage_contains_everything_rasterised() {
             color: "#ffffff".into(),
             size: 24.0,
             text: "a long text line that exceeds the output width. ".repeat(3),
+            link: None,
         }],
     );
     let first = dot(100.0, 50.0);
@@ -1202,6 +1208,7 @@ fn edit_frame(w: u32, h: u32, text: &str, cursor: usize, preedit: &str) -> Vec<u
                 color: "#ffffff".into(),
                 size: 24.0,
                 text: text.into(),
+                link: None,
             },
             buffer: TextBuffer {
                 text: text.into(),
@@ -1288,6 +1295,7 @@ fn a_cjk_click_lands_inside_the_measured_box() {
         color: "#ffffff".into(),
         size: 24.0,
         text: "买牛奶".into(),
+        link: None,
     };
     let mut renderer = Renderer::new();
     let measured = renderer.text_edit_bounds(
@@ -1690,6 +1698,7 @@ fn the_default_view_draws_what_no_view_drew() {
             color: "#ffffff".into(),
             size: 20.0,
             text: "milk".into(),
+            link: None,
         }],
         shapes: vec![Shape {
             kind: ShapeKind::Circle,
@@ -3010,6 +3019,7 @@ fn cached_document() -> Board {
             color: "#ffffff".into(),
             size: 18.0,
             text: "cached".into(),
+            link: None,
         }],
         shapes: vec![],
         notes: vec![],

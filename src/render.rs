@@ -2358,6 +2358,7 @@ fn toolbar_text(x: f32, top: f32, height: f32, size: f32, color: &str, text: &st
         color: color.into(),
         size,
         text: text.into(),
+        link: None,
     }
 }
 
@@ -4021,6 +4022,7 @@ mod tests {
             color: "#ffffff".into(),
             size: 24.0,
             text: text.into(),
+            link: None,
         }
     }
 

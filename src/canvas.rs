@@ -227,6 +227,10 @@ pub struct TextItem {
     pub color: String,
     pub size: f32,
     pub text: String,
+    /// The board this text links to, when it is a link: `Ctrl`+click follows it. Absent in a file
+    /// written before links existed.
+    #[serde(default)]
+    pub link: Option<String>,
 }
 
 /// Padding between a note's text and its edges, its smallest side, the size a click creates, and the
@@ -316,6 +320,7 @@ impl Note {
             color: self.ink().to_string(),
             size: NOTE_TEXT_SIZE,
             text: self.text.clone(),
+            link: None,
         }
     }
 
@@ -456,41 +461,51 @@ impl Board {
     /// indices they had, so an element that is named elsewhere cannot be reached by a copy landing in the
     /// middle of the list.
     pub fn duplicate(&mut self, items: &[ItemId]) -> (Vec<ItemId>, Option<Rect>) {
-        let mut copies = Vec::with_capacity(items.len());
-        let mut box_: Option<Rect> = None;
+        let copy = self.copied(items);
+        self.append(&copy)
+    }
+
+    /// The named elements as their own board: a copy of each, in the order given, and none of the ones
+    /// that are not there. This is what a copy out of the document is, so it holds no ids into it.
+    pub fn copied(&self, items: &[ItemId]) -> Board {
+        let mut copy = Board::default();
         for id in items {
             match *id {
-                ItemId::Stroke(i) => {
-                    if let Some(s) = self.strokes.get(i).cloned() {
-                        copies.push(ItemId::Stroke(self.strokes.len()));
-                        union_into(&mut box_, s.paint_bounds());
-                        self.strokes.push(s);
-                    }
-                }
-                ItemId::Text(i) => {
-                    if let Some(t) = self.texts.get(i).cloned() {
-                        copies.push(ItemId::Text(self.texts.len()));
-                        union_into(&mut box_, Some(t.paint_bounds()));
-                        self.texts.push(t);
-                    }
-                }
-                ItemId::Shape(i) => {
-                    if let Some(s) = self.shapes.get(i).cloned() {
-                        copies.push(ItemId::Shape(self.shapes.len()));
-                        union_into(&mut box_, Some(s.paint_bounds()));
-                        self.shapes.push(s);
-                    }
-                }
-                ItemId::Note(i) => {
-                    if let Some(n) = self.notes.get(i).cloned() {
-                        copies.push(ItemId::Note(self.notes.len()));
-                        union_into(&mut box_, Some(n.bounds()));
-                        self.notes.push(n);
-                    }
-                }
+                ItemId::Stroke(i) => copy.strokes.extend(self.strokes.get(i).cloned()),
+                ItemId::Text(i) => copy.texts.extend(self.texts.get(i).cloned()),
+                ItemId::Shape(i) => copy.shapes.extend(self.shapes.get(i).cloned()),
+                ItemId::Note(i) => copy.notes.extend(self.notes.get(i).cloned()),
             }
         }
-        (copies, box_)
+        copy
+    }
+
+    /// Append every element of `other` to this board, naming the ids they were given and the box they
+    /// occupy here. One list per kind, so an element the selection does not hold cannot be reached.
+    pub fn append(&mut self, other: &Board) -> (Vec<ItemId>, Option<Rect>) {
+        let mut ids = Vec::new();
+        let mut box_: Option<Rect> = None;
+        for stroke in &other.strokes {
+            ids.push(ItemId::Stroke(self.strokes.len()));
+            union_into(&mut box_, stroke.paint_bounds());
+            self.strokes.push(stroke.clone());
+        }
+        for text in &other.texts {
+            ids.push(ItemId::Text(self.texts.len()));
+            union_into(&mut box_, Some(text.paint_bounds()));
+            self.texts.push(text.clone());
+        }
+        for shape in &other.shapes {
+            ids.push(ItemId::Shape(self.shapes.len()));
+            union_into(&mut box_, Some(shape.paint_bounds()));
+            self.shapes.push(shape.clone());
+        }
+        for note in &other.notes {
+            ids.push(ItemId::Note(self.notes.len()));
+            union_into(&mut box_, Some(note.bounds()));
+            self.notes.push(note.clone());
+        }
+        (ids, box_)
     }
 
     /// Recolour every element `items` names, returning the box they occupy, which is what the frame that
@@ -1787,11 +1802,32 @@ impl Doc {
             return None;
         }
         self.boards.remove(name);
+        // A link names a board, so the boards that survive drop the links pointing at this one.
+        for board in self.boards.values_mut() {
+            for text in &mut board.texts {
+                if text.link.as_deref() == Some(name) {
+                    text.link = None;
+                }
+            }
+        }
         let successor = self.boards.keys().next().cloned()?;
         if self.active == name {
             self.active = successor.clone();
         }
         Some(successor)
+    }
+
+    /// Move the named elements of `from` into `to`, reporting the box the source lost and the target
+    /// gained. `None` when either board is missing, when both names are one board, or when nothing was
+    /// there to move.
+    pub fn move_items(&mut self, from: &str, to: &str, items: &[ItemId]) -> Option<(Rect, Rect)> {
+        if from == to || items.is_empty() {
+            return None;
+        }
+        let copy = self.boards.get(from)?.copied(items);
+        let gone = self.boards.get_mut(from)?.remove(items)?;
+        let (_, gained) = self.boards.get_mut(to)?.append(&copy);
+        Some((gone, gained?))
     }
 
     /// Rename `old` to `new`, moving its drawing and the picked board with it. `false` when the new

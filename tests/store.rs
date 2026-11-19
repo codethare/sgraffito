@@ -30,6 +30,7 @@ fn sample() -> Doc {
                 color: "#ffffff".into(),
                 size: 18.0,
                 text: "买牛奶".into(), // CJK on purpose: multi-byte content must survive
+                link: None,
             }],
             shapes: vec![Shape {
                 kind: ShapeKind::Arrow,
@@ -77,7 +78,8 @@ fn saved_file_has_version_boards_and_the_picked_one() {
     doc.active = "eDP-1".into();
     store::save(&p, &doc).unwrap();
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-    assert_eq!(v["version"], 4);
+    // The store writes whatever version it is at: a bump is a format change, not a test failure.
+    assert_eq!(v["version"], store::VERSION);
     assert_eq!(v["active"], "eDP-1");
     assert_eq!(v["boards"]["eDP-1"]["strokes"][0]["points"][0][0], 12.0);
     assert_eq!(v["boards"]["eDP-1"]["texts"][0]["text"], "买牛奶"); // CJK survives the round trip
@@ -289,7 +291,8 @@ fn a_version_3_file_becomes_boards() {
     // The next save is the current version.
     store::save(&p, &doc).unwrap();
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-    assert_eq!(v["version"], 4);
+    // The store writes whatever version it is at: a bump is a format change, not a test failure.
+    assert_eq!(v["version"], store::VERSION);
     assert!(v["boards"]["eDP-1"].is_object());
 }
 
@@ -416,6 +419,7 @@ fn stepping_a_selection_steps_its_widths_and_text_sizes() {
             color: "#ffffff".into(),
             size: 18.0,
             text: "hi".into(),
+            link: None,
         }],
         shapes: vec![Shape {
             kind: ShapeKind::Rect,
@@ -470,6 +474,7 @@ fn a_size_step_at_the_bound_writes_nothing() {
             color: "#ffffff".into(),
             size: TEXT_SIZE_MAX,
             text: "hi".into(),
+            link: None,
         }],
         ..Default::default()
     };
@@ -507,6 +512,7 @@ fn a_shrinking_step_reports_the_ink_it_left() {
             color: "#ffffff".into(),
             size: 20.0,
             text: "hi".into(),
+            link: None,
         }],
         ..Default::default()
     };
@@ -540,6 +546,7 @@ fn a_mixed_selection_reports_only_what_changed() {
             color: "#ffffff".into(),
             size: 18.0,
             text: "hi".into(),
+            link: None,
         }],
         ..Default::default()
     };
@@ -605,4 +612,69 @@ fn a_rename_can_move_a_board_row() {
     assert_eq!(doc.names().cloned().collect::<Vec<_>>(), ["a", "z"]);
     assert!(doc.rename_board("a", "zz"));
     assert_eq!(doc.names().cloned().collect::<Vec<_>>(), ["z", "zz"]);
+}
+
+/// A link is the text's and it is written: a version 4 file has none, and a round trip keeps one.
+#[test]
+fn a_version_4_file_loads_and_a_link_survives_the_round_trip() {
+    let dir = tmpdir("links");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("annotations.json");
+    // Version 4: the same text, written before links existed.
+    std::fs::write(
+        &path,
+        r##"{"version":4,"boards":{"a":{"texts":[{"x":8,"y":8,"color":"#ffffff","size":18,"text":"next"}]}},"active":"a"}"##,
+    )
+    .unwrap();
+    let loaded = store::load(&path);
+    assert_eq!(loaded.boards["a"].texts[0].link, None);
+    let mut doc = loaded;
+    doc.boards.insert("b".into(), Board::default());
+    doc.boards.get_mut("a").unwrap().texts[0].link = Some("b".into());
+    store::save(&path, &doc).unwrap();
+    let again = store::load(&path);
+    assert_eq!(again.boards["a"].texts[0].link, Some("b".into()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A link names a board by name, so deleting that board must not leave texts pointing at nothing.
+#[test]
+fn a_link_to_a_deleted_board_is_dropped_with_the_board() {
+    let mut doc = Doc::default();
+    doc.boards.insert("a".into(), Board::default());
+    doc.boards.insert("b".into(), Board::default());
+    doc.boards.get_mut("a").unwrap().texts.push(TextItem {
+        x: 0.0,
+        y: 0.0,
+        color: "#ffffff".into(),
+        size: 18.0,
+        text: "go".into(),
+        link: Some("b".into()),
+    });
+    doc.delete_board("b");
+    assert_eq!(
+        doc.boards["a"].texts[0].link, None,
+        "a link to a gone board survived"
+    );
+}
+
+/// Elements moved to another board leave the first one, and each board reports the box it lost and
+/// gained.
+#[test]
+fn moving_elements_leaves_the_source_board_without_them() {
+    let mut doc = Doc::default();
+    doc.boards.insert("a".into(), Board::default());
+    doc.boards.insert("b".into(), Board::default());
+    doc.boards.get_mut("a").unwrap().strokes.push(Stroke {
+        color: "#ffffff".into(),
+        width: 3.0,
+        points: vec![[0.0, 0.0], [10.0, 10.0]],
+    });
+    assert!(doc.move_items("a", "b", &[ItemId::Stroke(0)]).is_some());
+    assert!(doc.boards["a"].strokes.is_empty(), "the source kept it");
+    assert_eq!(doc.boards["b"].strokes.len(), 1);
+    // Onto the board it is already on, a board that is not there, or nothing to move: no move.
+    assert!(doc.move_items("a", "a", &[ItemId::Stroke(0)]).is_none());
+    assert!(doc.move_items("a", "gone", &[ItemId::Stroke(0)]).is_none());
+    assert!(doc.move_items("a", "b", &[]).is_none());
 }

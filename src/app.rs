@@ -2200,6 +2200,7 @@ impl App {
                     color: crate::config::current().colors[self.color_idx].clone(),
                     size: self.text_size,
                     text: String::new(),
+                    link: None,
                 },
                 None,
             ),

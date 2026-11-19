@@ -11,12 +11,11 @@ use serde::{Deserialize, Serialize};
 use crate::canvas::{Board, Doc};
 
 /// The version this daemon writes. Version 1 had no `shapes` list, version 2 adds that, version 3
-/// adds the `notes` list, and version 4 keys the annotations by board name instead of output name and
-/// records the board picked last. All of them are
-/// read, because a version 1 file is a version 2 file with no shapes in it, and an older build
-/// reading a version 2 file would silently drop every shape on its next save — which is what the
-/// number is for.
-pub const VERSION: u32 = 4;
+/// adds the `notes` list, version 4 keys the annotations by board name instead of output name and
+/// records the board picked last, and version 5 adds a text's link. All of them are read, because a
+/// version 1 file is a version 2 file with no shapes in it, and an older build reading a version 2
+/// file would silently drop every shape on its next save — which is what the number is for.
+pub const VERSION: u32 = 5;
 /// The oldest version whose files still load.
 pub const MIN_VERSION: u32 = 1;
 pub const DEBOUNCE: Duration = Duration::from_secs(1);
