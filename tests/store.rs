@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use sgraffito::canvas::{
-    Board, Doc, ItemId, Note, PEN_WIDTH_MAX, Shape, ShapeKind, Stroke, TEXT_SIZE_MAX, TextItem,
-    View, stepped_size,
+    Board, Doc, ItemId, MAX_CLIP_BYTES, MAX_CLIP_ITEMS, Note, PEN_WIDTH_MAX, Shape, ShapeKind,
+    Stroke, TEXT_SIZE_MAX, TextItem, View, clipboard_fits, stepped_size,
 };
 use sgraffito::store::{self, Store};
 
@@ -693,4 +693,31 @@ fn going_to_a_link_centres_the_text() {
         centred.offset,
         [800.0 / 2.0 - 100.0 * 2.0, 600.0 / 2.0 - 50.0 * 2.0]
     );
+}
+
+/// A copy that would be too big is refused whole rather than trimmed: half a drawing pasted is worse
+/// than nothing.
+#[test]
+fn a_copy_over_the_cap_is_refused_whole() {
+    let mut board = Board::default();
+    assert!(clipboard_fits(&board));
+    board.strokes = (0..MAX_CLIP_ITEMS + 1)
+        .map(|i| Stroke {
+            color: "#fff".into(),
+            width: 3.0,
+            points: vec![[i as f32, 0.0]],
+        })
+        .collect();
+    assert!(!clipboard_fits(&board), "the element cap did not refuse it");
+    // One small copy of a very wordy text is refused by bytes, not by count.
+    let mut wordy = Board::default();
+    wordy.texts.push(TextItem {
+        x: 0.0,
+        y: 0.0,
+        color: "#fff".into(),
+        size: 18.0,
+        text: "x".repeat(MAX_CLIP_BYTES),
+        link: None,
+    });
+    assert!(!clipboard_fits(&wordy), "the byte cap did not refuse it");
 }

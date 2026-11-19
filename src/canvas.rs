@@ -394,6 +394,22 @@ pub struct Board {
     pub notes: Vec<Note>,
 }
 
+/// Most elements one copy may hold, and most bytes of JSON it may be. A clipboard is memory, not the
+/// file: this bounds the one case where a copy is a whole busy board.
+pub const MAX_CLIP_ITEMS: usize = 200;
+pub const MAX_CLIP_BYTES: usize = 1_000_000;
+
+/// How far a paste lands from where it was copied, so it is visible on top of its original.
+pub const COPY_OFFSET: f32 = 12.0;
+
+/// Whether a copy may be taken. Both limits, because a few huge strokes and a thousand tiny ones are
+/// the same problem seen two ways.
+pub fn clipboard_fits(board: &Board) -> bool {
+    let items = board.strokes.len() + board.texts.len() + board.shapes.len() + board.notes.len();
+    items <= MAX_CLIP_ITEMS
+        && serde_json::to_vec(board).is_ok_and(|json| json.len() <= MAX_CLIP_BYTES)
+}
+
 /// The text a link press would link: the one text box held, and nothing else. `None` when nothing is
 /// held, more than one thing is, or the held thing is not a text box.
 pub fn link_source(ann: &Board, items: &[ItemId]) -> Option<usize> {

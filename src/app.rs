@@ -366,6 +366,9 @@ pub struct App {
     pub(crate) boards_open: bool,
     /// Whether the rail's width list is open. The readout toggles it; one at a time like the others.
     pub(crate) size_open: bool,
+    /// The app's own clipboard: a copy of the elements copied out of a board, not ids into it, so it
+    /// survives a switch and a delete. Session state, capped, never written.
+    pub(crate) clip: Option<Board>,
     /// What the open board list is picking for, when it is picking a target rather than a screen.
     pub(crate) target: Option<Target>,
     /// The board's name being edited in the list, if any. A name is typed where it is read, so this is
@@ -463,6 +466,7 @@ impl App {
             shared: false,
             boards_open: false,
             size_open: false,
+            clip: None,
             target: None,
             rename: None,
             panel_open_since: None,
@@ -910,6 +914,81 @@ impl App {
         self.toolbar_hover = None;
         self.toolbar_hover_since = None;
         self.refresh_toolbar();
+    }
+
+    /// Whether any output holds a selection.
+    pub(crate) fn selection_held(&self) -> bool {
+        self.outputs
+            .values()
+            .any(|out| out.overlay.selection.is_some())
+    }
+
+    /// Copy the held elements into the app's own clipboard. Over the cap, nothing is copied.
+    pub(crate) fn copy_selection(&mut self) {
+        let Some(key) = self.keyboard_focus else {
+            return;
+        };
+        let Some((board_name, items)) = self.held(key) else {
+            return;
+        };
+        let Some(ann) = self.doc.boards.get(&board_name) else {
+            return;
+        };
+        let copy = ann.copied(&items);
+        if !crate::canvas::clipboard_fits(&copy) {
+            log("copy refused: too large for the clipboard");
+            return;
+        }
+        self.clip = Some(copy);
+        log(&format!("copied {} elements", items.len()));
+    }
+
+    /// Paste the clipboard onto the board this screen shows, a little offset, and hand the selection to
+    /// the copies so a paste can be moved at once.
+    pub(crate) fn paste_selection(&mut self) {
+        let Some(clip) = self.clip.clone() else {
+            return;
+        };
+        let Some(key) = self.keyboard_focus else {
+            return;
+        };
+        let Some(out) = self.outputs.get(&key) else {
+            return;
+        };
+        let board_name = out.board.clone();
+        let mut shifted = clip;
+        let offset = crate::canvas::COPY_OFFSET;
+        for stroke in &mut shifted.strokes {
+            for point in &mut stroke.points {
+                point[0] += offset;
+                point[1] += offset;
+            }
+        }
+        for text in &mut shifted.texts {
+            text.x += offset;
+            text.y += offset;
+        }
+        for shape in &mut shifted.shapes {
+            shape.from[0] += offset;
+            shape.to[0] += offset;
+            shape.from[1] += offset;
+            shape.to[1] += offset;
+        }
+        for note in &mut shifted.notes {
+            note.x += offset;
+            note.y += offset;
+        }
+        let Some(ann) = self.doc.boards.get_mut(&board_name) else {
+            return;
+        };
+        let (ids, box_) = ann.append(&shifted);
+        if ids.is_empty() {
+            return;
+        }
+        self.set_selection(key, ids, None);
+        if let Some(box_) = box_ {
+            self.doc_changed_at(key, box_);
+        }
     }
 
     /// The board an output shows and the elements it holds, if it holds any.

@@ -410,6 +410,21 @@ impl KeyboardHandler for App {
             }
             return;
         }
+        // With something held and nothing being typed into, the clipboard is the app's own: a paste of
+        // a drawing is not a paste of text.
+        if self.ctrl && self.edit_target().is_none() {
+            match event.keysym {
+                Keysym::c | Keysym::C if self.selection_held() => {
+                    self.copy_selection();
+                    return;
+                }
+                Keysym::v | Keysym::V if self.clip.is_some() => {
+                    self.paste_selection();
+                    return;
+                }
+                _ => {}
+            }
+        }
         if event.keysym == Keysym::Escape {
             self.escape();
         } else if deletes_selection(event.keysym) {
