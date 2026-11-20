@@ -151,3 +151,12 @@ fn backspace_deletes_before_the_caret_only() {
     // "牛" is gone, the caret moved back with it, and the text after the caret stays.
     assert_eq!(b.surrounding(), ("买奶!", 1));
 }
+
+#[test]
+fn up_from_the_second_line_reaches_the_first_lines_end() {
+    let mut b = TextBuffer::new("ab\ncd");
+    assert!(b.move_cursor(Caret::Up));
+    assert_eq!(b.surrounding(), ("ab\ncd", 2));
+    assert!(b.move_cursor(Caret::Down));
+    assert_eq!(b.surrounding(), ("ab\ncd", 5));
+}

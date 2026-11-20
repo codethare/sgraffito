@@ -4,7 +4,7 @@
 
 use std::borrow::Cow;
 
-use cosmic_text::{Attrs, Buffer, Color, FontSystem, Metrics, Shaping, SwashCache, Wrap};
+use cosmic_text::{Attrs, Buffer, Color, Cursor, FontSystem, Metrics, Shaping, SwashCache, Wrap};
 use tiny_skia::{
     Color as SkColor, LineCap, LineJoin, Paint, PathBuilder, Pixmap, PixmapMut,
     PremultipliedColorU8, Stroke as SkStroke, Transform,
@@ -2850,9 +2850,9 @@ struct CaretGeometry {
 }
 
 /// Place the caret at a byte offset in the shaped text, and the preedit that starts there. The
-/// offset belongs to one of the lines cosmic-text laid out; an offset past every glyph of a line
-/// is that line's end, which is where a caret with nothing after it belongs. The last line is the
-/// fallback, so a caret at the end of the text lands exactly where it used to always be drawn.
+/// offset is resolved to a paragraph and a byte within it before cosmic-text is asked for a
+/// position: glyph offsets inside a `LayoutRun` are line-local, so comparing them with a whole-text
+/// offset put every caret on the last line.
 fn caret_geometry(prepared: &PreparedText, at: usize, preedit_len: usize) -> CaretGeometry {
     let mut geometry = CaretGeometry {
         x: prepared.line_w,
@@ -2861,37 +2861,37 @@ fn caret_geometry(prepared: &PreparedText, at: usize, preedit_len: usize) -> Car
         baseline: prepared.baseline,
         preedit: None,
     };
-    // The caret sits after the preedit while one is being composed, which is where the text
-    // being composed grows from; the underline covers the preedit itself.
-    let caret_at = at + preedit_len;
-    // A run's glyph offsets are byte offsets into the whole buffer, and `run.text` is that whole text
-    // rather than the line's, so the line a caret byte belongs to is the last line that starts at or
-    // before it. Taking the line from `run.text.len()` instead put every wrapped line after the first
-    // one at the wrong offset, so the caret was found on no line at all and fell back to the far right
-    // of the last line — the caret that stuck to the right edge of a wrapped note.
-    let mut line_start = 0;
-    for run in prepared.buffer.layout_runs() {
-        if let Some(first) = run.glyphs.first() {
-            line_start = first.start;
-        }
-        if line_start > caret_at {
+    // The buffer's lines are the paragraphs the newlines split; `at` is a byte into the whole text.
+    let mut line = 0;
+    let mut index = at;
+    while let Some(buffer_line) = prepared.buffer.lines.get(line) {
+        let len = buffer_line.text().len();
+        if index <= len {
             break;
         }
-        // The last line that starts at or before the caret is the caret's line, so every run that
-        // starts before it overwrites the geometry.
-        geometry.x = run
-            .glyphs
-            .iter()
-            .find(|glyph| glyph.start >= caret_at)
-            .map_or(run.line_w, |glyph| glyph.x);
+        index = index.saturating_sub(len + 1);
+        line += 1;
+    }
+    let cursor = Cursor::new(line, index);
+    let mut found = false;
+    for run in prepared.buffer.layout_runs() {
+        if run.line_i != line {
+            continue;
+        }
+        // A wrapped paragraph has several runs; only the run that holds the cursor answers.
+        let Some(x) = run.cursor_position(&cursor) else {
+            continue;
+        };
+        geometry.x = x;
         geometry.top = run.line_top;
         geometry.height = run.line_height;
         geometry.baseline = run.line_y;
+        found = true;
         if preedit_len > 0 {
             for glyph in run
                 .glyphs
                 .iter()
-                .filter(|glyph| glyph.start >= at && glyph.start < at + preedit_len)
+                .filter(|glyph| glyph.start >= index && glyph.start < index + preedit_len)
             {
                 let (x0, x1) = (glyph.x, glyph.x + glyph.w);
                 geometry.preedit = Some(match geometry.preedit {
@@ -2900,6 +2900,14 @@ fn caret_geometry(prepared: &PreparedText, at: usize, preedit_len: usize) -> Car
                 });
             }
         }
+        break;
+    }
+    if !found && let Some(run) = prepared.buffer.layout_runs().last() {
+        // A cursor past the last line still belongs at the end of the text.
+        geometry.x = run.line_w;
+        geometry.top = run.line_top;
+        geometry.height = run.line_height;
+        geometry.baseline = run.line_y;
     }
     geometry
 }

@@ -3908,3 +3908,13 @@ fn a_link_draws_an_underline_and_the_move_button_is_bottom_centred() {
         assert!(box_.y + box_.h < size.1);
     }
 }
+
+#[test]
+fn the_caret_moves_between_explicit_lines() {
+    let (w, h) = (200u32, 120u32);
+    // Same text, caret on the first and on the second line: the frames must differ in where the
+    // caret is painted, not only in the text.
+    let first = edit_frame(w, h, "ab\ncd", 2, "");
+    let second = edit_frame(w, h, "ab\ncd", 5, "");
+    assert_ne!(first, second, "the caret did not move to another line");
+}
