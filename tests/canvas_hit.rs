@@ -1870,6 +1870,7 @@ fn a_connector_snaps_to_a_shape_and_follows_both_endpoints() {
     let preview = board.connector_preview(
         &[ItemId::Shape(1)],
         sgraffito::canvas::Transform::Translate { dx: 10.0, dy: 0.0 },
+        &[],
     );
     let live = preview
         .iter()
@@ -1932,4 +1933,42 @@ fn a_shape_id_is_unique_and_connectors_are_remapped_on_a_copy() {
     legacy.ensure_shape_ids();
     assert!(legacy.shapes.iter().all(|shape| shape.id != 0));
     assert_ne!(legacy.shapes[0].id, legacy.shapes[1].id);
+}
+
+#[test]
+fn a_moved_shape_snaps_to_a_free_connector_end() {
+    use sgraffito::canvas::{ReverseSnap, Shape, ShapeKind, Transform};
+    let mut board = Board::default();
+    board.add_shape(shape(ShapeKind::Rect, [0.0, 0.0], [100.0, 100.0]));
+    let shape_id = board.shapes[0].id;
+    board.add_shape(Shape {
+        kind: ShapeKind::Line,
+        color: "#000000".into(),
+        width: 2.0,
+        from: [100.0, 50.0],
+        to: [300.0, 50.0],
+        id: 0,
+        attach: [None, None],
+    });
+    // The free end sits on the rect's right edge. A 10 px drag puts the end just inside the
+    // outline, within the magnetic radius: the shape is pulled back onto the end and the link is
+    // recorded.
+    let snap: ReverseSnap = board
+        .reverse_snap(
+            &[ItemId::Shape(0)],
+            Transform::Translate { dx: 10.0, dy: 0.0 },
+            12.0,
+        )
+        .expect("the free end did not attract the shape");
+    assert_eq!(snap.connector, ItemId::Shape(1));
+    assert_eq!(snap.end, 0);
+    assert_eq!(snap.attachment.shape, shape_id);
+    assert_eq!(snap.attachment.at, [1.0, 0.0]);
+    assert_eq!(snap.transform, Transform::Translate { dx: 0.0, dy: 0.0 });
+
+    // Applying that link is what the release does: the connector end stays exactly on the edge.
+    board.shapes[0] = snap.transform.shape(&board.shapes[0]);
+    board.shapes[1].attach[snap.end] = Some(snap.attachment);
+    board.sync_connectors();
+    assert_eq!(board.shapes[1].from, [100.0, 50.0]);
 }

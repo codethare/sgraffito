@@ -297,6 +297,16 @@ impl LiveConnector {
     }
 }
 
+/// A moved shape that has met a free connector end: the corrected translation, the end it met and
+/// the attachment the release should write.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReverseSnap {
+    pub transform: Transform,
+    pub connector: ItemId,
+    pub end: usize,
+    pub attachment: Attachment,
+}
+
 /// How close a pointer must come to a closed shape, in logical pixels, before a connector end
 /// sticks to it.
 pub const SNAP_RADIUS: f32 = 12.0;
@@ -634,8 +644,19 @@ impl Board {
     /// The live copies of every attached connector for a drag of `items` by `transform`. The
     /// raster keeps the committed connectors, so the overlay paints these in their place; the free
     /// endpoints still take the same transform as the selected elements.
-    pub fn connector_preview(&self, items: &[ItemId], transform: Transform) -> Vec<LiveConnector> {
+    pub fn connector_preview(
+        &self,
+        items: &[ItemId],
+        transform: Transform,
+        pending: &[(ItemId, usize, Attachment)],
+    ) -> Vec<LiveConnector> {
         let selected = |id: ItemId| items.contains(&id);
+        let pending_at = |id: ItemId, end: usize| {
+            pending
+                .iter()
+                .find(|(connector, index, _)| *connector == id && *index == end)
+                .map(|(_, _, attachment)| *attachment)
+        };
         let shapes: BTreeMap<u64, Shape> = self
             .shapes
             .iter()
@@ -652,15 +673,21 @@ impl Board {
             .collect();
         let mut live = Vec::new();
         for (index, stroke) in self.strokes.iter().enumerate() {
-            if stroke.attach == [None, None] {
+            let id = ItemId::Stroke(index);
+            let pending = [pending_at(id, 0), pending_at(id, 1)];
+            if stroke.attach == [None, None] && pending == [None, None] {
                 continue;
             }
-            let id = ItemId::Stroke(index);
             let mut copy = if selected(id) {
                 transform.stroke(stroke)
             } else {
                 stroke.clone()
             };
+            for (end, attachment) in pending.iter().enumerate() {
+                if let Some(attachment) = attachment {
+                    copy.attach[end] = Some(*attachment);
+                }
+            }
             if !copy.points.is_empty() {
                 if let Some(attachment) = copy.attach[0]
                     && let Some(shape) = shapes.get(&attachment.shape)
@@ -677,15 +704,21 @@ impl Board {
             live.push(LiveConnector::Stroke(id, copy));
         }
         for (index, shape) in self.shapes.iter().enumerate() {
-            if shape.kind.is_closed() || shape.attach == [None, None] {
+            let id = ItemId::Shape(index);
+            let pending = [pending_at(id, 0), pending_at(id, 1)];
+            if shape.kind.is_closed() || (shape.attach == [None, None] && pending == [None, None]) {
                 continue;
             }
-            let id = ItemId::Shape(index);
             let mut copy = if selected(id) {
                 transform.shape(shape)
             } else {
                 shape.clone()
             };
+            for (end, attachment) in pending.iter().enumerate() {
+                if let Some(attachment) = attachment {
+                    copy.attach[end] = Some(*attachment);
+                }
+            }
             if let Some(attachment) = copy.attach[0]
                 && let Some(target) = shapes.get(&attachment.shape)
             {
@@ -699,6 +732,98 @@ impl Board {
             live.push(LiveConnector::Shape(id, copy));
         }
         live
+    }
+
+    /// Let a moved closed shape meet the nearest free connector end. Returns the corrected
+    /// translation and the link to write on release. `items` is the selection; connectors that are
+    /// part of it are not candidates, because they move with the shape.
+    pub fn reverse_snap(
+        &self,
+        items: &[ItemId],
+        transform: Transform,
+        tolerance: f32,
+    ) -> Option<ReverseSnap> {
+        let Transform::Translate { dx, dy } = transform else {
+            return None;
+        };
+        let selected = |id: ItemId| items.contains(&id);
+        let mut best: Option<(f32, ReverseSnap)> = None;
+        let consider = |point: [f32; 2],
+                        connector: ItemId,
+                        end: usize,
+                        preview: &Shape,
+                        best: &mut Option<(f32, ReverseSnap)>| {
+            let Some(snapped) = preview.nearest_boundary(point) else {
+                return;
+            };
+            let distance = (point[0] - snapped[0]).hypot(point[1] - snapped[1]);
+            if distance > tolerance || best.is_some_and(|(nearest, _)| distance >= nearest) {
+                return;
+            }
+            best.replace((
+                distance,
+                ReverseSnap {
+                    transform: Transform::Translate {
+                        dx: dx + point[0] - snapped[0],
+                        dy: dy + point[1] - snapped[1],
+                    },
+                    connector,
+                    end,
+                    attachment: preview.attachment_at(snapped),
+                },
+            ));
+        };
+        for (index, shape) in self.shapes.iter().enumerate() {
+            if !selected(ItemId::Shape(index)) || !shape.kind.is_closed() || shape.id == 0 {
+                continue;
+            }
+            let preview = transform.shape(shape);
+            for (connector_index, connector) in self.shapes.iter().enumerate() {
+                if connector.kind.is_closed() || selected(ItemId::Shape(connector_index)) {
+                    continue;
+                }
+                for end in 0..2 {
+                    if connector.attach[end].is_some() {
+                        continue;
+                    }
+                    let point = if end == 0 {
+                        connector.from
+                    } else {
+                        connector.to
+                    };
+                    consider(
+                        point,
+                        ItemId::Shape(connector_index),
+                        end,
+                        &preview,
+                        &mut best,
+                    );
+                }
+            }
+            for (stroke_index, stroke) in self.strokes.iter().enumerate() {
+                if selected(ItemId::Stroke(stroke_index)) || stroke.points.is_empty() {
+                    continue;
+                }
+                for end in 0..2 {
+                    if stroke.attach[end].is_some() {
+                        continue;
+                    }
+                    let point = if end == 0 {
+                        stroke.points[0]
+                    } else {
+                        *stroke.points.last().unwrap_or(&stroke.points[0])
+                    };
+                    consider(
+                        point,
+                        ItemId::Stroke(stroke_index),
+                        end,
+                        &preview,
+                        &mut best,
+                    );
+                }
+            }
+        }
+        best.map(|(_, snap)| snap)
     }
 
     /// The linked text under a point, measured with the renderer's boxes rather than the font-size

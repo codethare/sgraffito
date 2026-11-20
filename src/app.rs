@@ -343,6 +343,9 @@ pub struct App {
     pub(crate) alt: bool,
     /// The copy the gesture in flight made, while it is still part of that gesture.
     pending_duplicate: Option<Duplicate>,
+    /// A connector end that a shape has magnetically met during the drag, written when the gesture
+    /// lands. Indices are valid until the gesture ends, like the selection's.
+    pub(crate) pending_links: Vec<PendingLink>,
     /// Whether the drawer of rarely used controls is open. Transient, like the selection.
     pub(crate) more: bool,
     /// What edit mode paints behind the document. A preference about reading, so it is not persisted.
@@ -398,6 +401,15 @@ pub(crate) struct PinchState {
     /// The cumulative scale of the last update: the protocol reports scale relative to the start, so
     /// consecutive updates need a ratio rather than a product.
     pub(crate) scale: f32,
+}
+
+/// A connector end that a moved shape has come within the magnetic radius of. Applied to the
+/// document only when the drag is released, so an abandoned drag changes nothing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PendingLink {
+    pub connector: ItemId,
+    pub end: usize,
+    pub attachment: Attachment,
 }
 
 /// The copy an `Alt` drag made: what was added to the document and what it was copied from, so `Esc` can
@@ -488,6 +500,7 @@ impl App {
             shift: false,
             alt: false,
             pending_duplicate: None,
+            pending_links: Vec::new(),
             more: false,
             backdrop: Backdrop::Black,
             pan: None,
@@ -1626,6 +1639,7 @@ impl App {
     pub(crate) fn cancel_transient(&mut self, key: u32) {
         self.note_origin = None;
         self.note_sized = false;
+        self.pending_links.clear();
         let Some(out) = self.outputs.get_mut(&key) else {
             return;
         };
@@ -1748,7 +1762,7 @@ impl App {
             }
             return;
         }
-        let Some(transform) = gesture.transform(at, self.shift) else {
+        let Some(mut transform) = gesture.transform(at, self.shift) else {
             return;
         };
         // An `Alt` drag copies what it holds and then drags the copy, leaving the original where it was.
@@ -1765,7 +1779,25 @@ impl App {
         {
             self.duplicate_selection(key);
         }
-        let next = (!transform.is_identity()).then_some(transform);
+        // A moved closed shape can meet a free connector end from its own side too. The correction
+        // is part of the transform the frame draws, so the shape visibly lands on the end.
+        let old_links = std::mem::take(&mut self.pending_links);
+        if matches!(gesture, Gesture::Move { .. }) && !transform.is_identity() {
+            let items = self
+                .outputs
+                .get(&key)
+                .and_then(|out| out.overlay.selection.as_ref())
+                .map(|selection| selection.items.clone())
+                .unwrap_or_default();
+            let (snapped, links) = self.snap_moved_shape(&key, &items, transform);
+            transform = snapped;
+            self.pending_links = links;
+        } else {
+            self.pending_links.clear();
+        }
+        let links_changed = old_links != self.pending_links;
+        let next =
+            (!transform.is_identity() || !self.pending_links.is_empty()).then_some(transform);
         let changed = {
             let Some(out) = self.outputs.get_mut(&key) else {
                 return;
@@ -1782,8 +1814,36 @@ impl App {
                 true
             }
         };
-        if changed {
+        if changed || links_changed {
             self.refresh_live_connectors(key);
+        }
+    }
+
+    /// While a closed shape is moved, let it meet a free connector end halfway: the translation is
+    /// corrected so the shape's outline lands exactly on the end, and the attachment is kept for the
+    /// release. Only a move translates; a resize or turn is not a magnetic gesture.
+    fn snap_moved_shape(
+        &self,
+        key: &u32,
+        items: &[ItemId],
+        transform: Transform,
+    ) -> (Transform, Vec<PendingLink>) {
+        let Some(out) = self.outputs.get(key) else {
+            return (transform, Vec::new());
+        };
+        let Some(board) = self.doc.boards.get(out.board()) else {
+            return (transform, Vec::new());
+        };
+        match board.reverse_snap(items, transform, SNAP_RADIUS / out.view.zoom) {
+            Some(snap) => (
+                snap.transform,
+                vec![PendingLink {
+                    connector: snap.connector,
+                    end: snap.end,
+                    attachment: snap.attachment,
+                }],
+            ),
+            None => (transform, Vec::new()),
         }
     }
 
@@ -1800,11 +1860,16 @@ impl App {
             }
             return;
         };
+        let pending: Vec<_> = self
+            .pending_links
+            .iter()
+            .map(|link| (link.connector, link.end, link.attachment))
+            .collect();
         let connectors = self
             .doc
             .boards
             .get(&board_name)
-            .map(|board| board.connector_preview(&items, transform))
+            .map(|board| board.connector_preview(&items, transform, &pending))
             .unwrap_or_default();
         if let Some(out) = self.outputs.get_mut(&key) {
             out.overlay.connectors = connectors;
@@ -2070,6 +2135,7 @@ impl App {
         // The record names indices, and a selection that has gone is not a gesture that can still be
         // taken back: keeping it would let a later `Esc` remove whatever the indices point at then.
         self.pending_duplicate = None;
+        self.pending_links.clear();
         let mut dropped = false;
         for out in self.outputs.values_mut() {
             let had = out.overlay.selection.take().is_some() | out.overlay.marquee.take().is_some();
@@ -2147,6 +2213,7 @@ impl App {
     /// Hold `items` on one output and let go everywhere else: at most one selection exists at a
     /// time, the way at most one text box is under edit.
     fn set_selection(&mut self, key: u32, items: Vec<ItemId>, transform: Option<Transform>) {
+        self.pending_links.clear();
         let owned =
             (!items.is_empty() || transform.is_some()).then_some(Selection { items, transform });
         for (k, out) in self.outputs.iter_mut() {
@@ -2199,6 +2266,7 @@ impl App {
             return;
         };
         let (items, board_name) = (selection.items.clone(), out.board().to_string());
+        let links = std::mem::take(&mut self.pending_links);
         let mut box_: Option<Rect> = None;
         if let Some(ann) = self.doc.boards.get_mut(&board_name) {
             for id in &items {
@@ -2237,6 +2305,28 @@ impl App {
                     (Some(a), Some(b)) => Some(a.union(b)),
                     (a, b) => a.or(b),
                 };
+            }
+            // A shape that met a free end during the drag takes that end now: the attachment is written
+            // first, then the same sync pass seats both endpoints on their shapes.
+            for link in &links {
+                let before = match link.connector {
+                    ItemId::Stroke(i) if i < ann.strokes.len() => ann.strokes[i].paint_bounds(),
+                    ItemId::Shape(i) if i < ann.shapes.len() => Some(ann.shapes[i].paint_bounds()),
+                    _ => None,
+                };
+                box_ = match (box_, before) {
+                    (Some(a), Some(b)) => Some(a.union(b)),
+                    (a, b) => a.or(b),
+                };
+                match link.connector {
+                    ItemId::Stroke(i) if i < ann.strokes.len() => {
+                        ann.strokes[i].attach[link.end] = Some(link.attachment);
+                    }
+                    ItemId::Shape(i) if i < ann.shapes.len() => {
+                        ann.shapes[i].attach[link.end] = Some(link.attachment);
+                    }
+                    _ => {}
+                }
             }
             // A moved shape drags every connector attached to it, whether or not the connector was
             // part of the selection. Both endpoints are re-seated on their shapes here, once, on the
