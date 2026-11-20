@@ -66,7 +66,7 @@ pub fn load(path: &Path) -> Doc {
         Ok(raw) => raw,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Doc::default(),
         Err(e) => {
-            eprintln!("[sgraffito] failed to read {}: {e}", path.display());
+            crate::log::write(&format!("failed to read {}: {e}", path.display()));
             return Doc::default();
         }
     };
@@ -99,12 +99,12 @@ pub fn load(path: &Path) -> Doc {
 fn backup(path: &Path, reason: &str) {
     let bak = path.with_extension("json.bak");
     match fs::rename(path, &bak) {
-        Ok(()) => eprintln!(
-            "[sgraffito] {} is unusable ({reason}), backed up to {}",
+        Ok(()) => crate::log::write(&format!(
+            "{} is unusable ({reason}), backed up to {}",
             path.display(),
             bak.display()
-        ),
-        Err(e) => eprintln!("[sgraffito] failed to back up {}: {e}", path.display()),
+        )),
+        Err(e) => crate::log::write(&format!("failed to back up {}: {e}", path.display())),
     }
 }
 

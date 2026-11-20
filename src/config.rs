@@ -70,9 +70,7 @@ fn load() -> Config {
     match path() {
         Some(path) => load_from(&path),
         None => {
-            eprintln!(
-                "[sgraffito] config: neither $XDG_CONFIG_HOME nor $HOME is set; using defaults"
-            );
+            crate::log::write("config: neither $XDG_CONFIG_HOME nor $HOME is set; using defaults");
             Config::default()
         }
     }
@@ -85,20 +83,20 @@ pub fn load_from(path: &Path) -> Config {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Config::default(),
         Err(e) => {
-            eprintln!(
-                "[sgraffito] config: cannot read {}: {e}; using defaults",
+            crate::log::write(&format!(
+                "config: cannot read {}: {e}; using defaults",
                 path.display()
-            );
+            ));
             return Config::default();
         }
     };
     let file: File = match toml::from_str(&raw) {
         Ok(file) => file,
         Err(e) => {
-            eprintln!(
-                "[sgraffito] config: {} is not valid TOML: {e}; using defaults",
+            crate::log::write(&format!(
+                "config: {} is not valid TOML: {e}; using defaults",
                 path.display()
-            );
+            ));
             return Config::default();
         }
     };
@@ -109,27 +107,26 @@ pub fn load_from(path: &Path) -> Config {
         if border.is_finite() && border >= 0.0 {
             config.border = border;
         } else {
-            eprintln!(
-                "[sgraffito] config: border must be a finite, non-negative number; using {}",
-                DEFAULT_BORDER
-            );
+            crate::log::write(&format!(
+                "config: border must be a finite, non-negative number; using {DEFAULT_BORDER}"
+            ));
         }
     }
     if let Some(colors) = file.colors {
         if colors.len() != COLOR_COUNT {
-            eprintln!(
-                "[sgraffito] config: colors takes exactly {COLOR_COUNT} entries, not {}; keeping the defaults",
+            crate::log::write(&format!(
+                "config: colors takes exactly {COLOR_COUNT} entries, not {}; keeping the defaults",
                 colors.len()
-            );
+            ));
         } else {
             for (index, raw) in colors.iter().enumerate() {
                 match parse_color(raw) {
                     Some(color) => config.colors[index] = color,
-                    None => eprintln!(
-                        "[sgraffito] config: colour {} `{raw}` is not hex, rgb/rgba or hsl/hsla; using {}",
+                    None => crate::log::write(&format!(
+                        "config: colour {} `{raw}` is not hex, rgb/rgba or hsl/hsla; using {}",
                         index + 1,
                         config.colors[index]
-                    ),
+                    )),
                 }
             }
         }

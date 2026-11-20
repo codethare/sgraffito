@@ -160,6 +160,14 @@ The pointer follows the armed tool through `wp_cursor_shape_v1`: a crosshair for
 - `backdrop` (`B`) cycles transparent → grid → dots → dim → transparent. Its four mode buttons sit in one horizontal row to the right of the row, joined by a hairline at their middle; each button picks that mode and leaves the drawer open.
 - The grid uses a 24-point cell with a one-point line; the dot matrix uses the same 24-point spacing with two-point dots. Both pan and zoom with the drawing and are painted mid-grey at partial opacity, so they read over light and dark wallpapers without dimming it. `dim` is the previous black 90% scrim.
 
+## Logs
+
+Errors and state changes go to stderr and to `$XDG_STATE_HOME/sgraffito/sgraffito.log` (default `~/.local/state/sgraffito/sgraffito.log`), the XDG location for state that survives a run.
+
+- One file holds at most 1 MiB and three older files are kept, so the log never exceeds 4 MiB. 1 MiB × 3 rotations is the usual small-daemon bound; the size is checked as each line is written, and a file left over the cap is rotated when the daemon starts.
+- Each event is one line: an ISO date and UTC time, `[sgraffito]`, then the message. Newlines in a message are escaped and a single message is capped at 8 KiB, so one large error cannot fill a generation.
+- Panics are recorded with their location before the default panic output. If the file cannot be opened or written, the daemon keeps running and keeps logging to stderr.
+
 ## Data
 
 `$XDG_DATA_HOME/sgraffito/annotations.json` (default `~/.local/share/sgraffito/`):

@@ -3295,7 +3295,7 @@ fn apply_input_region(compositor: &CompositorState, surface: &wl_surface::WlSurf
 }
 
 pub fn log(msg: &str) {
-    eprintln!("[sgraffito] {msg}");
+    crate::log::write(msg);
 }
 
 impl CompositorHandler for App {

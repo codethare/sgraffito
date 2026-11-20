@@ -233,6 +233,7 @@ fn spawn_control_server(
 }
 
 fn run_daemon() -> anyhow::Result<()> {
+    sgraffito::log::init();
     let path = socket_path()?;
     // Exit if a daemon is already running; otherwise reuse the path after removing a stale socket.
     if UnixStream::connect(&path).is_ok() {
