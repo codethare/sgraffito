@@ -62,8 +62,8 @@ use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::ZwpTextIn
 
 use crate::input::{Nav, PinchData};
 use crate::render::{
-    DamageRegion, FrameCache, Renderer, Screen, buffer_format, move_button_bounds, toolbar_bounds,
-    transient_bounds, transient_damage,
+    DamageRegion, FrameCache, Renderer, Screen, buffer_format, move_button_bounds,
+    snap_hint_bounds, toolbar_bounds, transient_bounds, transient_damage,
 };
 use crate::store::{self, Store};
 
@@ -3062,6 +3062,15 @@ impl App {
         let board_name = out.board();
         let empty = Board::default();
         let ann = self.doc.boards.get(board_name).unwrap_or(&empty);
+        // The accent outline and the anchor dots are overlay content too: a snap that ends must
+        // damage them so the previous frame's highlight is painted over.
+        let transient = match snap_hint_bounds(ann, &out.overlay) {
+            Some(hint) => {
+                let hint = view.screen_rect(hint);
+                Some(transient.map_or(hint, |box_| box_.union(hint)))
+            }
+            None => transient,
+        };
         // The frame and its handles are not document elements, so they are only ever drawn live; the
         // box they occupy is what the frame that repaints them has to damage. The handles are
         // interface-sized, so the frame is mapped first and grown on screen.

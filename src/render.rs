@@ -1277,6 +1277,7 @@ impl Renderer {
                 }
             }
         }
+        draw_snap_hints(&mut pixmap, ann, overlay, screen);
         if let Some(frame) = overlay
             .selection
             .as_ref()
@@ -2538,6 +2539,129 @@ pub fn transient_bounds(overlay: &Overlay) -> Option<Rect> {
         .flatten()
         .chain(connectors)
         .reduce(Rect::union)
+}
+
+/// Radius of a solid connector anchor, in logical pixels.
+const ANCHOR_RADIUS: f32 = 3.5;
+
+/// The shapes an active connector is attached to, for the accent outline that says "this end is
+/// magnetic". Selection drags only show anchors, not target outlines.
+fn snap_target_ids(overlay: &Overlay) -> Vec<u64> {
+    let mut ids = Vec::new();
+    let mut add = |attachment: Option<crate::canvas::Attachment>| {
+        if let Some(attachment) = attachment
+            && !ids.contains(&attachment.shape)
+        {
+            ids.push(attachment.shape);
+        }
+    };
+    if let Some(shape) = &overlay.shape
+        && matches!(shape.kind, ShapeKind::Line | ShapeKind::Arrow)
+    {
+        add(shape.attach[0]);
+        add(shape.attach[1]);
+    }
+    if let Some(stroke) = &overlay.stroke {
+        add(stroke.attach[0]);
+        add(stroke.attach[1]);
+    }
+    ids
+}
+
+/// Every attached endpoint on screen: the connector being drawn, and the live copies a selection
+/// drag publishes. A solid dot sits on each, so an attached end can be told from a free one.
+fn snap_anchor_points(overlay: &Overlay) -> Vec<[f32; 2]> {
+    let mut points = Vec::new();
+    let mut add = |attachment: Option<crate::canvas::Attachment>, point: [f32; 2]| {
+        if attachment.is_some() {
+            points.push(point);
+        }
+    };
+    if let Some(shape) = &overlay.shape
+        && matches!(shape.kind, ShapeKind::Line | ShapeKind::Arrow)
+    {
+        add(shape.attach[0], shape.from);
+        add(shape.attach[1], shape.to);
+    }
+    if let Some(stroke) = &overlay.stroke
+        && !stroke.points.is_empty()
+    {
+        add(stroke.attach[0], stroke.points[0]);
+        if let Some(last) = stroke.points.last() {
+            add(stroke.attach[1], *last);
+        }
+    }
+    for connector in &overlay.connectors {
+        match connector {
+            LiveConnector::Shape(_, shape) => {
+                add(shape.attach[0], shape.from);
+                add(shape.attach[1], shape.to);
+            }
+            LiveConnector::Stroke(_, stroke) if !stroke.points.is_empty() => {
+                add(stroke.attach[0], stroke.points[0]);
+                if let Some(last) = stroke.points.last() {
+                    add(stroke.attach[1], *last);
+                }
+            }
+            LiveConnector::Stroke(_, _) => {}
+        }
+    }
+    points
+}
+
+/// The canvas box the snap highlight paints: the target outlines plus the anchor dots. The frame
+/// that removes a snap has to damage it, like any other transient overlay.
+pub fn snap_hint_bounds(ann: &Board, overlay: &Overlay) -> Option<Rect> {
+    let mut box_: Option<Rect> = None;
+    for id in snap_target_ids(overlay) {
+        if let Some(shape) = ann.shapes.iter().find(|shape| shape.id == id) {
+            let bounds = shape.paint_bounds().grown(ANCHOR_RADIUS);
+            box_ = Some(box_.map_or(bounds, |box_| box_.union(bounds)));
+        }
+    }
+    for point in snap_anchor_points(overlay) {
+        let anchor = Rect {
+            x: point[0],
+            y: point[1],
+            w: 0.0,
+            h: 0.0,
+        }
+        .grown(ANCHOR_RADIUS + 2.0);
+        box_ = Some(box_.map_or(anchor, |box_| box_.union(anchor)));
+    }
+    box_
+}
+
+/// Paint the magnetic state: accent outline on the target shapes, solid accent dots on the
+/// attached ends.
+fn draw_snap_hints(pixmap: &mut PixmapMut, ann: &Board, overlay: &Overlay, screen: Screen) {
+    for id in snap_target_ids(overlay) {
+        let Some(shape) = ann.shapes.iter().find(|shape| shape.id == id) else {
+            continue;
+        };
+        let mut highlight = shape.clone();
+        highlight.color = TOOLBAR_ACCENT.to_string();
+        highlight.width = 2.0;
+        draw_shape(pixmap, &highlight, screen, Ink::Precise);
+    }
+    let c = parse_hex(TOOLBAR_ACCENT);
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(c[0], c[1], c[2], c[3]);
+    paint.anti_alias = true;
+    for point in snap_anchor_points(overlay) {
+        let at = screen.point(point);
+        let mut dot = PathBuilder::new();
+        dot.push_circle(at[0], at[1], screen.ui(ANCHOR_RADIUS));
+        if let Some(dot) = dot.finish() {
+            pixmap.fill_path(
+                &dot,
+                &paint,
+                tiny_skia::FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
+        }
+    }
 }
 
 /// The selection frame and its handles, in logical pixels: one hairline and accent-filled
@@ -3918,6 +4042,68 @@ mod tests {
         assert_eq!(Backdrop::Transparent.next(), Backdrop::Grid);
         assert_eq!(Backdrop::Grid.next(), Backdrop::Dots);
         assert_eq!(Backdrop::Dots.next(), Backdrop::Black);
+    }
+
+    /// A snapped end reports its target for the accent outline and its world point for the solid
+    /// anchor, and both are inside the box the frame has to damage.
+    #[test]
+    fn a_snap_marks_its_target_and_its_endpoint() {
+        let target = Shape {
+            kind: ShapeKind::Rect,
+            color: "#ffffff".into(),
+            width: 3.0,
+            from: [50.0, 20.0],
+            to: [150.0, 120.0],
+            id: 7,
+            attach: [None, None],
+        };
+        let mut ann = Board::default();
+        ann.add_shape(target.clone());
+        let overlay = Overlay {
+            shape: Some(Shape {
+                kind: ShapeKind::Line,
+                color: "#ffffff".into(),
+                width: 2.0,
+                from: [50.0, 70.0],
+                to: [250.0, 70.0],
+                id: 0,
+                attach: [
+                    Some(crate::canvas::Attachment {
+                        shape: 7,
+                        at: [-1.0, 0.0],
+                    }),
+                    None,
+                ],
+            }),
+            ..Default::default()
+        };
+        assert_eq!(snap_target_ids(&overlay), vec![7]);
+        assert_eq!(snap_anchor_points(&overlay), vec![[50.0, 70.0]]);
+        let bounds = snap_hint_bounds(&ann, &overlay).expect("no snap bounds");
+        assert!(bounds.contains(50.0, 20.0) && bounds.contains(150.0, 120.0));
+        assert!(bounds.contains(50.0, 70.0));
+
+        // The target's outline is repainted in the accent, and the end carries a solid dot.
+        let mut buf = vec![0u8; 400 * 200 * 4];
+        Renderer::new().render(
+            &mut buf,
+            400,
+            200,
+            1.0,
+            View::default(),
+            &ann,
+            &overlay,
+            None,
+        );
+        let pixel = |x: u32, y: u32| {
+            let i = ((y * 400 + x) * 4) as usize;
+            [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]
+        };
+        assert!(
+            pixel(50, 20)[2] > pixel(50, 20)[0],
+            "target is not accented"
+        );
+        assert!(pixel(50, 70)[3] > 0, "the anchor dot is not painted");
     }
 
     /// A live connector is overlay content: its box has to be part of the damage the frame reports,
