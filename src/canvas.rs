@@ -1,6 +1,6 @@
 //! Annotation data model and hit testing. No Wayland dependency, so it unit tests easily.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -271,12 +271,46 @@ impl Tool {
     }
 }
 
+/// A connector endpoint bound to a closed shape. `at` is the point on the shape in local
+/// coordinates, where the shape's centre is `(0, 0)` and its half-extents are `1`: the point stays
+/// on that edge when the shape moves, resizes or turns.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Attachment {
+    /// The target shape's stable id. Zero is never a target.
+    pub shape: u64,
+    pub at: [f32; 2],
+}
+
+/// A connector drawn from the overlay while its attached shapes are being dragged: the document
+/// raster still holds the old geometry, so the frame paints this copy in its place.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LiveConnector {
+    Stroke(ItemId, Stroke),
+    Shape(ItemId, Shape),
+}
+
+impl LiveConnector {
+    pub fn id(&self) -> ItemId {
+        match self {
+            LiveConnector::Stroke(id, _) | LiveConnector::Shape(id, _) => *id,
+        }
+    }
+}
+
+/// How close a pointer must come to a closed shape, in logical pixels, before a connector end
+/// sticks to it.
+pub const SNAP_RADIUS: f32 = 12.0;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Stroke {
     /// `#rrggbb`
     pub color: String,
     pub width: f32,
     pub points: Vec<[f32; 2]>,
+    /// The closed shapes the first and last sample stick to, when a pen stroke was started or
+    /// finished against one.
+    #[serde(default)]
+    pub attach: [Option<Attachment>; 2],
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -416,6 +450,16 @@ pub enum ShapeKind {
     Arrow,
 }
 
+impl ShapeKind {
+    /// Whether a connector may attach to this shape. Lines and arrows are connectors themselves.
+    pub fn is_closed(self) -> bool {
+        matches!(
+            self,
+            ShapeKind::Circle | ShapeKind::Rect | ShapeKind::Diamond
+        )
+    }
+}
+
 /// A shape is two points and a kind, and nothing else: its outline is derived from the pair when it
 /// is drawn and when it is hit, so it costs the same in the file whether it is ten pixels or a whole
 /// output across, and a resize or a rotation is the arithmetic a pair of points already takes.
@@ -427,6 +471,13 @@ pub struct Shape {
     pub width: f32,
     pub from: [f32; 2],
     pub to: [f32; 2],
+    /// A stable id inside its board, so a connector can keep pointing at this shape after other
+    /// shapes are deleted or moved. Zero is assigned a real id when the shape enters a board.
+    #[serde(default)]
+    pub id: u64,
+    /// For a line or arrow, the closed shapes its two ends stick to.
+    #[serde(default)]
+    pub attach: [Option<Attachment>; 2],
 }
 
 /// An item the eraser hit.
@@ -452,6 +503,204 @@ pub struct Board {
 }
 
 impl Board {
+    /// The next unused shape id. Ids are board-local and survive deletion, so a connector can name
+    /// the shape it sticks to without depending on a vector index.
+    pub fn next_shape_id(&self) -> u64 {
+        self.shapes.iter().map(|shape| shape.id).max().unwrap_or(0) + 1
+    }
+
+    /// Push a new shape, giving it an id if it has none or one already taken.
+    pub fn add_shape(&mut self, mut shape: Shape) {
+        if shape.id == 0 || self.shapes.iter().any(|other| other.id == shape.id) {
+            shape.id = self.next_shape_id();
+        }
+        self.shapes.push(shape);
+    }
+
+    /// Give every shape a unique non-zero id. Files written before ids existed load with zeroes;
+    /// duplicate ids can only come from a hand-edited file or a copy that forgot to remap.
+    pub fn ensure_shape_ids(&mut self) {
+        let mut used = BTreeSet::new();
+        let mut next = self.next_shape_id();
+        for shape in &mut self.shapes {
+            if shape.id == 0 || !used.insert(shape.id) {
+                shape.id = next;
+                used.insert(next);
+                next += 1;
+            }
+        }
+    }
+
+    /// The closed shape a connector end at `p` should stick to, if one is within `tolerance` canvas
+    /// pixels: its attachment and the snapped point.
+    pub fn snap(&self, p: [f32; 2], tolerance: f32) -> Option<(Attachment, [f32; 2])> {
+        let limit = tolerance * tolerance;
+        let mut best: Option<(Attachment, [f32; 2], f32)> = None;
+        for shape in &self.shapes {
+            if shape.id == 0 || !shape.kind.is_closed() {
+                continue;
+            }
+            let Some(point) = shape.nearest_boundary(p) else {
+                continue;
+            };
+            let distance = dist_squared(point, p);
+            if distance <= limit && best.is_none_or(|(_, _, nearest)| distance < nearest) {
+                best = Some((shape.attachment_at(point), point, distance));
+            }
+        }
+        best.map(|(attachment, point, _)| (attachment, point))
+    }
+
+    /// Clear attachments whose target shape is no longer on this board.
+    pub fn drop_dangling_attachments(&mut self) {
+        let ids: BTreeSet<u64> = self
+            .shapes
+            .iter()
+            .map(|shape| shape.id)
+            .filter(|id| *id != 0)
+            .collect();
+        for stroke in &mut self.strokes {
+            for attachment in &mut stroke.attach {
+                if attachment.is_some_and(|attachment| !ids.contains(&attachment.shape)) {
+                    *attachment = None;
+                }
+            }
+        }
+        for shape in &mut self.shapes {
+            for attachment in &mut shape.attach {
+                if attachment.is_some_and(|attachment| !ids.contains(&attachment.shape)) {
+                    *attachment = None;
+                }
+            }
+        }
+    }
+
+    /// Put every attached connector endpoint back on its shape. Returns the union of the boxes that
+    /// moved, or `None` when no attachment changed anything.
+    pub fn sync_connectors(&mut self) -> Option<Rect> {
+        let shapes: BTreeMap<u64, Shape> = self
+            .shapes
+            .iter()
+            .filter(|shape| shape.id != 0)
+            .map(|shape| (shape.id, shape.clone()))
+            .collect();
+        let mut changed: Option<Rect> = None;
+        for stroke in &mut self.strokes {
+            if stroke.attach == [None, None] || stroke.points.is_empty() {
+                continue;
+            }
+            let before = stroke.paint_bounds();
+            if let Some(attachment) = stroke.attach[0]
+                && let Some(shape) = shapes.get(&attachment.shape)
+            {
+                stroke.points[0] = shape.attachment_point(attachment);
+            }
+            if let Some(attachment) = stroke.attach[1]
+                && let Some(shape) = shapes.get(&attachment.shape)
+                && let Some(last) = stroke.points.last_mut()
+            {
+                *last = shape.attachment_point(attachment);
+            }
+            if let Some(after) = stroke.paint_bounds()
+                && Some(after) != before
+            {
+                let box_ = before.map_or(after, |before| before.union(after));
+                changed = Some(changed.map_or(box_, |box_| box_.union(box_)));
+            }
+        }
+        for shape in &mut self.shapes {
+            if shape.kind.is_closed() || shape.attach == [None, None] {
+                continue;
+            }
+            let before = shape.paint_bounds();
+            if let Some(attachment) = shape.attach[0]
+                && let Some(target) = shapes.get(&attachment.shape)
+            {
+                shape.from = target.attachment_point(attachment);
+            }
+            if let Some(attachment) = shape.attach[1]
+                && let Some(target) = shapes.get(&attachment.shape)
+            {
+                shape.to = target.attachment_point(attachment);
+            }
+            let after = shape.paint_bounds();
+            if after != before {
+                changed = Some(changed.map_or(before.union(after), |box_| box_.union(after)));
+            }
+        }
+        changed
+    }
+
+    /// The live copies of every attached connector for a drag of `items` by `transform`. The
+    /// raster keeps the committed connectors, so the overlay paints these in their place; the free
+    /// endpoints still take the same transform as the selected elements.
+    pub fn connector_preview(&self, items: &[ItemId], transform: Transform) -> Vec<LiveConnector> {
+        let selected = |id: ItemId| items.contains(&id);
+        let shapes: BTreeMap<u64, Shape> = self
+            .shapes
+            .iter()
+            .enumerate()
+            .filter(|(_, shape)| shape.id != 0)
+            .map(|(index, shape)| {
+                let shape = if selected(ItemId::Shape(index)) {
+                    transform.shape(shape)
+                } else {
+                    shape.clone()
+                };
+                (shape.id, shape)
+            })
+            .collect();
+        let mut live = Vec::new();
+        for (index, stroke) in self.strokes.iter().enumerate() {
+            if stroke.attach == [None, None] {
+                continue;
+            }
+            let id = ItemId::Stroke(index);
+            let mut copy = if selected(id) {
+                transform.stroke(stroke)
+            } else {
+                stroke.clone()
+            };
+            if !copy.points.is_empty() {
+                if let Some(attachment) = copy.attach[0]
+                    && let Some(shape) = shapes.get(&attachment.shape)
+                {
+                    copy.points[0] = shape.attachment_point(attachment);
+                }
+                if let Some(attachment) = copy.attach[1]
+                    && let Some(shape) = shapes.get(&attachment.shape)
+                    && let Some(last) = copy.points.last_mut()
+                {
+                    *last = shape.attachment_point(attachment);
+                }
+            }
+            live.push(LiveConnector::Stroke(id, copy));
+        }
+        for (index, shape) in self.shapes.iter().enumerate() {
+            if shape.kind.is_closed() || shape.attach == [None, None] {
+                continue;
+            }
+            let id = ItemId::Shape(index);
+            let mut copy = if selected(id) {
+                transform.shape(shape)
+            } else {
+                shape.clone()
+            };
+            if let Some(attachment) = copy.attach[0]
+                && let Some(target) = shapes.get(&attachment.shape)
+            {
+                copy.from = target.attachment_point(attachment);
+            }
+            if let Some(attachment) = copy.attach[1]
+                && let Some(target) = shapes.get(&attachment.shape)
+            {
+                copy.to = target.attachment_point(attachment);
+            }
+            live.push(LiveConnector::Shape(id, copy));
+        }
+        live
+    }
+
     /// The linked text under a point, measured with the renderer's boxes rather than the font-size
     /// estimate: a link is a thing you aim at.
     pub fn linked_at(
@@ -512,6 +761,7 @@ impl Board {
             Some(ItemId::Shape(i)) => {
                 let box_ = self.shapes[i].paint_bounds();
                 self.shapes.remove(i);
+                self.drop_dangling_attachments();
                 Some(box_)
             }
             Some(ItemId::Note(i)) => {
@@ -533,12 +783,36 @@ impl Board {
     /// indices they had, so an element that is named elsewhere cannot be reached by a copy landing in the
     /// middle of the list.
     pub fn duplicate(&mut self, items: &[ItemId]) -> (Vec<ItemId>, Option<Rect>) {
+        // Every copied shape gets a fresh id, and connectors copied with it are re-pointed to the
+        // copies rather than to the originals they were attached to.
+        let mut shape_ids = BTreeMap::new();
+        let mut copy_ids = BTreeMap::new();
+        let mut next = self.next_shape_id();
+        for id in items {
+            if let ItemId::Shape(index) = *id
+                && let Some(shape) = self.shapes.get(index)
+            {
+                copy_ids.insert(index, next);
+                if shape.id != 0 {
+                    shape_ids.insert(shape.id, next);
+                }
+                next += 1;
+            }
+        }
         let mut copies = Vec::with_capacity(items.len());
         let mut box_: Option<Rect> = None;
         for id in items {
             match *id {
                 ItemId::Stroke(i) => {
-                    if let Some(s) = self.strokes.get(i).cloned() {
+                    if let Some(mut s) = self.strokes.get(i).cloned() {
+                        for attachment in &mut s.attach {
+                            *attachment = attachment.and_then(|attachment| {
+                                shape_ids.get(&attachment.shape).map(|id| Attachment {
+                                    shape: *id,
+                                    at: attachment.at,
+                                })
+                            });
+                        }
                         copies.push(ItemId::Stroke(self.strokes.len()));
                         union_into(&mut box_, s.paint_bounds());
                         self.strokes.push(s);
@@ -552,7 +826,16 @@ impl Board {
                     }
                 }
                 ItemId::Shape(i) => {
-                    if let Some(s) = self.shapes.get(i).cloned() {
+                    if let Some(mut s) = self.shapes.get(i).cloned() {
+                        s.id = copy_ids.get(&i).copied().unwrap_or(0);
+                        for attachment in &mut s.attach {
+                            *attachment = attachment.and_then(|attachment| {
+                                shape_ids.get(&attachment.shape).map(|id| Attachment {
+                                    shape: *id,
+                                    at: attachment.at,
+                                })
+                            });
+                        }
                         copies.push(ItemId::Shape(self.shapes.len()));
                         union_into(&mut box_, Some(s.paint_bounds()));
                         self.shapes.push(s);
@@ -606,20 +889,51 @@ impl Board {
     pub fn append(&mut self, other: &Board) -> (Vec<ItemId>, Option<Rect>) {
         let mut ids = Vec::new();
         let mut box_: Option<Rect> = None;
+        // Ids are board-local: every appended shape gets a fresh one, and a connector copied with
+        // it is re-pointed. A connector whose target stayed on the source board is cut loose rather
+        // than left naming an unrelated shape here.
+        let mut shape_ids = BTreeMap::new();
+        let mut shapes = Vec::new();
+        let first_id = self.next_shape_id();
+        for (id, shape) in (first_id..).zip(&other.shapes) {
+            let mut copy = shape.clone();
+            if copy.id != 0 {
+                shape_ids.insert(copy.id, id);
+            }
+            copy.id = id;
+            shapes.push(copy);
+        }
         for s in &other.strokes {
+            let mut copy = s.clone();
+            for attachment in &mut copy.attach {
+                *attachment = attachment.and_then(|attachment| {
+                    shape_ids.get(&attachment.shape).map(|id| Attachment {
+                        shape: *id,
+                        at: attachment.at,
+                    })
+                });
+            }
             ids.push(ItemId::Stroke(self.strokes.len()));
-            union_into(&mut box_, s.paint_bounds());
-            self.strokes.push(s.clone());
+            union_into(&mut box_, copy.paint_bounds());
+            self.strokes.push(copy);
         }
         for t in &other.texts {
             ids.push(ItemId::Text(self.texts.len()));
             union_into(&mut box_, Some(t.paint_bounds()));
             self.texts.push(t.clone());
         }
-        for s in &other.shapes {
+        for mut shape in shapes {
+            for attachment in &mut shape.attach {
+                *attachment = attachment.and_then(|attachment| {
+                    shape_ids.get(&attachment.shape).map(|id| Attachment {
+                        shape: *id,
+                        at: attachment.at,
+                    })
+                });
+            }
+            union_into(&mut box_, Some(shape.paint_bounds()));
             ids.push(ItemId::Shape(self.shapes.len()));
-            union_into(&mut box_, Some(s.paint_bounds()));
-            self.shapes.push(s.clone());
+            self.shapes.push(shape);
         }
         for n in &other.notes {
             ids.push(ItemId::Note(self.notes.len()));
@@ -748,6 +1062,9 @@ impl Board {
         remove_indices(&mut self.texts, texts);
         remove_indices(&mut self.shapes, shapes);
         remove_indices(&mut self.notes, notes);
+        if !items.is_empty() {
+            self.drop_dangling_attachments();
+        }
         removed
     }
 }
@@ -772,6 +1089,108 @@ fn remove_indices<T>(list: &mut Vec<T>, mut indices: Vec<usize>) {
 }
 
 impl Shape {
+    /// The shape's centre and half-extents, in logical pixels.
+    pub fn box_geometry(&self) -> ([f32; 2], [f32; 2]) {
+        let box_ = rect_of(self.from, self.to);
+        (
+            [box_.x + box_.w / 2.0, box_.y + box_.h / 2.0],
+            [box_.w / 2.0, box_.h / 2.0],
+        )
+    }
+
+    /// The point on this shape's outline nearest to `p`, for a closed shape. Lines and arrows have
+    /// no interior to attach to.
+    pub fn nearest_boundary(&self, p: [f32; 2]) -> Option<[f32; 2]> {
+        if !self.kind.is_closed() {
+            return None;
+        }
+        let (centre, half) = self.box_geometry();
+        if half[0] <= f32::EPSILON || half[1] <= f32::EPSILON {
+            return Some(centre);
+        }
+        let box_ = rect_of(self.from, self.to);
+        match self.kind {
+            ShapeKind::Circle => {
+                let u = (p[0] - centre[0]) / half[0];
+                let v = (p[1] - centre[1]) / half[1];
+                let len = (u * u + v * v).sqrt();
+                let (u, v) = if len <= f32::EPSILON {
+                    (1.0, 0.0)
+                } else {
+                    (u / len, v / len)
+                };
+                Some([centre[0] + u * half[0], centre[1] + v * half[1]])
+            }
+            ShapeKind::Rect => {
+                let corners = [
+                    [box_.x, box_.y],
+                    [box_.x + box_.w, box_.y],
+                    [box_.x + box_.w, box_.y + box_.h],
+                    [box_.x, box_.y + box_.h],
+                ];
+                let mut best = corners[0];
+                let mut best_d = f32::INFINITY;
+                for index in 0..4 {
+                    let point = nearest_on_segment(p, corners[index], corners[(index + 1) % 4]);
+                    let d = dist_squared(point, p);
+                    if d < best_d {
+                        best = point;
+                        best_d = d;
+                    }
+                }
+                Some(best)
+            }
+            ShapeKind::Diamond => {
+                let corners = [
+                    [centre[0], box_.y],
+                    [box_.x + box_.w, centre[1]],
+                    [centre[0], box_.y + box_.h],
+                    [box_.x, centre[1]],
+                ];
+                let mut best = corners[0];
+                let mut best_d = f32::INFINITY;
+                for index in 0..4 {
+                    let point = nearest_on_segment(p, corners[index], corners[(index + 1) % 4]);
+                    let d = dist_squared(point, p);
+                    if d < best_d {
+                        best = point;
+                        best_d = d;
+                    }
+                }
+                Some(best)
+            }
+            ShapeKind::Line | ShapeKind::Arrow => None,
+        }
+    }
+
+    /// The attachment that keeps `p`, a point on this shape's outline, on the same edge after the
+    /// shape moves or is resized.
+    pub fn attachment_at(&self, p: [f32; 2]) -> Attachment {
+        let (centre, half) = self.box_geometry();
+        let at = [
+            if half[0] > f32::EPSILON {
+                (p[0] - centre[0]) / half[0]
+            } else {
+                0.0
+            },
+            if half[1] > f32::EPSILON {
+                (p[1] - centre[1]) / half[1]
+            } else {
+                0.0
+            },
+        ];
+        Attachment { shape: self.id, at }
+    }
+
+    /// The world point an attachment names.
+    pub fn attachment_point(&self, attachment: Attachment) -> [f32; 2] {
+        let (centre, half) = self.box_geometry();
+        [
+            centre[0] + attachment.at[0] * half[0],
+            centre[1] + attachment.at[1] * half[1],
+        ]
+    }
+
     /// Length of the arrowhead, from the pen width with a floor so a hairline arrow still reads as
     /// an arrow.
     pub fn head_len(&self) -> f32 {
@@ -1996,13 +2415,17 @@ fn dist_squared(p: [f32; 2], q: [f32; 2]) -> f32 {
 }
 
 fn segment_dist_squared(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+    dist_squared(p, nearest_on_segment(p, a, b))
+}
+
+fn nearest_on_segment(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
     let (abx, aby) = (b[0] - a[0], b[1] - a[1]);
     let len2 = abx * abx + aby * aby;
     if len2 == 0.0 {
-        return dist_squared(p, a);
+        return a;
     }
     let t = (((p[0] - a[0]) * abx + (p[1] - a[1]) * aby) / len2).clamp(0.0, 1.0);
-    dist_squared(p, [a[0] + t * abx, a[1] + t * aby])
+    [a[0] + t * abx, a[1] + t * aby]
 }
 
 /// The document: every board by name, and the board the user picked last. A board belongs to no
@@ -2179,6 +2602,9 @@ pub struct Overlay {
     pub toolbar: Option<Toolbar>,
     /// What the selection tool holds, if anything.
     pub selection: Option<Selection>,
+    /// Attached connectors redrawn while a selection gesture moves their shapes. The document
+    /// raster still holds their old geometry, so the frame paints these and skips those ids.
+    pub connectors: Vec<LiveConnector>,
     /// The rectangle a selection drag is sweeping, before it becomes a selection.
     pub marquee: Option<Rect>,
 }

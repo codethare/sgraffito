@@ -925,14 +925,24 @@ impl App {
         let Some(canvas) = self.outputs.get(key).map(|out| out.view.to_canvas([x, y])) else {
             return;
         };
+        let pen_snap = if self.tool == Tool::Pen {
+            self.snap_connector(key, canvas)
+        } else {
+            None
+        };
         match self.tool {
             Tool::Pen => {
                 if let Some(out) = self.outputs.get_mut(key) {
                     let width = self.pen_width;
+                    let (first, attach) = match pen_snap {
+                        Some((attachment, point)) => (point, [Some(attachment), None]),
+                        None => (canvas, [None, None]),
+                    };
                     out.overlay.stroke = Some(Stroke {
                         color: crate::config::current().colors[self.color_idx].clone(),
                         width,
-                        points: vec![canvas],
+                        points: vec![first],
+                        attach,
                     });
                 }
             }
@@ -994,33 +1004,54 @@ impl App {
         }
         // Read before the output is borrowed: whether `Shift` is down is what constrains the drag.
         let shift = self.shift;
+        let Some(canvas) = self.outputs.get(key).map(|out| out.view.to_canvas([x, y])) else {
+            return;
+        };
+        let snap = if matches!(self.tool, Tool::Pen | Tool::Line | Tool::Arrow) {
+            self.snap_connector(key, canvas)
+        } else {
+            None
+        };
         let Some(out) = self.outputs.get_mut(key) else {
             return;
         };
-        let canvas = out.view.to_canvas([x, y]);
         match self.tool {
             // Only a press starts a stroke: hovering with no button held must not draw.
             Tool::Pen => {
                 let Some(stroke) = out.overlay.stroke.as_mut() else {
                     return;
                 };
+                let (point, attach) = match snap {
+                    Some((attachment, point)) => (point, Some(attachment)),
+                    None => (canvas, None),
+                };
+                stroke.attach[1] = attach;
                 if let Some(last) = stroke.points.last()
-                    && !wants_sampling(*last, canvas)
+                    && !wants_sampling(*last, point)
                 {
                     return;
                 }
-                stroke.points.push(canvas);
+                stroke.points.push(point);
             }
             Tool::Eraser => out.overlay.eraser = Some(canvas),
             // Only a press starts a shape: motion moves the second of its two points, and `Shift`
-            // constrains where that point goes.
+            // constrains where that point goes. The magnetic point wins over the constrained one:
+            // an end that is stuck to a shape is already where the user meant it to be.
             Tool::Circle | Tool::Rect | Tool::Diamond | Tool::Line | Tool::Arrow => {
-                match out.overlay.shape.as_mut() {
-                    Some(shape) => {
-                        shape.to = constrained_drag(shape.kind, shape.from, canvas, shift)
+                let Some(shape) = out.overlay.shape.as_mut() else {
+                    return;
+                };
+                let mut to = constrained_drag(shape.kind, shape.from, canvas, shift);
+                if matches!(shape.kind, ShapeKind::Line | ShapeKind::Arrow) {
+                    match snap {
+                        Some((attachment, point)) => {
+                            shape.attach[1] = Some(attachment);
+                            to = point;
+                        }
+                        None => shape.attach[1] = None,
                     }
-                    None => return,
                 }
+                shape.to = to;
             }
             // A note is dragged out to the size it is created with, exactly as a shape is.
             Tool::Note => {
@@ -1218,15 +1249,14 @@ impl App {
                     && !stroke.points.is_empty()
                 {
                     changed = stroke.paint_bounds();
-                    self.doc
-                        .boards
-                        .entry(board_name.clone())
-                        .or_default()
-                        .strokes
-                        .push(stroke);
+                    let board = self.doc.boards.entry(board_name.clone()).or_default();
+                    board.strokes.push(stroke);
+                    if let Some(settled) = board.sync_connectors() {
+                        changed = Some(changed.map_or(settled, |box_| box_.union(settled)));
+                    }
                 }
                 // A shape dragged out to nothing is dropped rather than written, so a click with a
-                // shape tool armed cannot leave an element that is invisible but erasable.
+                // shape tool armed cannot leave an element that is invisible but still erasable.
                 if let Some(shape) = shape
                     && !shape.is_empty()
                 {
@@ -1235,12 +1265,11 @@ impl App {
                         Some(changed) => changed.union(box_),
                         None => box_,
                     });
-                    self.doc
-                        .boards
-                        .entry(board_name.clone())
-                        .or_default()
-                        .shapes
-                        .push(shape);
+                    let board = self.doc.boards.entry(board_name.clone()).or_default();
+                    board.add_shape(shape);
+                    if let Some(settled) = board.sync_connectors() {
+                        changed = Some(changed.map_or(settled, |box_| box_.union(settled)));
+                    }
                 }
                 if tool == Tool::Eraser
                     && let Some([x, y]) = eraser

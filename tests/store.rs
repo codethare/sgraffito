@@ -24,6 +24,7 @@ fn sample() -> Doc {
                 color: "#e01b24".into(),
                 width: 3.0,
                 points: vec![[12.0, 40.0], [14.0, 44.0]],
+                attach: [None, None],
             }],
             texts: vec![TextItem {
                 x: 100.0,
@@ -39,6 +40,8 @@ fn sample() -> Doc {
                 width: 3.0,
                 from: [30.0, 400.0],
                 to: [180.0, 260.0],
+                id: 0,
+                attach: [None, None],
             }],
             notes: vec![],
         },
@@ -79,7 +82,7 @@ fn saved_file_has_version_boards_and_the_picked_one() {
     doc.active = "eDP-1".into();
     store::save(&p, &doc).unwrap();
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-    assert_eq!(v["version"], 5);
+    assert_eq!(v["version"], 6);
     assert_eq!(v["active"], "eDP-1");
     assert_eq!(v["boards"]["eDP-1"]["strokes"][0]["points"][0][0], 12.0);
     assert_eq!(v["boards"]["eDP-1"]["texts"][0]["text"], "买牛奶"); // CJK survives the round trip
@@ -291,7 +294,7 @@ fn a_version_3_file_becomes_boards() {
     // The next save is the current version.
     store::save(&p, &doc).unwrap();
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-    assert_eq!(v["version"], 5);
+    assert_eq!(v["version"], 6);
     assert!(v["boards"]["eDP-1"].is_object());
 }
 
@@ -411,6 +414,7 @@ fn stepping_a_selection_steps_its_widths_and_text_sizes() {
             color: "#e01b24".into(),
             width: 4.0,
             points: vec![[10.0, 10.0], [110.0, 10.0]],
+            attach: [None, None],
         }],
         texts: vec![TextItem {
             x: 10.0,
@@ -426,6 +430,8 @@ fn stepping_a_selection_steps_its_widths_and_text_sizes() {
             width: 6.0,
             from: [10.0, 80.0],
             to: [110.0, 140.0],
+            id: 0,
+            attach: [None, None],
         }],
         notes: vec![Note {
             x: 10.0,
@@ -466,6 +472,7 @@ fn a_size_step_at_the_bound_writes_nothing() {
             color: "#e01b24".into(),
             width: PEN_WIDTH_MAX,
             points: vec![[10.0, 10.0], [110.0, 10.0]],
+            attach: [None, None],
         }],
         texts: vec![TextItem {
             x: 10.0,
@@ -504,6 +511,7 @@ fn a_shrinking_step_reports_the_ink_it_left() {
             color: "#e01b24".into(),
             width: 5.0,
             points: vec![[10.0, 10.0], [110.0, 10.0]],
+            attach: [None, None],
         }],
         texts: vec![TextItem {
             x: 10.0,
@@ -538,6 +546,7 @@ fn a_mixed_selection_reports_only_what_changed() {
             color: "#e01b24".into(),
             width: PEN_WIDTH_MAX,
             points: vec![[10.0, 10.0], [110.0, 10.0]],
+            attach: [None, None],
         }],
         texts: vec![TextItem {
             x: 10.0,
@@ -631,7 +640,7 @@ fn a_version_4_file_loads_and_a_link_survives_the_round_trip() {
     store::save(&p, &doc).unwrap();
     let saved: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-    assert_eq!(saved["version"], 5);
+    assert_eq!(saved["version"], 6);
     assert_eq!(store::load(&p).boards["a"].texts[0].link, Some("b".into()));
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -673,6 +682,7 @@ fn moving_elements_leaves_the_source_board_without_them() {
         color: "#ffffff".into(),
         width: 3.0,
         points: vec![[0.0, 0.0], [10.0, 10.0]],
+        attach: [None, None],
     });
     board.texts.push(TextItem {
         x: 0.0,
@@ -706,6 +716,7 @@ fn a_copy_over_the_cap_is_refused_whole() {
                 color: "#fff".into(),
                 width: 3.0,
                 points: vec![[i as f32, 0.0]],
+                attach: [None, None],
             })
             .collect(),
         ..Board::default()
@@ -787,4 +798,50 @@ fn the_clipboard_history_evicts_the_oldest_entry_under_every_cap() {
     let mut by_bytes = vec![entry(1, MAX_CLIP_BYTES), entry(1, MAX_CLIP_BYTES)];
     trim_clipboard(&mut by_bytes);
     assert_eq!(by_bytes.len(), 1, "the byte cap did not evict");
+}
+
+/// Shape ids and connector attachments are document data: a save and load keeps both, so a connector
+/// is still attached after the daemon restarts.
+#[test]
+fn connector_attachments_survive_the_round_trip() {
+    use sgraffito::canvas::{Attachment, Shape, ShapeKind};
+    let dir = tmpdir("connector-roundtrip");
+    let path = dir.join("annotations.json");
+    let mut doc = Doc::default();
+    let mut board = Board::default();
+    board.add_shape(Shape {
+        kind: ShapeKind::Rect,
+        color: "#ffffff".into(),
+        width: 3.0,
+        from: [0.0, 0.0],
+        to: [100.0, 100.0],
+        id: 0,
+        attach: [None, None],
+    });
+    let target = board.shapes[0].id;
+    board.add_shape(Shape {
+        kind: ShapeKind::Line,
+        color: "#ffffff".into(),
+        width: 3.0,
+        from: [0.0, 50.0],
+        to: [200.0, 50.0],
+        id: 0,
+        attach: [
+            Some(Attachment {
+                shape: target,
+                at: [-1.0, 0.0],
+            }),
+            None,
+        ],
+    });
+    doc.boards.insert("a".into(), board);
+    store::save(&path, &doc).unwrap();
+    let loaded = store::load(&path);
+    let board = &loaded.boards["a"];
+    assert_eq!(board.shapes[0].id, target);
+    assert_eq!(
+        board.shapes[1].attach[0].map(|attachment| attachment.shape),
+        Some(target)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

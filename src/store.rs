@@ -11,12 +11,12 @@ use serde::{Deserialize, Serialize};
 use crate::canvas::{Board, Doc};
 
 /// The version this daemon writes. Version 1 had no `shapes` list, version 2 adds that, version 3
-/// adds the `notes` list, and version 4 keys the annotations by board name instead of output name and
-/// records the board picked last. All of them are
-/// read, because a version 1 file is a version 2 file with no shapes in it, and an older build
-/// reading a version 2 file would silently drop every shape on its next save — which is what the
-/// number is for.
-pub const VERSION: u32 = 5;
+/// adds the `notes` list, version 4 keys the annotations by board name instead of output name and
+/// records the board picked last, version 5 adds a text's board link, and version 6 gives shapes
+/// stable ids and connector attachments. All of them are read, because an older file's missing
+/// fields default, and an older build reading a newer file would silently drop what it does not
+/// know on its next save — which is what the number is for.
+pub const VERSION: u32 = 6;
 /// The oldest version whose files still load.
 pub const MIN_VERSION: u32 = 1;
 pub const DEBOUNCE: Duration = Duration::from_secs(1);
@@ -74,17 +74,24 @@ pub fn load(path: &Path) -> Doc {
     match parsed {
         // A supported older version loads; its missing fields already default. It is written back
         // in the current version the next time the daemon saves.
-        Ok(file) if (MIN_VERSION..=VERSION).contains(&file.version) => Doc {
-            // A file from before boards existed keys its annotations by output name; those keys become
-            // board names of their own, which is what lets an output that appears afterwards find the
-            // board named after it and show what it used to show.
-            boards: if file.boards.is_empty() {
-                file.outputs
-            } else {
-                file.boards
-            },
-            active: file.active,
-        },
+        Ok(file) if (MIN_VERSION..=VERSION).contains(&file.version) => {
+            let mut doc = Doc {
+                // A file from before boards existed keys its annotations by output name; those keys become
+                // board names of their own, which is what lets an output that appears afterwards find the
+                // board named after it and show what it used to show.
+                boards: if file.boards.is_empty() {
+                    file.outputs
+                } else {
+                    file.boards
+                },
+                active: file.active,
+            };
+            for board in doc.boards.values_mut() {
+                board.ensure_shape_ids();
+                board.drop_dangling_attachments();
+            }
+            doc
+        }
         Ok(file) => {
             backup(path, &format!("unsupported file version {}", file.version));
             Doc::default()

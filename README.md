@@ -168,19 +168,26 @@ Errors and state changes go to stderr and to `$XDG_STATE_HOME/sgraffito/sgraffit
 - Each event is one line: an ISO date and UTC time, `[sgraffito]`, then the message. Newlines in a message are escaped and a single message is capped at 8 KiB, so one large error cannot fill a generation.
 - Panics are recorded with their location before the default panic output. If the file cannot be opened or written, the daemon keeps running and keeps logging to stderr.
 
+## Connectors
+
+- A `line`, `arrow` or `pen` end that comes within 12 logical pixels of a `circle`, `rectangle` or `diamond` snaps to the nearest point on that shape's outline while it is drawn.
+- With `select`, dragging a connected shape stretches every attached connector live, even when the connector is not selected. Both ends stay on their shapes, so a line between two shapes follows whichever end moved.
+- Attachments are saved with stable shape ids; deleting a shape clears the ends that pointed at it, and copying or moving shapes remaps their connectors to the copies.
+
 ## Data
 
 `$XDG_DATA_HOME/sgraffito/annotations.json` (default `~/.local/share/sgraffito/`):
 
 ```json
-{"version":5,
- "boards":{"office":{"strokes":[{"color":"#e01b24","width":3,"points":[[12,40],[14,44]]}],
+{"version":6,
+ "boards":{"office":{"strokes":[{"color":"#e01b24","width":3,"points":[[12,40],[14,44]],"attach":[null,null]}],
   "texts":[{"x":100,"y":200,"color":"#ffffff","size":18,"text":"buy milk","link":"desk"}],
-  "shapes":[{"kind":"arrow","color":"#3584e4","width":3,"from":[30,400],"to":[180,260]}]}},
+  "shapes":[{"kind":"rect","color":"#3584e4","width":3,"from":[30,400],"to":[180,260],"id":1,"attach":[null,null]},
+            {"kind":"arrow","color":"#3584e4","width":3,"from":[180,430],"to":[400,430],"id":2,"attach":[{"shape":1,"at":[1.0,0.0]},null]}]}},
  "active":"office"}
 ```
 
-A shape is a `kind` (`circle`, `rect`, `diamond`, `line` or `arrow`), its colour, its width and its two points — never its outline, and never a box. A text's optional `link` is the board it jumps to; it is absent from files written before version 5. Versions 1 to 4 load as well: their `outputs` map, keyed by output name, becomes boards of the same name, so each screen comes back on the board named after it and nothing moves. `active` is the board picked last — what a screen connected after a restart shows. An unknown version is still backed up rather than guessed at.
+A shape is a `kind` (`circle`, `rect`, `diamond`, `line` or `arrow`), its colour, its width and its two points — never its outline, and never a box. Closed shapes also carry a stable `id`; a line, arrow or pen's `attach` names the shapes its two ends stick to, with `at` the point on that shape (the centre is `(0, 0)` and its half-extents are `1`). A text's optional `link` is the board it jumps to; it is absent from files written before version 5. Versions 1 to 5 load as well: old shapes get fresh ids and no attachments, and a version 1–3 `outputs` map, keyed by output name, becomes boards of the same name. `active` is the board picked last — what a screen connected after a restart shows. An unknown version is still backed up rather than guessed at.
 
 - Coordinates are **canvas coordinates** — the canvas is unbounded and a board is one canvas — and annotations are bucketed by **board name**, not by output.
 - Changes land on disk within 1 second at most, written through a temp file in the same directory plus `rename`; `clear` and shutdown flush immediately. If a write fails, the change stays pending and the daemon retries without dropping the in-memory annotations.

@@ -6,6 +6,7 @@ fn line(y: f32, x0: f32, x1: f32) -> Stroke {
         color: "#e01b24".into(),
         width: 3.0,
         points: vec![[x0, y], [x1, y]],
+        attach: [None, None],
     }
 }
 
@@ -176,6 +177,7 @@ fn stroke_bounds_cover_the_width_and_its_paint_box_adds_the_wander() {
         color: "#ffffff".into(),
         width: 4.0,
         points: vec![[10.0, 20.0], [30.0, 20.0]],
+        attach: [None, None],
     };
     // Half the stroke width and one logical pixel for the anti-aliasing edge: the geometry the user
     // drew, which is what a selection frame and a marquee measure.
@@ -218,6 +220,7 @@ fn the_wander_is_room_for_painting_and_not_for_hitting() {
         color: "#ffffff".into(),
         width: 2.0,
         points: vec![[0.0, 0.0], [100.0, 0.0]],
+        attach: [None, None],
     };
     let a = Board {
         strokes: vec![line],
@@ -247,6 +250,7 @@ fn stroke_at(x: f32, y: f32) -> Stroke {
         color: "#e01b24".into(),
         width: 2.0,
         points: vec![[x, y], [x + 10.0, y]],
+        attach: [None, None],
     }
 }
 
@@ -403,6 +407,7 @@ fn a_corner_resize_keeps_the_opposite_corner_still() {
         color: "#ffffff".into(),
         width: 2.0,
         points: vec![[100.0, 100.0], [300.0, 200.0]],
+        attach: [None, None],
     };
     let scaled = t.stroke(&s);
     assert_eq!(scaled.points[0], [100.0, 100.0], "the anchor did not move");
@@ -483,6 +488,7 @@ fn a_rotation_turns_the_points_about_the_frames_centre_and_moves_the_text_uprigh
         color: "#ffffff".into(),
         width: 2.0,
         points: vec![[50.0, 0.0], [50.0, 50.0]],
+        attach: [None, None],
     });
     assert!((turned.points[0][0] - 100.0).abs() < 0.001);
     assert!((turned.points[0][1] - 50.0).abs() < 0.001);
@@ -586,6 +592,8 @@ fn shape(kind: ShapeKind, from: [f32; 2], to: [f32; 2]) -> Shape {
         width: 3.0,
         from,
         to,
+        id: 0,
+        attach: [None, None],
     }
 }
 
@@ -1474,6 +1482,8 @@ fn the_selection_walk_visits_every_kind_in_document_order() {
             width: 3.0,
             from: [0.0, 0.0],
             to: [10.0, 10.0],
+            id: 0,
+            attach: [None, None],
         }],
         notes: vec![sgraffito::canvas::Note::new(
             0.0,
@@ -1524,6 +1534,8 @@ fn the_walk_wraps_backwards_and_steps_from_a_marquee() {
             width: 3.0,
             from: [0.0, 0.0],
             to: [10.0, 10.0],
+            id: 0,
+            attach: [None, None],
         }],
         notes: vec![Note::new(0.0, 0.0, "#ffffff", "2026/01/01".into())],
     };
@@ -1568,6 +1580,7 @@ fn the_selection_frame_is_the_stored_geometry_and_not_the_ink() {
         color: "#e01b24".into(),
         width: 4.0,
         points: vec![[10.0, 20.0], [110.0, 20.0]],
+        attach: [None, None],
     };
     let a = Board {
         strokes: vec![stroke.clone()],
@@ -1600,6 +1613,7 @@ fn a_dot_is_not_painted_beyond_its_own_disc() {
         color: "#ffffff".into(),
         width: 4.0,
         points: vec![[5.0, 5.0]],
+        attach: [None, None],
     };
     assert_eq!(dot.paint_bounds(), dot.bounds());
 }
@@ -1751,6 +1765,7 @@ fn a_shift_press_toggles_and_a_handle_still_wins() {
         color: "#e01b24".into(),
         width: 2.0,
         points: vec![[0.0, 0.0], [400.0, 0.0]],
+        attach: [None, None],
     };
     let a = ann(vec![long, stroke_at(400.0, 300.0)], vec![]);
     let held = vec![ItemId::Stroke(0)];
@@ -1794,6 +1809,7 @@ fn a_shift_press_inside_the_frame_starts_nothing() {
         color: "#e01b24".into(),
         width: 2.0,
         points: vec![[0.0, y], [400.0, y]],
+        attach: [None, None],
     };
     let a = ann(vec![long(0.0), long(200.0)], vec![]);
     let held = vec![ItemId::Stroke(0), ItemId::Stroke(1)];
@@ -1809,4 +1825,111 @@ fn a_shift_press_inside_the_frame_starts_nothing() {
         Press::Move,
         "a plain press inside the frame no longer drags the selection"
     );
+}
+
+#[test]
+fn a_connector_snaps_to_a_shape_and_follows_both_endpoints() {
+    use sgraffito::canvas::{Shape, ShapeKind};
+    let mut board = Board::default();
+    board.add_shape(shape(ShapeKind::Rect, [0.0, 0.0], [100.0, 100.0]));
+    board.add_shape(shape(ShapeKind::Circle, [300.0, 0.0], [400.0, 100.0]));
+    let (left, _) = board.snap([-5.0, 50.0], 12.0).expect("no snap to the rect");
+    let (right, _) = board
+        .snap([405.0, 50.0], 12.0)
+        .expect("no snap to the circle");
+    assert_eq!(left.at, [-1.0, 0.0]);
+    assert_eq!(right.at, [1.0, 0.0]);
+
+    let connector = Shape {
+        kind: ShapeKind::Line,
+        color: "#000000".into(),
+        width: 2.0,
+        from: [0.0, 50.0],
+        to: [400.0, 50.0],
+        id: 0,
+        attach: [Some(left), Some(right)],
+    };
+    board.add_shape(connector);
+    let connector_id = board.shapes[2].id;
+
+    // Move the right-hand shape: only the attached end moves with it, both ends stay on their
+    // outlines, and the free geometry of the line is unchanged.
+    board.shapes[1].from = [380.0, 100.0];
+    board.shapes[1].to = [500.0, 200.0];
+    board.sync_connectors();
+    assert_eq!(board.shapes[2].from, [0.0, 50.0]);
+    assert_eq!(board.shapes[2].to, [500.0, 150.0]);
+    assert_eq!(
+        board.shapes[2].attach,
+        [Some(left), Some(right)],
+        "the connector lost its attachment"
+    );
+    assert_eq!(board.shapes[2].id, connector_id);
+
+    // A preview computes the same geometry without touching the document.
+    let preview = board.connector_preview(
+        &[ItemId::Shape(1)],
+        sgraffito::canvas::Transform::Translate { dx: 10.0, dy: 0.0 },
+    );
+    let live = preview
+        .iter()
+        .find_map(|connector| match connector {
+            sgraffito::canvas::LiveConnector::Shape(id, shape) if *id == ItemId::Shape(2) => {
+                Some(shape)
+            }
+            _ => None,
+        })
+        .expect("the connector is not in the preview");
+    assert_eq!(live.to, [510.0, 150.0]);
+}
+
+#[test]
+fn a_shape_id_is_unique_and_connectors_are_remapped_on_a_copy() {
+    use sgraffito::canvas::{Shape, ShapeKind};
+    let mut board = Board::default();
+    board.add_shape(shape(ShapeKind::Rect, [0.0, 0.0], [100.0, 100.0]));
+    let target = board.shapes[0].id;
+    board.add_shape(Shape {
+        kind: ShapeKind::Line,
+        color: "#000000".into(),
+        width: 2.0,
+        from: [0.0, 50.0],
+        to: [100.0, 50.0],
+        id: 0,
+        attach: [
+            Some(sgraffito::canvas::Attachment {
+                shape: target,
+                at: [-1.0, 0.0],
+            }),
+            None,
+        ],
+    });
+    let items = [ItemId::Shape(0), ItemId::Shape(1)];
+    let (copies, _) = board.duplicate(&items);
+    let copied_shape = match copies[0] {
+        ItemId::Shape(index) => board.shapes[index].id,
+        _ => unreachable!(),
+    };
+    assert_ne!(copied_shape, target, "the copy reused the original id");
+    let copied_line = match copies[1] {
+        ItemId::Shape(index) => &board.shapes[index],
+        _ => unreachable!(),
+    };
+    assert_eq!(
+        copied_line.attach[0].map(|attachment| attachment.shape),
+        Some(copied_shape),
+        "the copied connector points at the original shape"
+    );
+
+    // Loading a legacy file gives every zero-id shape a unique id.
+    let mut legacy = Board::default();
+    legacy
+        .shapes
+        .push(shape(ShapeKind::Rect, [0.0, 0.0], [10.0, 10.0]));
+    legacy
+        .shapes
+        .push(shape(ShapeKind::Circle, [20.0, 0.0], [30.0, 10.0]));
+    legacy.ensure_shape_ids();
+    assert!(legacy.shapes.iter().all(|shape| shape.id != 0));
+    assert_ne!(legacy.shapes[0].id, legacy.shapes[1].id);
 }

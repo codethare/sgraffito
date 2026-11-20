@@ -41,12 +41,13 @@ use wayland_client::{
 };
 
 use crate::canvas::{
-    Backdrop, Board, BoardEdit, BoardRow, ClipEntry, ClipRow, Doc, ERASER_THRESHOLD, Gesture, Grab,
-    Handle, ItemId, Motion, Note, Overlay, PEN_WIDTH_MAX, PEN_WIDTH_MIN, PEN_WIDTH_STEP, Press,
-    Rect, Selection, Shape, ShapeKind, TEXT_SIZE_MAX, TEXT_SIZE_MIN, TEXT_SIZE_STEP, Target,
-    TextBuffer, TextItem, TextOverlay, Toolbar, Transform, View, ZOOM_STEP, Zoom, date_stamp,
-    link_source, marquee_select, note_drag, nudge_delta, selection_bounds, selection_frame,
-    selection_press, snap_square, stepped_size, toggle_selection,
+    Attachment, Backdrop, Board, BoardEdit, BoardRow, ClipEntry, ClipRow, Doc, ERASER_THRESHOLD,
+    Gesture, Grab, Handle, ItemId, LiveConnector, Motion, Note, Overlay, PEN_WIDTH_MAX,
+    PEN_WIDTH_MIN, PEN_WIDTH_STEP, Press, Rect, SNAP_RADIUS, Selection, Shape, ShapeKind,
+    TEXT_SIZE_MAX, TEXT_SIZE_MIN, TEXT_SIZE_STEP, Target, TextBuffer, TextItem, TextOverlay,
+    Toolbar, Transform, View, ZOOM_STEP, Zoom, date_stamp, link_source, marquee_select, note_drag,
+    nudge_delta, selection_bounds, selection_frame, selection_press, snap_square, stepped_size,
+    toggle_selection,
 };
 
 pub use crate::canvas::{Tool, ToolbarAction};
@@ -1069,6 +1070,18 @@ impl App {
         (!selection.items.is_empty()).then(|| (out.board.clone(), selection.items.clone()))
     }
 
+    /// The closed shape a connector end at a canvas point should stick to, in canvas units: the
+    /// magnetic radius is an interface length, so it is divided by the zoom.
+    pub(crate) fn snap_connector(
+        &self,
+        key: &u32,
+        point: [f32; 2],
+    ) -> Option<(Attachment, [f32; 2])> {
+        let out = self.outputs.get(key)?;
+        let ann = self.doc.boards.get(out.board())?;
+        ann.snap(point, SNAP_RADIUS / out.view.zoom)
+    }
+
     /// The linked text under a screen point on this output: the board it links to and the canvas
     /// point its centre sits on, which is where the view goes after the switch.
     pub(crate) fn linked_text_at(
@@ -1581,12 +1594,11 @@ impl App {
                     None => box_,
                 });
             }
-            self.doc
-                .boards
-                .entry(board_name)
-                .or_default()
-                .strokes
-                .push(stroke);
+            let board = self.doc.boards.entry(board_name).or_default();
+            board.strokes.push(stroke);
+            if let Some(settled) = board.sync_connectors() {
+                committed_box = Some(committed_box.map_or(settled, |box_| box_.union(settled)));
+            }
         }
         for (_, board_name, shape) in shapes {
             let box_ = shape.paint_bounds();
@@ -1594,12 +1606,11 @@ impl App {
                 Some(pending) => pending.union(box_),
                 None => box_,
             });
-            self.doc
-                .boards
-                .entry(board_name)
-                .or_default()
-                .shapes
-                .push(shape);
+            let board = self.doc.boards.entry(board_name).or_default();
+            board.add_shape(shape);
+            if let Some(settled) = board.sync_connectors() {
+                committed_box = Some(committed_box.map_or(settled, |box_| box_.union(settled)));
+            }
         }
         if committed {
             self.doc_changed_at(key, committed_box.unwrap_or_default());
@@ -1624,6 +1635,7 @@ impl App {
             || out.overlay.note.take().is_some()
             || out.overlay.selection.take().is_some()
             || out.overlay.marquee.take().is_some();
+        out.overlay.connectors.clear();
         if changed {
             out.transient_dirty = true;
             out.dirty = true;
@@ -1754,14 +1766,48 @@ impl App {
             self.duplicate_selection(key);
         }
         let next = (!transform.is_identity()).then_some(transform);
-        let Some(out) = self.outputs.get_mut(&key) else {
+        let changed = {
+            let Some(out) = self.outputs.get_mut(&key) else {
+                return;
+            };
+            let Some(selection) = out.overlay.selection.as_mut() else {
+                return;
+            };
+            if selection.transform == next {
+                false
+            } else {
+                selection.transform = next;
+                out.transient_dirty = true;
+                self.dirty = true;
+                true
+            }
+        };
+        if changed {
+            self.refresh_live_connectors(key);
+        }
+    }
+
+    /// Rebuild the attached-connector copies the overlay paints during a selection drag, and skip
+    /// their committed geometry in the raster.
+    fn refresh_live_connectors(&mut self, key: u32) {
+        let Some((board_name, items, transform)) = self.outputs.get(&key).and_then(|out| {
+            let selection = out.overlay.selection.as_ref()?;
+            let transform = selection.transform?;
+            Some((out.board().to_string(), selection.items.clone(), transform))
+        }) else {
+            if let Some(out) = self.outputs.get_mut(&key) {
+                out.overlay.connectors.clear();
+            }
             return;
         };
-        let Some(selection) = out.overlay.selection.as_mut() else {
-            return;
-        };
-        if selection.transform != next {
-            selection.transform = next;
+        let connectors = self
+            .doc
+            .boards
+            .get(&board_name)
+            .map(|board| board.connector_preview(&items, transform))
+            .unwrap_or_default();
+        if let Some(out) = self.outputs.get_mut(&key) {
+            out.overlay.connectors = connectors;
             out.transient_dirty = true;
             self.dirty = true;
         }
@@ -2027,6 +2073,7 @@ impl App {
         let mut dropped = false;
         for out in self.outputs.values_mut() {
             let had = out.overlay.selection.take().is_some() | out.overlay.marquee.take().is_some();
+            out.overlay.connectors.clear();
             if had {
                 out.transient_dirty = true;
                 dropped = true;
@@ -2106,6 +2153,7 @@ impl App {
             let next = if *k == key { owned.clone() } else { None };
             if out.overlay.selection != next {
                 out.overlay.selection = next;
+                out.overlay.connectors.clear();
                 out.transient_dirty = true;
                 self.dirty = true;
             }
@@ -2190,6 +2238,12 @@ impl App {
                     (a, b) => a.or(b),
                 };
             }
+            // A moved shape drags every connector attached to it, whether or not the connector was
+            // part of the selection. Both endpoints are re-seated on their shapes here, once, on the
+            // same commit as the move.
+            if let Some(connector_box) = ann.sync_connectors() {
+                box_ = Some(box_.map_or(connector_box, |box_| box_.union(connector_box)));
+            }
         }
         // A copy the gesture made is ordinary content from here on: it has been dragged, and the gesture
         // that owned it is over.
@@ -2200,6 +2254,7 @@ impl App {
             && let Some(selection) = out.overlay.selection.as_mut()
         {
             selection.transform = None;
+            out.overlay.connectors.clear();
         }
         if let Some(box_) = box_ {
             self.doc_changed_at(key, box_);
@@ -2484,6 +2539,15 @@ impl App {
     pub(crate) fn begin_shape(&mut self, key: &u32, x: f32, y: f32, kind: ShapeKind) {
         let color = crate::config::current().colors[self.color_idx].clone();
         let width = self.pen_width;
+        let snap = if matches!(kind, ShapeKind::Line | ShapeKind::Arrow) {
+            self.snap_connector(key, [x, y])
+        } else {
+            None
+        };
+        let (from, attach) = match snap {
+            Some((attachment, point)) => (point, [Some(attachment), None]),
+            None => ([x, y], [None, None]),
+        };
         let Some(out) = self.outputs.get_mut(key) else {
             return;
         };
@@ -2491,8 +2555,10 @@ impl App {
             kind,
             color,
             width,
-            from: [x, y],
-            to: [x, y],
+            from,
+            to: from,
+            id: 0,
+            attach,
         });
     }
 
@@ -3079,6 +3145,7 @@ impl App {
         if let Some(selection) = &out.overlay.selection {
             skip.extend_from_slice(selection.live());
         }
+        skip.extend(out.overlay.connectors.iter().map(LiveConnector::id));
         let damage = if out.dirty || out.last_buffer != Some(idx) || text_needs_full {
             None
         } else if let Some(pending) = out.pending {

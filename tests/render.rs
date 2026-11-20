@@ -49,6 +49,7 @@ fn line(y: f32, x0: f32, x1: f32) -> Stroke {
         color: "#e01b24".into(),
         width: 4.0,
         points: vec![[x0, y], [x1, y]],
+        attach: [None, None],
     }
 }
 
@@ -311,6 +312,7 @@ fn stroke_is_smoothed_through_the_sample_midpoints() {
             color: "#e01b24".into(),
             width: 4.0,
             points,
+            attach: [None, None],
         }],
         vec![],
     );
@@ -341,6 +343,7 @@ fn single_sample_stroke_is_a_dot() {
             color: "#e01b24".into(),
             width: 4.0,
             points: vec![[60.0, 40.0]],
+            attach: [None, None],
         }],
         vec![],
     );
@@ -402,6 +405,7 @@ fn dot(x: f32, y: f32) -> Overlay {
             color: "#f6d32d".into(),
             width: 3.0,
             points: vec![[x, y]],
+            attach: [None, None],
         }),
         ..Default::default()
     }
@@ -1586,6 +1590,7 @@ fn a_cached_frame_keeps_the_scrim_after_a_document_change() {
         color: "#e01b24".into(),
         width: 4.0,
         points: vec![[20.0, 20.0], [120.0, 60.0]],
+        attach: [None, None],
     }];
     let mut first = buffer(w, h);
     renderer.render_with_cache(
@@ -1647,6 +1652,7 @@ fn a_panned_and_zoomed_frame_puts_the_drawing_where_the_view_says() {
             color: "#e01b24".into(),
             width: 4.0,
             points: vec![[100.0, 100.0], [140.0, 100.0]],
+            attach: [None, None],
         }],
         texts: vec![],
         shapes: vec![],
@@ -1694,6 +1700,7 @@ fn the_default_view_draws_what_no_view_drew() {
             color: "#e01b24".into(),
             width: 4.0,
             points: vec![[40.0, 40.0], [180.0, 90.0]],
+            attach: [None, None],
         }],
         texts: vec![TextItem {
             x: 40.0,
@@ -1709,6 +1716,8 @@ fn the_default_view_draws_what_no_view_drew() {
             width: 3.0,
             from: [200.0, 150.0],
             to: [300.0, 250.0],
+            id: 0,
+            attach: [None, None],
         }],
         notes: vec![],
     };
@@ -2078,6 +2087,7 @@ fn a_note_is_drawn_over_the_ink_that_crosses_it() {
         color: PALETTE[0].to_string(),
         width: 6.0,
         points: vec![[40.0, 110.0], [300.0, 110.0]],
+        attach: [None, None],
     };
     let with_ink = Board {
         strokes: vec![stroke],
@@ -2543,6 +2553,8 @@ fn a_shape_is_drawn_as_a_hand_drawn_outline() {
             width: 3.0,
             from: [60.0, 50.0],
             to: [180.0, 120.0],
+            id: 0,
+            attach: [None, None],
         }],
         notes: vec![],
     };
@@ -2577,6 +2589,8 @@ fn rect_shape(from: [f32; 2], to: [f32; 2]) -> Shape {
         width: 3.0,
         from,
         to,
+        id: 0,
+        attach: [None, None],
     }
 }
 

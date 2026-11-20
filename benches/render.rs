@@ -36,6 +36,7 @@ fn line(y: f32, x0: f32, x1: f32, width: f32) -> Stroke {
         color: "#e01b24".into(),
         width,
         points: vec![[x0, y], [x1, y]],
+        attach: [None, None],
     }
 }
 
@@ -66,6 +67,7 @@ fn live_stroke(width: f32, height: f32) -> Stroke {
         color: "#3584e4".into(),
         width: 3.0,
         points: vec![[width * 0.2, height * 0.3], [width * 0.24, height * 0.34]],
+        attach: [None, None],
     }
 }
 

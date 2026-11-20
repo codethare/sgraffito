@@ -12,8 +12,8 @@ use tiny_skia::{
 use wayland_client::protocol::wl_shm::Format;
 
 use crate::canvas::{
-    Backdrop, Board, Handle, ItemId, NOTE_DATE_SIZE, NOTE_RADIUS, Note, Overlay, Rect,
-    SELECT_HANDLE, SELECT_ROTATE_GAP, Shape, ShapeKind, Stroke, TextItem, TextOverlay, Tool,
+    Backdrop, Board, Handle, ItemId, LiveConnector, NOTE_DATE_SIZE, NOTE_RADIUS, Note, Overlay,
+    Rect, SELECT_HANDLE, SELECT_ROTATE_GAP, Shape, ShapeKind, Stroke, TextItem, TextOverlay, Tool,
     Toolbar, ToolbarAction, View, parse_hex, rect_of, rotate_handle, selection_frame,
 };
 use crate::config;
@@ -1267,6 +1267,16 @@ impl Renderer {
                 }
             }
         }
+        for connector in &overlay.connectors {
+            match connector {
+                LiveConnector::Stroke(_, stroke) => {
+                    draw_stroke(&mut pixmap, stroke, screen, Ink::Sketch(stroke.seed()));
+                }
+                LiveConnector::Shape(_, shape) => {
+                    draw_shape(&mut pixmap, shape, screen, Ink::Sketch(shape.seed()));
+                }
+            }
+        }
         if let Some(frame) = overlay
             .selection
             .as_ref()
@@ -2516,9 +2526,17 @@ pub fn transient_bounds(overlay: &Overlay) -> Option<Rect> {
         .grown(ERASER_MARKER_RADIUS + 2.0)
     });
     let marquee = overlay.marquee.map(|m| m.grown(SELECT_HANDLE));
+    let connectors = overlay
+        .connectors
+        .iter()
+        .filter_map(|connector| match connector {
+            LiveConnector::Stroke(_, stroke) => stroke.paint_bounds(),
+            LiveConnector::Shape(_, shape) => Some(shape.paint_bounds()),
+        });
     [stroke, shape, note, eraser, marquee]
         .into_iter()
         .flatten()
+        .chain(connectors)
         .reduce(Rect::union)
 }
 
@@ -2883,6 +2901,8 @@ fn draw_icon(pixmap: &mut PixmapMut, icon: Icon, square: Rect, scale: f32, color
                 width: ICON_STROKE,
                 from,
                 to,
+                id: 0,
+                attach: [None, None],
             },
             icon_screen,
             Ink::Precise,
@@ -3021,6 +3041,7 @@ fn draw_icon(pixmap: &mut PixmapMut, icon: Icon, square: Rect, scale: f32, color
                     [l.x + l.w * 0.65, l.y + l.h * 0.75],
                     [l.x + l.w * 0.95, l.y + l.h * 0.2],
                 ],
+                attach: [None, None],
             },
             icon_screen,
             Ink::Precise,
@@ -3899,6 +3920,34 @@ mod tests {
         assert_eq!(Backdrop::Dots.next(), Backdrop::Black);
     }
 
+    /// A live connector is overlay content: its box has to be part of the damage the frame reports,
+    /// or the connector's old stroke stays behind while the shape is dragged.
+    #[test]
+    fn a_live_connector_joins_the_transient_damage() {
+        let connector = Shape {
+            kind: ShapeKind::Line,
+            color: "#ffffff".into(),
+            width: 3.0,
+            from: [10.0, 20.0],
+            to: [400.0, 200.0],
+            id: 0,
+            attach: [
+                Some(crate::canvas::Attachment {
+                    shape: 1,
+                    at: [1.0, 0.0],
+                }),
+                None,
+            ],
+        };
+        let overlay = Overlay {
+            connectors: vec![LiveConnector::Shape(ItemId::Shape(0), connector.clone())],
+            ..Default::default()
+        };
+        let bounds = transient_bounds(&overlay).expect("a live connector has no box");
+        assert!(bounds.contains(10.0, 20.0) && bounds.contains(400.0, 200.0));
+        assert!(bounds.w >= connector.from[0].abs() && bounds.h > 0.0);
+    }
+
     /// The four backdrop options are one horizontal row level with the `backdrop` row, and each is
     /// the action that sets its mode.
     #[test]
@@ -4538,6 +4587,7 @@ mod tests {
                 color: "#e01b24".into(),
                 width: 4.0,
                 points: vec![[10.0, 50.0], [190.0, 60.0]],
+                attach: [None, None],
             }],
             texts: vec![text_item("cached text")],
             shapes: vec![],
@@ -4969,6 +5019,8 @@ mod tests {
             width: 3.0,
             from: [40.0, 20.0],
             to: [160.0, 80.0],
+            id: 0,
+            attach: [None, None],
         };
         let mut renderer = Renderer::new();
         let stored = Board {
@@ -5153,6 +5205,7 @@ mod tests {
                     [l.x + l.w * 0.65, l.y + l.h * 0.75],
                     [l.x + l.w * 0.95, l.y + l.h * 0.2],
                 ],
+                attach: [None, None],
             },
             Screen {
                 scale,
