@@ -2,8 +2,8 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use sgraffito::canvas::{
-    Board, MOTION_QUALITY, Overlay, Rect, Stroke, TextBuffer, TextItem, TextOverlay, Tool, Toolbar,
-    ToolbarAction, View,
+    Backdrop, Board, MOTION_QUALITY, Overlay, Rect, Stroke, TextBuffer, TextItem, TextOverlay,
+    Tool, Toolbar, ToolbarAction, View,
 };
 use sgraffito::render::{FrameCache, Renderer, toolbar_bounds, transient_bounds, transient_damage};
 use sgraffito::sketch;
@@ -261,7 +261,7 @@ fn rail_state() -> Toolbar {
         rename: None,
         boards: Vec::new(),
         shared: false,
-        scrim: true,
+        backdrop: Backdrop::Black,
         tool: Tool::Pen,
         color: "#e01b24".to_string(),
         size: 3.0,

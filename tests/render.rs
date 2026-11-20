@@ -1,7 +1,7 @@
 use sgraffito::canvas::{
-    Board, BoardRow, Doc, ERASER_THRESHOLD, ItemId, Note, Overlay, PALETTE, Rect, Selection, Shape,
-    ShapeKind, Stroke, TextBuffer, TextItem, TextOverlay, Tool, Toolbar, ToolbarAction, Transform,
-    View,
+    Backdrop, Board, BoardRow, Doc, ERASER_THRESHOLD, ItemId, Note, Overlay, PALETTE, Rect,
+    Selection, Shape, ShapeKind, Stroke, TextBuffer, TextItem, TextOverlay, Tool, Toolbar,
+    ToolbarAction, Transform, View,
 };
 use sgraffito::render::{
     DAMAGE_SLACK, DamageRegion, FrameCache, Renderer, Screen, buffer_format, move_button_bounds,
@@ -387,7 +387,7 @@ fn toolbar(tool: Tool, color: &'static str, size: f32, hover: Option<ToolbarActi
         rename: None,
         boards: Vec::new(),
         shared: false,
-        scrim: true,
+        backdrop: Backdrop::Black,
     }
 }
 
@@ -1905,7 +1905,7 @@ fn the_backdrop_can_be_switched_off_and_on() {
     };
     let off = Overlay {
         toolbar: Some(Toolbar {
-            scrim: false,
+            backdrop: Backdrop::Transparent,
             ..rail()
         }),
         ..Default::default()
@@ -2349,11 +2349,11 @@ fn switching_the_backdrop_repaints_the_whole_surface() {
     // surface had before, which is what "only the area around the rail changed" was.
     let (w, h) = (600u32, 500u32);
     let view = View::default();
-    let rail = |scrim: bool| Toolbar {
-        scrim,
+    let rail = |backdrop: Backdrop| Toolbar {
+        backdrop,
         ..toolbar(Tool::Pen, PALETTE[0], 3.0, None)
     };
-    let draw = |buf: &mut [u8], cache: &mut FrameCache, scrim: bool| {
+    let draw = |buf: &mut [u8], cache: &mut FrameCache, backdrop: Backdrop| {
         Renderer::new().render_with_cache(
             buf,
             w,
@@ -2363,7 +2363,7 @@ fn switching_the_backdrop_repaints_the_whole_surface() {
             view,
             &Board::default(),
             &Overlay {
-                toolbar: Some(rail(scrim)),
+                toolbar: Some(rail(backdrop)),
                 ..Default::default()
             },
             None,
@@ -2373,11 +2373,11 @@ fn switching_the_backdrop_repaints_the_whole_surface() {
     };
     let mut cache = FrameCache::default();
     let mut buf = buffer(w, h);
-    draw(&mut buf, &mut cache, true);
+    draw(&mut buf, &mut cache, Backdrop::Black);
     let alpha = |b: &[u8], x: u32, y: u32| b[((y * w + x) * 4 + 3) as usize];
-    // The scrim is black at 90%, so a pixel on it is nearly opaque everywhere, well away from the rail.
-    assert!(alpha(&buf, 400, 400) > 200, "the scrim is not painted");
-    draw(&mut buf, &mut cache, false);
+    // The dim backdrop is black at 90%, so a pixel on it is nearly opaque everywhere, well away from the rail.
+    assert!(alpha(&buf, 400, 400) > 200, "the backdrop is not painted");
+    draw(&mut buf, &mut cache, Backdrop::Transparent);
     for (x, y) in [(400, 400), (400, 100), (550, 480), (200, 250)] {
         assert_eq!(
             alpha(&buf, x, y),
@@ -2460,7 +2460,7 @@ fn a_row_of_the_panel_can_be_clicked_with_the_pointer_on_the_block_that_opened_i
         rename: None,
         boards: Vec::new(),
         shared: false,
-        scrim: true,
+        backdrop: Backdrop::Black,
     };
     let mut renderer = Renderer::new();
     let band = toolbar_bounds(&rail(), w as f32, h as f32);
@@ -3715,7 +3715,7 @@ fn a_panel_draws_only_rows_that_are_inside_the_output_and_clickable() {
     let mut rail = toolbar(Tool::Pen, PALETTE[0], 3.0, None);
     rail.more = true;
     // No backdrop: with it on every pixel of the surface is the scrim and the test would measure that.
-    rail.scrim = false;
+    rail.backdrop = Backdrop::Transparent;
     let mut buf = buffer(w, h);
     Renderer::new().render(
         &mut buf,
@@ -3808,7 +3808,7 @@ fn the_corridor_covers_the_panels_whole_span_not_just_the_blocks_row() {
 fn a_panel_paints_no_plate_behind_its_rows() {
     let (w, h) = (900u32, 1000u32);
     let mut rail = boards_rail(&[("Board 1", true), ("office", false)]);
-    rail.scrim = false;
+    rail.backdrop = Backdrop::Transparent;
     let mut buf = buffer(w, h);
     Renderer::new().render(
         &mut buf,

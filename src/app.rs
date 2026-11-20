@@ -41,12 +41,12 @@ use wayland_client::{
 };
 
 use crate::canvas::{
-    Board, BoardEdit, BoardRow, ClipEntry, ClipRow, Doc, ERASER_THRESHOLD, Gesture, Grab, Handle,
-    ItemId, Motion, Note, Overlay, PEN_WIDTH_MAX, PEN_WIDTH_MIN, PEN_WIDTH_STEP, Press, Rect,
-    Selection, Shape, ShapeKind, TEXT_SIZE_MAX, TEXT_SIZE_MIN, TEXT_SIZE_STEP, Target, TextBuffer,
-    TextItem, TextOverlay, Toolbar, Transform, View, ZOOM_STEP, Zoom, date_stamp, link_source,
-    marquee_select, note_drag, nudge_delta, selection_bounds, selection_frame, selection_press,
-    snap_square, stepped_size, toggle_selection,
+    Backdrop, Board, BoardEdit, BoardRow, ClipEntry, ClipRow, Doc, ERASER_THRESHOLD, Gesture, Grab,
+    Handle, ItemId, Motion, Note, Overlay, PEN_WIDTH_MAX, PEN_WIDTH_MIN, PEN_WIDTH_STEP, Press,
+    Rect, Selection, Shape, ShapeKind, TEXT_SIZE_MAX, TEXT_SIZE_MIN, TEXT_SIZE_STEP, Target,
+    TextBuffer, TextItem, TextOverlay, Toolbar, Transform, View, ZOOM_STEP, Zoom, date_stamp,
+    link_source, marquee_select, note_drag, nudge_delta, selection_bounds, selection_frame,
+    selection_press, snap_square, stepped_size, toggle_selection,
 };
 
 pub use crate::canvas::{Tool, ToolbarAction};
@@ -344,9 +344,8 @@ pub struct App {
     pending_duplicate: Option<Duplicate>,
     /// Whether the drawer of rarely used controls is open. Transient, like the selection.
     pub(crate) more: bool,
-    /// Whether edit mode paints the backdrop. A preference about reading, so it is not persisted and a
-    /// new session starts with it on.
-    pub(crate) scrim: bool,
+    /// What edit mode paints behind the document. A preference about reading, so it is not persisted.
+    pub(crate) backdrop: Backdrop,
     /// Whether every screen shows the board picked on any of them, or each picks its own. Session state
     /// for the same reason: it is a choice about how this sitting reads. Per screen is the default, so
     /// an upgrade moves nobody's drawing.
@@ -489,7 +488,7 @@ impl App {
             alt: false,
             pending_duplicate: None,
             more: false,
-            scrim: true,
+            backdrop: Backdrop::Black,
             pan: None,
             gestures: None,
             pinch: None,
@@ -721,7 +720,7 @@ impl App {
                         })
                         .collect(),
                     shared: self.shared,
-                    scrim: self.scrim,
+                    backdrop: self.backdrop,
                 })
             }
         }
@@ -989,17 +988,24 @@ impl App {
         }
     }
 
-    /// Switch the edit-mode backdrop. It is a preference about reading, not content: the document and the
-    /// file are untouched, and every output's raster is dropped because the backdrop is what the raster
-    /// is painted on — a frame must never carry the state that was switched away from.
-    pub(crate) fn toggle_scrim(&mut self) {
-        self.scrim = !self.scrim;
-        // The flag the frame reads is the toolbar each output holds, not `self.scrim`, so the new one has
-        // to be pushed into every output: without this the frame went on painting the scrim it had, and
-        // the switch only took effect when a mode switch rebuilt the surfaces and refreshed the rail.
+    /// Step the edit-mode backdrop: transparent, grid, dots, dim, and round again. It is a preference
+    /// about reading, not content: the document and the file are untouched, and every output's
+    /// raster is dropped because the backdrop is what the raster is painted on.
+    pub(crate) fn cycle_backdrop(&mut self) {
+        self.set_backdrop(self.backdrop.next());
+    }
+
+    /// Pick one backdrop mode. The rail is refreshed because the active option and the drawer's
+    /// label both read it, and every raster is dropped because the backdrop is what the raster is
+    /// painted on.
+    pub(crate) fn set_backdrop(&mut self, mode: Backdrop) {
+        if self.backdrop == mode {
+            return;
+        }
+        self.backdrop = mode;
         self.refresh_toolbar();
         self.invalidate_text_caches();
-        // Every pixel of the surface is the scrim or the lack of it, so the frame that follows is a
+        // Every pixel of the surface is the backdrop or its absence, so the frame that follows is a
         // whole-surface one.
         self.mark_all_dirty();
     }

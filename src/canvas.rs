@@ -170,6 +170,8 @@ pub enum ToolbarAction {
     More,
     /// Switch the edit-mode backdrop off and on.
     Scrim,
+    /// Pick one backdrop mode from the row beside the backdrop button.
+    Backdrop(Backdrop),
     /// Open or close the panel of boards.
     Boards,
     /// Pick the board at this index of the panel's list.
@@ -189,6 +191,50 @@ pub enum ToolbarAction {
     Clipboard,
     /// Paste clipboard entry `index`, newest first.
     Clip(usize),
+}
+
+/// What edit mode paints behind the document. Locked mode always paints nothing, because that
+/// surface sits below ordinary windows and a backdrop there would hide the wallpaper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Backdrop {
+    /// Nothing: the wallpaper shows through.
+    Transparent,
+    /// A 24-point square grid over the wallpaper.
+    Grid,
+    /// A 24-point dot matrix over the wallpaper.
+    Dots,
+    /// Black at 90% opacity, which dims whatever is behind it.
+    #[default]
+    Black,
+}
+
+impl Backdrop {
+    /// The order the buttons list them in, and the order the `B` key cycles.
+    pub const ALL: [Backdrop; 4] = [
+        Backdrop::Transparent,
+        Backdrop::Grid,
+        Backdrop::Dots,
+        Backdrop::Black,
+    ];
+
+    /// The next mode the shortcut steps to: transparent, grid, dots, black, transparent.
+    pub fn next(self) -> Backdrop {
+        match self {
+            Backdrop::Transparent => Backdrop::Grid,
+            Backdrop::Grid => Backdrop::Dots,
+            Backdrop::Dots => Backdrop::Black,
+            Backdrop::Black => Backdrop::Transparent,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Backdrop::Transparent => "transparent",
+            Backdrop::Grid => "grid",
+            Backdrop::Dots => "dots",
+            Backdrop::Black => "dim",
+        }
+    }
 }
 
 /// What a press in the board list applies, when the list opened to pick a target rather than to
@@ -2195,9 +2241,8 @@ pub struct Toolbar {
     pub boards: Vec<BoardRow>,
     /// Whether every screen shows the board picked on any of them.
     pub shared: bool,
-    /// Whether the edit-mode backdrop is painted. A preference rather than content: it decides how the
-    /// surface reads, and the raster is keyed by it so a frame cannot hold the other state.
-    pub scrim: bool,
+    /// What edit mode paints behind the document.
+    pub backdrop: Backdrop,
 }
 
 #[derive(Debug, Clone)]

@@ -1098,7 +1098,8 @@ impl App {
             ToolbarAction::More => self.toggle_more(),
             // A click on the readout toggles its list, like every other control on the rail.
             ToolbarAction::Size => self.set_size(!self.size_open),
-            ToolbarAction::Scrim => self.toggle_scrim(),
+            ToolbarAction::Scrim => self.cycle_backdrop(),
+            ToolbarAction::Backdrop(mode) => self.set_backdrop(mode),
             ToolbarAction::Boards => self.toggle_boards(),
             ToolbarAction::Shared => self.toggle_shared(),
             ToolbarAction::Link => self.open_target(acting, Target::Link),

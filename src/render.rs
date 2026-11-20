@@ -12,9 +12,9 @@ use tiny_skia::{
 use wayland_client::protocol::wl_shm::Format;
 
 use crate::canvas::{
-    Board, Handle, ItemId, NOTE_DATE_SIZE, NOTE_RADIUS, Note, Overlay, Rect, SELECT_HANDLE,
-    SELECT_ROTATE_GAP, Shape, ShapeKind, Stroke, TextItem, TextOverlay, Tool, Toolbar,
-    ToolbarAction, View, parse_hex, rect_of, rotate_handle, selection_frame,
+    Backdrop, Board, Handle, ItemId, NOTE_DATE_SIZE, NOTE_RADIUS, Note, Overlay, Rect,
+    SELECT_HANDLE, SELECT_ROTATE_GAP, Shape, ShapeKind, Stroke, TextItem, TextOverlay, Tool,
+    Toolbar, ToolbarAction, View, parse_hex, rect_of, rotate_handle, selection_frame,
 };
 use crate::config;
 use crate::sketch::{self, Seg};
@@ -81,6 +81,15 @@ const TOOLBAR_ACCENT: &str = "#0a84ffff";
 const SCRIM_FILL: &str = "#000000e6";
 /// The scrim's alpha, for the tests that have to tell content from the scrim a frame is painted on.
 pub const SCRIM_ALPHA: u8 = 0xCC;
+/// A 24-point cell, the common dot-grid spacing in drawing and note products (and three 8-point
+/// steps); the line is one logical pixel, the dot two.
+const BACKDROP_SPACING: f32 = 24.0;
+const BACKDROP_LINE: f32 = 1.0;
+const BACKDROP_DOT: f32 = 2.0;
+/// Mid-grey at partial opacity: visible over a light wallpaper and over a dark one, without
+/// pretending to be content.
+const BACKDROP_GRID_COLOR: &str = "#80808066";
+const BACKDROP_DOT_COLOR: &str = "#80808099";
 /// `#rrggbbaa`. The plate the rail sits on: black at 90% opacity, behind every block so the gaps
 /// between them do not show the wallpaper at full strength and the rail reads as one control over
 /// bright content drawn under it. Over the edit-mode scrim it reads as 99% black against the
@@ -145,6 +154,12 @@ enum Icon {
     Link,
     /// A clipboard entry.
     Clipboard,
+    /// No backdrop: an empty square.
+    Clear,
+    /// A square grid.
+    Grid,
+    /// A dot matrix.
+    Dots,
 }
 
 /// What a canvas coordinate has to be multiplied by to become a device pixel: the output's scale, and
@@ -234,6 +249,7 @@ fn key_of(action: ToolbarAction) -> Option<&'static str> {
         ToolbarAction::Clipboard => "Ctrl+Shift+V",
         ToolbarAction::Link => return None,
         ToolbarAction::Clip(_) => return None,
+        ToolbarAction::Backdrop(_) => return None,
         ToolbarAction::Color(index) => ["1", "2", "3", "4", "5"].get(index).copied().unwrap_or("?"),
         ToolbarAction::SizeStep(dir) => {
             if dir < 0.0 {
@@ -548,6 +564,7 @@ pub fn picks_from_panel(action: ToolbarAction) -> bool {
                 | ToolbarAction::RenameBoard(_)
                 | ToolbarAction::SizeStep(_)
                 | ToolbarAction::Clip(_)
+                | ToolbarAction::Backdrop(_)
         )
 }
 
@@ -559,7 +576,12 @@ pub fn picks_from_panel(action: ToolbarAction) -> bool {
 pub fn panel_stays_open(hover: Option<ToolbarAction>, owner: Option<ToolbarAction>) -> bool {
     matches!(
         owner,
-        Some(ToolbarAction::Boards | ToolbarAction::Size | ToolbarAction::Clipboard)
+        Some(
+            ToolbarAction::Boards
+                | ToolbarAction::Size
+                | ToolbarAction::Clipboard
+                | ToolbarAction::More
+        )
     ) || match owner {
         Some(owner) => hover == Some(owner) || hover.is_some_and(picks_from_panel),
         None => false,
@@ -579,6 +601,8 @@ pub fn closes_panel_on_pick(action: ToolbarAction) -> bool {
                 | ToolbarAction::RenameBoard(_)
                 | ToolbarAction::Link
                 | ToolbarAction::Clipboard
+                | ToolbarAction::Scrim
+                | ToolbarAction::Backdrop(_)
         )
 }
 
@@ -601,16 +625,15 @@ fn drawer_blocks(toolbar: &Toolbar, overflow: &[Block]) -> Vec<Block> {
             ToolbarAction::Scrim => Some(Block {
                 mark: Mark::Icon(Icon::Scrim),
                 column: 1,
-                label: labelled(
-                    *action,
-                    if toolbar.scrim {
-                        "backdrop: on"
-                    } else {
-                        "backdrop: off"
-                    },
-                ),
+                // Open, the row is the anchor of the four mode buttons beside it; its name would
+                // cover them, and the active option already says which mode is on.
+                label: if toolbar.more {
+                    String::new()
+                } else {
+                    labelled(*action, &format!("backdrop: {}", toolbar.backdrop.name()))
+                },
                 action: Some(*action),
-                active: toolbar.scrim,
+                active: false,
                 gap: TOOLBAR_GAP,
             }),
             ToolbarAction::Shared => Some(Block {
@@ -807,6 +830,52 @@ pub struct Renderer {
     toolbar_cache: Vec<CachedToolbar>,
 }
 
+/// Clear `pixmap` and paint the chosen backdrop. `scale` is the output's device scale, so the grid
+/// keeps its 24-point cell whatever the display's density.
+fn paint_backdrop(pixmap: &mut PixmapMut, mode: Backdrop, scale: f32) {
+    pixmap.fill(SkColor::TRANSPARENT);
+    match mode {
+        Backdrop::Transparent => {}
+        Backdrop::Black => {
+            let c = parse_hex(SCRIM_FILL);
+            pixmap.fill(SkColor::from_rgba8(c[0], c[1], c[2], c[3]));
+        }
+        Backdrop::Grid => {
+            let c = parse_hex(BACKDROP_GRID_COLOR);
+            let color = Color::rgba(c[0], c[1], c[2], c[3]);
+            let (w, h) = (pixmap.width() as f32, pixmap.height() as f32);
+            let spacing = (BACKDROP_SPACING * scale).max(1.0);
+            let line = (BACKDROP_LINE * scale).max(1.0);
+            let mut x = 0.0;
+            while x < w {
+                fill(pixmap, x, 0.0, line, h, color);
+                x += spacing;
+            }
+            let mut y = 0.0;
+            while y < h {
+                fill(pixmap, 0.0, y, w, line, color);
+                y += spacing;
+            }
+        }
+        Backdrop::Dots => {
+            let c = parse_hex(BACKDROP_DOT_COLOR);
+            let color = Color::rgba(c[0], c[1], c[2], c[3]);
+            let (w, h) = (pixmap.width() as f32, pixmap.height() as f32);
+            let spacing = (BACKDROP_SPACING * scale).max(1.0);
+            let dot = (BACKDROP_DOT * scale).max(1.0);
+            let mut y = spacing / 2.0;
+            while y < h {
+                let mut x = spacing / 2.0;
+                while x < w {
+                    fill(pixmap, x - dot / 2.0, y - dot / 2.0, dot, dot, color);
+                    x += spacing;
+                }
+                y += spacing;
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct TextLayoutCache {
     scale: f32,
@@ -852,7 +921,7 @@ struct BaseKey {
     /// Whether the raster's background is the edit-mode scrim. A mode switch recreates every surface
     /// and so every cache, but the key says it anyway: a raster that had to be trusted to be rebuilt
     /// would be one change away from being stale.
-    scrim: bool,
+    backdrop: Backdrop,
 }
 
 struct TextCacheEntry {
@@ -1069,14 +1138,12 @@ impl Renderer {
             None => DamageRegion::All,
             Some(d) => DamageRegion::from_logical(d, scale, width, height),
         };
-        // The scrim an edit-mode frame is painted on, and nothing at all while locked or while it has
-        // been switched off. The overlay's rail is `Some` exactly in edit mode — `App::current_toolbar`
-        // decides that — and it carries whether the backdrop is on, so the two are one read.
-        let scrim = overlay
+        // What an edit-mode frame is painted on. The overlay's rail is `Some` exactly in edit mode —
+        // `App::current_toolbar` decides that — and it carries the chosen backdrop.
+        let backdrop = overlay
             .toolbar
             .as_ref()
-            .is_some_and(|toolbar| toolbar.scrim)
-            .then(|| parse_hex(SCRIM_FILL));
+            .map_or(Backdrop::Transparent, |toolbar| toolbar.backdrop);
         // The committed document comes from the raster. Only a frame whose raster cannot be
         // allocated draws it into the buffer itself.
         let key = BaseKey {
@@ -1085,7 +1152,7 @@ impl Renderer {
             scale,
             view,
             skip: skip.to_vec(),
-            scrim: scrim.is_some(),
+            backdrop,
         };
         let mut draw_document = false;
         if base.matches(&key) {
@@ -1102,7 +1169,7 @@ impl Renderer {
         } else {
             let renderer = &mut *self;
             let built = base.rasterise(key, |target| {
-                renderer.draw_document(target, ann, screen, text, skip, scrim)
+                renderer.draw_document(target, ann, screen, text, skip, backdrop)
             });
             if built {
                 base.fill(buf, region, width, height);
@@ -1123,11 +1190,11 @@ impl Renderer {
                     screen,
                     text,
                     skip,
-                    scrim,
+                    backdrop,
                     quality,
                 );
             } else {
-                self.draw_document(&mut pixmap, ann, screen, text, skip, scrim);
+                self.draw_document(&mut pixmap, ann, screen, text, skip, backdrop);
             }
         }
         if let Some(s) = &overlay.stroke {
@@ -1272,9 +1339,9 @@ impl Renderer {
 
     /// Draw the committed document into `pixmap`: the raster build, and the fallback for a frame
     /// whose raster could not be allocated. The shaped-line cache is filled here, once per
-    /// document change, so a frame that reuses the raster shapes no text at all. `scrim` is the
-    /// background the document is drawn on: the whole pixmap is filled with it first, so this is the
-    /// one place a frame's background comes from.
+    /// document change, so a frame that reuses the raster shapes no text at all. `backdrop` is the
+    /// background the document is drawn on: the whole pixmap is cleared and the pattern painted
+    /// first, so this is the one place a frame's background comes from.
     fn draw_document(
         &mut self,
         pixmap: &mut PixmapMut,
@@ -1282,12 +1349,9 @@ impl Renderer {
         screen: Screen,
         text: &mut TextLayoutCache,
         skip: &[ItemId],
-        scrim: Option<[u8; 4]>,
+        backdrop: Backdrop,
     ) {
-        pixmap.fill(match scrim {
-            Some(c) => SkColor::from_rgba8(c[0], c[1], c[2], c[3]),
-            None => SkColor::TRANSPARENT,
-        });
+        paint_backdrop(pixmap, backdrop, screen.scale);
         for (index, s) in ann.strokes.iter().enumerate() {
             if skip.contains(&ItemId::Stroke(index)) {
                 continue;
@@ -1346,7 +1410,7 @@ impl Renderer {
         screen: Screen,
         text: &mut TextLayoutCache,
         skip: &[ItemId],
-        scrim: Option<[u8; 4]>,
+        backdrop: Backdrop,
         quality: f32,
     ) {
         // The rung is a whole-pixel factor: any fraction is rounded, and a factor of one is not a
@@ -1354,7 +1418,7 @@ impl Renderer {
         let factor = (1.0 / quality.max(f32::EPSILON)).round().max(1.0) as u32;
         let (tw, th) = (target.width(), target.height());
         if factor < 2 {
-            self.draw_document(target, ann, screen, text, skip, scrim);
+            self.draw_document(target, ann, screen, text, skip, backdrop);
             return;
         }
         let (w, h) = (tw.div_ceil(factor), th.div_ceil(factor));
@@ -1366,7 +1430,7 @@ impl Renderer {
         }
         let Some(pixmap) = coarse.as_mut() else {
             // No pixmap to spare: the frame is drawn at full resolution rather than left stale.
-            self.draw_document(target, ann, screen, text, skip, scrim);
+            self.draw_document(target, ann, screen, text, skip, backdrop);
             return;
         };
         // The same document on a smaller surface: the *view* is what shrinks, once — a device pixel is
@@ -1382,7 +1446,14 @@ impl Renderer {
                 ],
             },
         };
-        self.draw_document(&mut pixmap.as_mut(), ann, coarse_screen, text, skip, scrim);
+        self.draw_document(
+            &mut pixmap.as_mut(),
+            ann,
+            coarse_screen,
+            text,
+            skip,
+            backdrop,
+        );
 
         let (cw, ch) = (pixmap.width() as usize, pixmap.height() as usize);
         let stride = tw as usize * 4;
@@ -1455,8 +1526,29 @@ impl Renderer {
             parse_hex(TOOLBAR_PLATE_FILL),
             None,
         );
-        // No plate behind the panel: the rows are the control, and a dark rectangle behind a list of them was
-        // a second surface the eye had to read through. The rail keeps its own plate.
+        // The line through the middle of the backdrop options: the four modes are one family, and
+        // the line says so without a second plate. It is drawn behind the buttons.
+        if toolbar.more
+            && let Some(scrim_y) = pill
+                .controls
+                .iter()
+                .find(|control| control.block.action == Some(ToolbarAction::Scrim))
+                .map(|control| control.y)
+        {
+            let c = parse_hex(TOOLBAR_BLOCK_EDGE);
+            let y = (oy + scrim_y + TOOLBAR_BLOCK / 2.0) * scale;
+            let x0 = (ox + TOOLBAR_DRAWER_X + TOOLBAR_BLOCK) * scale;
+            let last = 2.0 + (Backdrop::ALL.len() - 1) as f32;
+            let x1 = (ox + last * TOOLBAR_DRAWER_X + TOOLBAR_BLOCK / 2.0) * scale;
+            fill(
+                pixmap,
+                x0,
+                y - 0.5 * scale,
+                x1 - x0,
+                scale.max(1.0),
+                Color::rgba(c[0], c[1], c[2], c[3]),
+            );
+        }
         // How far the block under the pointer has opened. The layout is settled, so a frame of the
         // transition only moves the capsule's trailing edge and the text that edge uncovers.
         let grow = toolbar.grow.clamp(0.0, 1.0);
@@ -1962,6 +2054,48 @@ impl Renderer {
                 ));
             }
         }
+        // The backdrop row expands sideways: four mode buttons level with the `backdrop` row,
+        // starting one drawer-column to its right. The drawer's plate already covers them, and
+        // their vertical position is the row's, not a column walk.
+        if toolbar.more
+            && let Some(scrim_y) = controls
+                .iter()
+                .find(|control| control.block.action == Some(ToolbarAction::Scrim))
+                .map(|control| control.y)
+        {
+            for (index, mode) in Backdrop::ALL.iter().enumerate() {
+                let column = 2 + index as u8;
+                let action = ToolbarAction::Backdrop(*mode);
+                let icon = match mode {
+                    Backdrop::Transparent => Icon::Clear,
+                    Backdrop::Grid => Icon::Grid,
+                    Backdrop::Dots => Icon::Dots,
+                    Backdrop::Black => Icon::Scrim,
+                };
+                controls.push(Control {
+                    block: Block {
+                        mark: Mark::Icon(icon),
+                        column,
+                        label: String::new(),
+                        action: Some(action),
+                        active: toolbar.backdrop == *mode,
+                        gap: 0.0,
+                    },
+                    y: scrim_y,
+                    width: TOOLBAR_BLOCK,
+                    stretched: false,
+                });
+                hits.push((
+                    Rect {
+                        x: column as f32 * TOOLBAR_DRAWER_X,
+                        y: scrim_y,
+                        w: TOOLBAR_BLOCK,
+                        h: TOOLBAR_BLOCK,
+                    },
+                    action,
+                ));
+            }
+        }
         let height = reach;
         // The walkway into a panel. The drawer and the boards list own the strip beside the rail, from
         // their first row to their last — a block level with a row answers for the list, which is how the
@@ -2463,7 +2597,7 @@ fn same_layout(a: &Toolbar, b: &Toolbar) -> bool {
         && a.rename == b.rename
         && a.boards == b.boards
         && a.shared == b.shared
-        && a.scrim == b.scrim
+        && a.backdrop == b.backdrop
 }
 
 /// One block of the rail as laid out: where it sits in the column, how wide it is drawn, and
@@ -3008,6 +3142,38 @@ fn draw_icon(pixmap: &mut PixmapMut, icon: Icon, square: Rect, scale: f32, color
                 }
             }
         }
+        Icon::Clear => {
+            if let Some(square) = rounded_rect_path(
+                Rect {
+                    x: x + w * 0.15,
+                    y: y + h * 0.15,
+                    w: w * 0.7,
+                    h: h * 0.7,
+                },
+                2.0 * scale,
+            ) {
+                path.push_path(&square);
+            }
+        }
+        Icon::Grid => {
+            for at in [0.2, 0.5, 0.8] {
+                path.move_to(x + w * at, y + h * 0.1);
+                path.line_to(x + w * at, y + h * 0.9);
+                path.move_to(x + w * 0.1, y + h * at);
+                path.line_to(x + w * 0.9, y + h * at);
+            }
+        }
+        Icon::Dots => {
+            for dy in [0.25, 0.5, 0.75] {
+                for dx in [0.25, 0.5, 0.75] {
+                    let mut dot = PathBuilder::new();
+                    dot.push_circle(x + w * dx, y + h * dy, ICON_STROKE * 0.7 * scale);
+                    if let Some(dot) = dot.finish() {
+                        filled.push(dot);
+                    }
+                }
+            }
+        }
         Icon::Plus => {
             path.move_to(x + w / 2.0, y + h * 0.2);
             path.line_to(x + w / 2.0, y + h * 0.8);
@@ -3441,25 +3607,25 @@ mod tests {
         }
         assert!(!picks_from_panel(ToolbarAction::More));
         assert!(!picks_from_panel(ToolbarAction::Tool(Tool::Pen)));
-        // And it stays open only while the pointer is on the block or on its own controls.
+        // And it stays open once opened, like the boards list: the pointer leaving is not a pick.
         assert!(panel_stays_open(
             Some(ToolbarAction::More),
             Some(ToolbarAction::More)
         ));
         assert!(panel_stays_open(Some(DRAWER[0]), Some(ToolbarAction::More)));
-        assert!(!panel_stays_open(None, Some(ToolbarAction::More)));
-        assert!(!panel_stays_open(
+        assert!(panel_stays_open(None, Some(ToolbarAction::More)));
+        assert!(panel_stays_open(
             Some(ToolbarAction::Tool(Tool::Pen)),
             Some(ToolbarAction::More)
         ));
-        assert!(!panel_stays_open(
+        assert!(panel_stays_open(
             Some(ToolbarAction::Color(0)),
             Some(ToolbarAction::More)
         ));
     }
 
-    /// A menu opened by a click stays until it is dismissed; the drawer, which the pointer opens by
-    /// walking into it, leaves with the pointer. The boards list is the first kind.
+    /// Every list opened from the rail stays until it is dismissed; the pointer leaving it is not a
+    /// dismissal. The drawer is the same kind as the boards list.
     #[test]
     fn the_boards_list_stays_open_when_the_pointer_leaves() {
         for hover in [
@@ -3472,11 +3638,11 @@ mod tests {
                 panel_stays_open(hover, Some(ToolbarAction::Boards)),
                 "the boards list closed with {hover:?} under the pointer"
             );
+            assert!(
+                panel_stays_open(hover, Some(ToolbarAction::More)),
+                "the drawer closed with {hover:?} under the pointer"
+            );
         }
-        assert!(
-            !panel_stays_open(None, Some(ToolbarAction::More)),
-            "the drawer stopped leaving with the pointer"
-        );
     }
 
     /// The opening moves the drawn rows only: the layout and the hits are the settled panel, at every
@@ -3644,7 +3810,7 @@ mod tests {
                 "the width list closed with {hover:?} under the pointer"
             );
         }
-        assert!(!panel_stays_open(None, Some(ToolbarAction::More)));
+        assert!(panel_stays_open(None, Some(ToolbarAction::More)));
     }
 
     /// A width step is a command you may want to repeat: it applies without putting its list away. Every
@@ -3655,8 +3821,87 @@ mod tests {
         assert!(!closes_panel_on_pick(ToolbarAction::SizeStep(1.0)));
         assert!(closes_panel_on_pick(ToolbarAction::Board(0)));
         assert!(closes_panel_on_pick(ToolbarAction::NewBoard));
-        assert!(closes_panel_on_pick(ToolbarAction::Scrim));
+        assert!(!closes_panel_on_pick(ToolbarAction::Scrim));
+        assert!(!closes_panel_on_pick(ToolbarAction::Backdrop(
+            Backdrop::Grid
+        )));
         assert!(!closes_panel_on_pick(ToolbarAction::Tool(Tool::Pen)));
+    }
+
+    /// The backdrop modes are distinct paintings: nothing, a 24-point grid, a 24-point dot matrix,
+    /// and the dim scrim.
+    #[test]
+    fn every_backdrop_mode_paints_what_it_says() {
+        let paint = |mode| {
+            let mut pixmap = Pixmap::new(120, 120).unwrap();
+            paint_backdrop(&mut pixmap.as_mut(), mode, 1.0);
+            pixmap
+        };
+        let alpha =
+            |pm: &Pixmap, x: usize, y: usize| pm.data()[(y * pm.width() as usize + x) * 4 + 3];
+
+        assert_eq!(alpha(&paint(Backdrop::Transparent), 24, 24), 0);
+        assert_eq!(alpha(&paint(Backdrop::Black), 24, 24), 230);
+        assert!(alpha(&paint(Backdrop::Grid), 24, 50) > 0, "no grid line");
+        assert_eq!(
+            alpha(&paint(Backdrop::Grid), 40, 50),
+            0,
+            "grid line too wide"
+        );
+        assert!(
+            alpha(&paint(Backdrop::Dots), 12, 12) > 0,
+            "no dot at the first cell"
+        );
+        assert_eq!(
+            alpha(&paint(Backdrop::Dots), 24, 24),
+            0,
+            "a dot painted on the cell corner"
+        );
+        assert_eq!(Backdrop::Black.next(), Backdrop::Transparent);
+        assert_eq!(Backdrop::Transparent.next(), Backdrop::Grid);
+        assert_eq!(Backdrop::Grid.next(), Backdrop::Dots);
+        assert_eq!(Backdrop::Dots.next(), Backdrop::Black);
+    }
+
+    /// The four backdrop options are one horizontal row level with the `backdrop` row, and each is
+    /// the action that sets its mode.
+    #[test]
+    fn the_backdrop_options_share_the_rows_height_to_its_right() {
+        let mut renderer = Renderer::new();
+        let rail = Toolbar {
+            more: true,
+            ..crate::render::tests::rail_for_legend()
+        };
+        let pill = renderer.toolbar_pill(&rail, (900.0, 1000.0));
+        let row = pill
+            .controls
+            .iter()
+            .find(|control| control.block.action == Some(ToolbarAction::Scrim))
+            .expect("the backdrop row");
+        let options: Vec<_> = pill
+            .controls
+            .iter()
+            .filter(|control| matches!(control.block.action, Some(ToolbarAction::Backdrop(_))))
+            .collect();
+        assert_eq!(options.len(), Backdrop::ALL.len());
+        for (index, control) in options.iter().enumerate() {
+            assert_eq!(control.y, row.y, "an option left the backdrop row");
+            assert_eq!(control.block.column, 2 + index as u8);
+            assert_eq!(
+                control.block.action,
+                Some(ToolbarAction::Backdrop(Backdrop::ALL[index]))
+            );
+        }
+        let (ox, oy) = toolbar_origin(1000.0, pill.column);
+        for (index, mode) in Backdrop::ALL.iter().enumerate() {
+            let x = ox + (2.0 + index as f32) * TOOLBAR_DRAWER_X + TOOLBAR_BLOCK / 2.0;
+            let y = oy + row.y + TOOLBAR_BLOCK / 2.0;
+            assert_eq!(
+                renderer.toolbar_hit(&rail, 900.0, 1000.0, x, y),
+                Some(ToolbarAction::Backdrop(*mode)),
+                "the {mode:?} option has no hit target"
+            );
+        }
     }
 
     /// The panel hangs off the block that opens it and never shares that block's band, and its plate is the
@@ -3702,8 +3947,13 @@ mod tests {
         assert!(panel.x >= 0.0 && panel.x + panel.w <= TOOLBAR_RESERVE);
         assert!(panel.y >= 0.0 && panel.y + panel.h <= open.column);
         // A row states its name and key without the pointer on it: an icon-only row would have to be
-        // probed one at a time to be read.
-        for control in open.controls.iter().filter(|c| c.block.column == 1) {
+        // probed one at a time to be read. The backdrop row is the exception: its four mode buttons
+        // beside it are the readable state, so it shrinks to its square.
+        for control in open
+            .controls
+            .iter()
+            .filter(|c| c.block.column == 1 && c.block.action != Some(ToolbarAction::Scrim))
+        {
             assert!(
                 control.width > TOOLBAR_BLOCK,
                 "{:?} is icon-only at rest",
@@ -3730,27 +3980,21 @@ mod tests {
                 block.action
             );
         }
-        // In the panel the accent marks the control that is on, which is what the panel exists to show.
-        let row_active = |scrim: bool| {
-            let toolbar = Toolbar {
-                scrim,
-                ..rail(true)
-            };
-            toolbar_blocks(&toolbar, 1000.0)
-                .into_iter()
-                .find(|b| b.action == Some(ToolbarAction::Scrim))
-                .map(|b| b.active)
+        // In the panel the accent marks the backdrop option that is on. The four options sit to the
+        // right of the backdrop row, at that row's height.
+        let option_active = |mode: Backdrop| {
+            open.controls
+                .iter()
+                .find(|control| control.block.action == Some(ToolbarAction::Backdrop(mode)))
+                .map(|control| control.block.active)
         };
-        assert_eq!(
-            row_active(true),
-            Some(true),
-            "the row does not show the backdrop is on"
-        );
-        assert_eq!(
-            row_active(false),
-            Some(false),
-            "the row shows it on when it is off"
-        );
+        for mode in Backdrop::ALL {
+            assert_eq!(
+                option_active(mode),
+                Some(mode == rail(true).backdrop),
+                "the {mode:?} option does not show whether it is on"
+            );
+        }
         // And the rail's own blocks do not move when the panel opens.
         assert_eq!(
             row_y(&closed, Some(ToolbarAction::More)),
@@ -4145,25 +4389,25 @@ mod tests {
             rename: None,
             boards: Vec::new(),
             shared: false,
-            scrim: true,
+            backdrop: Backdrop::Black,
         }
     }
 
     /// The identity view at a given output scale, for the tests that only care about the document., so a switch of the backdrop cannot reuse it.
     #[test]
     fn the_raster_is_rebuilt_when_the_backdrop_changes() {
-        let key = |scrim| BaseKey {
+        let key = |backdrop: Backdrop| BaseKey {
             width: 100,
             height: 100,
             scale: 1.0,
             view: View::default(),
             skip: vec![],
-            scrim,
+            backdrop,
         };
         // `BaseKey` is what the cached raster's identity is made of, so a different backing is a
         // different raster.
-        assert!(!key(true).eq(&key(false)));
-        assert!(key(true).eq(&key(true)));
+        assert!(!key(Backdrop::Black).eq(&key(Backdrop::Transparent)));
+        assert!(key(Backdrop::Black).eq(&key(Backdrop::Black)));
     }
 
     /// The caret of a wrapped layout: the offset of each line's own text has to land on that line, or
@@ -4327,7 +4571,7 @@ mod tests {
             scale: 1.0,
             view: View::default(),
             skip: Vec::new(),
-            scrim: false,
+            backdrop: Backdrop::Transparent,
         }));
 
         let mut second = vec![0; 200 * 100 * 4];
@@ -4439,7 +4683,7 @@ mod tests {
                 rename: None,
                 boards: Vec::new(),
                 shared: false,
-                scrim: true,
+                backdrop: Backdrop::Black,
             }),
             ..Default::default()
         };
@@ -4784,7 +5028,7 @@ mod tests {
             rename: None,
             boards: Vec::new(),
             shared: false,
-            scrim: true,
+            backdrop: Backdrop::Black,
         }
     }
 
@@ -5006,6 +5250,7 @@ mod tests {
                 // These live in the drawer (closed here) or in the clipboard list, and name no
                 // single key: their block labels are never walked by this test.
                 ToolbarAction::Link | ToolbarAction::Clipboard | ToolbarAction::Clip(_) => false,
+                ToolbarAction::Backdrop(_) => false,
                 ToolbarAction::Size => unreachable!("no key, filtered above"),
             };
             assert!(applies, "'{}' names a key that does not do it", block.label);
