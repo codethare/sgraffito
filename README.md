@@ -158,7 +158,7 @@ The pointer follows the armed tool through `wp_cursor_shape_v1`: a crosshair for
 
 - `more tools` (`M`) opens on a click and then stays open like the boards list: `Esc`, a press outside it, or a pick dismisses it. The pointer leaving it no longer closes it.
 - `backdrop` (`B`) cycles transparent → grid → dots → dim → transparent. Its four mode buttons sit in one horizontal row to the right of the row, joined by a hairline at their middle; each button picks that mode and leaves the drawer open.
-- The grid uses a 24-point cell with a one-point line; the dot matrix uses the same 24-point spacing with two-point dots. Both are mid-grey at partial opacity, so they read over light and dark wallpapers without dimming it. `dim` is the previous black 90% scrim.
+- The grid uses a 24-point cell with a one-point line; the dot matrix uses the same 24-point spacing with two-point dots. Both pan and zoom with the drawing and are painted mid-grey at partial opacity, so they read over light and dark wallpapers without dimming it. `dim` is the previous black 90% scrim.
 
 ## Data
 

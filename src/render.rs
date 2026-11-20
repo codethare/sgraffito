@@ -830,9 +830,10 @@ pub struct Renderer {
     toolbar_cache: Vec<CachedToolbar>,
 }
 
-/// Clear `pixmap` and paint the chosen backdrop. `scale` is the output's device scale, so the grid
-/// keeps its 24-point cell whatever the display's density.
-fn paint_backdrop(pixmap: &mut PixmapMut, mode: Backdrop, scale: f32) {
+/// Clear `pixmap` and paint the chosen backdrop. `scale` is the output's device scale and `view`
+/// is the canvas view, so the grid and dots pan and zoom with the drawing: they are the canvas's
+/// paper, not a fixed screen texture.
+fn paint_backdrop(pixmap: &mut PixmapMut, mode: Backdrop, scale: f32, view: View) {
     pixmap.fill(SkColor::TRANSPARENT);
     match mode {
         Backdrop::Transparent => {}
@@ -844,14 +845,15 @@ fn paint_backdrop(pixmap: &mut PixmapMut, mode: Backdrop, scale: f32) {
             let c = parse_hex(BACKDROP_GRID_COLOR);
             let color = Color::rgba(c[0], c[1], c[2], c[3]);
             let (w, h) = (pixmap.width() as f32, pixmap.height() as f32);
-            let spacing = (BACKDROP_SPACING * scale).max(1.0);
+            let spacing = (BACKDROP_SPACING * view.zoom * scale).max(1.0);
             let line = (BACKDROP_LINE * scale).max(1.0);
-            let mut x = 0.0;
+            let phase = |offset: f32| (offset * scale).rem_euclid(spacing);
+            let mut x = phase(view.offset[0]);
             while x < w {
                 fill(pixmap, x, 0.0, line, h, color);
                 x += spacing;
             }
-            let mut y = 0.0;
+            let mut y = phase(view.offset[1]);
             while y < h {
                 fill(pixmap, 0.0, y, w, line, color);
                 y += spacing;
@@ -861,11 +863,13 @@ fn paint_backdrop(pixmap: &mut PixmapMut, mode: Backdrop, scale: f32) {
             let c = parse_hex(BACKDROP_DOT_COLOR);
             let color = Color::rgba(c[0], c[1], c[2], c[3]);
             let (w, h) = (pixmap.width() as f32, pixmap.height() as f32);
-            let spacing = (BACKDROP_SPACING * scale).max(1.0);
+            let spacing = (BACKDROP_SPACING * view.zoom * scale).max(1.0);
             let dot = (BACKDROP_DOT * scale).max(1.0);
-            let mut y = spacing / 2.0;
+            // A dot sits at the middle of each canvas cell, so its phase carries the half-cell.
+            let phase = |offset: f32| (offset * scale + spacing / 2.0).rem_euclid(spacing);
+            let mut y = phase(view.offset[1]);
             while y < h {
-                let mut x = spacing / 2.0;
+                let mut x = phase(view.offset[0]);
                 while x < w {
                     fill(pixmap, x - dot / 2.0, y - dot / 2.0, dot, dot, color);
                     x += spacing;
@@ -1351,7 +1355,7 @@ impl Renderer {
         skip: &[ItemId],
         backdrop: Backdrop,
     ) {
-        paint_backdrop(pixmap, backdrop, screen.scale);
+        paint_backdrop(pixmap, backdrop, screen.scale, screen.view);
         for (index, s) in ann.strokes.iter().enumerate() {
             if skip.contains(&ItemId::Stroke(index)) {
                 continue;
@@ -3832,31 +3836,63 @@ mod tests {
     /// and the dim scrim.
     #[test]
     fn every_backdrop_mode_paints_what_it_says() {
-        let paint = |mode| {
+        let paint = |mode, view| {
             let mut pixmap = Pixmap::new(120, 120).unwrap();
-            paint_backdrop(&mut pixmap.as_mut(), mode, 1.0);
+            paint_backdrop(&mut pixmap.as_mut(), mode, 1.0, view);
             pixmap
         };
         let alpha =
             |pm: &Pixmap, x: usize, y: usize| pm.data()[(y * pm.width() as usize + x) * 4 + 3];
+        let origin = View::default();
 
-        assert_eq!(alpha(&paint(Backdrop::Transparent), 24, 24), 0);
-        assert_eq!(alpha(&paint(Backdrop::Black), 24, 24), 230);
-        assert!(alpha(&paint(Backdrop::Grid), 24, 50) > 0, "no grid line");
+        assert_eq!(alpha(&paint(Backdrop::Transparent, origin), 24, 24), 0);
+        assert_eq!(alpha(&paint(Backdrop::Black, origin), 24, 24), 230);
+        assert!(
+            alpha(&paint(Backdrop::Grid, origin), 24, 50) > 0,
+            "no grid line"
+        );
         assert_eq!(
-            alpha(&paint(Backdrop::Grid), 40, 50),
+            alpha(&paint(Backdrop::Grid, origin), 40, 50),
             0,
             "grid line too wide"
         );
         assert!(
-            alpha(&paint(Backdrop::Dots), 12, 12) > 0,
+            alpha(&paint(Backdrop::Dots, origin), 12, 12) > 0,
             "no dot at the first cell"
         );
         assert_eq!(
-            alpha(&paint(Backdrop::Dots), 24, 24),
+            alpha(&paint(Backdrop::Dots, origin), 24, 24),
             0,
             "a dot painted on the cell corner"
         );
+
+        // The pattern is canvas paper: a pan moves it and a zoom changes the cell.
+        let panned = View {
+            zoom: 1.0,
+            offset: [10.0, 0.0],
+        };
+        assert!(
+            alpha(&paint(Backdrop::Grid, panned), 10, 50) > 0,
+            "the grid did not follow the pan"
+        );
+        assert!(
+            alpha(&paint(Backdrop::Dots, panned), 22, 12) > 0,
+            "the dots did not follow the pan"
+        );
+        let zoomed = View {
+            zoom: 2.0,
+            offset: [0.0, 0.0],
+        };
+        assert!(
+            alpha(&paint(Backdrop::Grid, zoomed), 48, 50) > 0,
+            "the grid did not follow the zoom"
+        );
+        assert_eq!(
+            alpha(&paint(Backdrop::Grid, zoomed), 24, 50),
+            0,
+            "the grid cell did not double with the zoom"
+        );
+
         assert_eq!(Backdrop::Black.next(), Backdrop::Transparent);
         assert_eq!(Backdrop::Transparent.next(), Backdrop::Grid);
         assert_eq!(Backdrop::Grid.next(), Backdrop::Dots);
