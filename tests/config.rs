@@ -1,4 +1,4 @@
-//! The configuration file's two settings reach the frame: the palette paints the rail's chips and the
+//! The configuration file's settings reach the frame: the palette paints the rail's chips and the
 //! note border is stroked at the thickness the file gives.
 //!
 //! This file has one test because the configuration is process-wide and loaded once: a second test

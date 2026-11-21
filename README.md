@@ -212,6 +212,12 @@ Optional: `$XDG_CONFIG_HOME/sgraffito/config.toml` (default `~/.config/sgraffito
 # Sticky-note border thickness, in logical pixels. 0 draws no border.
 border = 1.0
 
+# The screen edge the edit-mode toolbar is docked to: "left" (the default), "right",
+# "top" or "bottom". The value is matched case-insensitively; an invalid value keeps
+# the built-in left edge and says so in the log. A left or right rail is a column, a
+# top or bottom rail a row, and its panels always open toward the middle of the screen.
+toolbar = "left"
+
 # Exactly five palette colours, used by the rail's 1-5 chips and by new strokes, shapes,
 # notes and text boxes. Hex (#rgb, #rgba, #rrggbb, #rrggbbaa), rgb()/rgba() and
 # hsl()/hsla() are accepted and normalized to #rrggbb or #rrggbbaa.
@@ -229,7 +235,7 @@ The file is read once when the daemon starts.
 ## Known limitations
 
 - v1 has no undo/redo — a gesture cannot be undone once the pointer is released, and the eraser is the only way back — no z-order, no layers, no PNG export and no pressure or touch support. A link points at a board and the linked text's position, not at a particular element inside that board; the clipboard history is session state, so it is lost when the daemon restarts. A cut joins the clipboard history and the document in one action, but it cannot be undone: `Ctrl+V` pastes the copy back, slightly offset and selected.
-- The toolbar is part of the full-screen edit overlay, not a surface of its own, so it cannot respect another layer surface's exclusive zone: a compositor bar or dock that occupies the left edge, or the optical-centre band, is covered by it while editing. Its position is fixed; it cannot be dragged.
+- The toolbar is part of the full-screen edit overlay, not a surface of its own, so it cannot respect another layer surface's exclusive zone: a compositor bar or dock that occupies the edge the rail is docked to, or the optical-centre band, is covered by it while editing. Its edge comes from `toolbar` in the configuration file; it cannot be dragged.
 - A block shows an icon of what it does and says what it does only while the pointer is on it, so a first-time user learns the rail by hovering, or from this README's key table. Each block's text ends with its key, and that is the only place a key appears: when a block's text does not fit the room reserved for the rail, the block stays a square showing its icon and no text, and its key is then only in this README. The longest text is `text: click to place (T)`, about 177 logical pixels of capsule, which fits the 320-pixel reserve on any output at least 336 pixels wide.
 - A drawer shows the rows that fit the output. A very short screen folds almost the whole rail into it, and a panel taller than the screen would be rows nobody could click or read, so the rows nearest the `more` block are kept and the rest stay on their keys — a folded control never loses its key.
 - A board can be created, picked, renamed and deleted. A delete is final — there is no undo behind it, and the button sits on the row of the board it removes, so a slip removes that board with everything drawn on it. A name is refused when it is empty or another board already has it: the board keeps the name it had. The last board cannot be deleted, because a document with no boards is nowhere to draw; the panel lists eight boards and `sgraffito boards` lists them all, because the panel is drawn inside a fixed damage box.

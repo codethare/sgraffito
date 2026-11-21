@@ -17,6 +17,47 @@ pub const DEFAULT_BORDER: f32 = 1.0;
 pub const DEFAULT_COLORS: [&str; COLOR_COUNT] = crate::canvas::PALETTE;
 pub const COLOR_COUNT: usize = 5;
 
+/// Which screen edge the edit-mode toolbar is docked to. The rail is a column on the left and
+/// right edges and a row on the top and bottom ones, and its panels open toward the interior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ToolbarPosition {
+    #[default]
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl ToolbarPosition {
+    /// The value the configuration file writes.
+    pub const fn name(self) -> &'static str {
+        match self {
+            ToolbarPosition::Left => "left",
+            ToolbarPosition::Right => "right",
+            ToolbarPosition::Top => "top",
+            ToolbarPosition::Bottom => "bottom",
+        }
+    }
+
+    /// Whether the rail runs left to right along the top or bottom edge. The blocks are still
+    /// upright; only the axis they are laid out on changes.
+    pub const fn horizontal(self) -> bool {
+        matches!(self, ToolbarPosition::Top | ToolbarPosition::Bottom)
+    }
+}
+
+/// Parse a toolbar edge. The file's value is matched case-insensitively and without surrounding
+/// whitespace; anything else is invalid.
+pub fn parse_toolbar_position(input: &str) -> Option<ToolbarPosition> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "left" => Some(ToolbarPosition::Left),
+        "right" => Some(ToolbarPosition::Right),
+        "top" => Some(ToolbarPosition::Top),
+        "bottom" => Some(ToolbarPosition::Bottom),
+        _ => None,
+    }
+}
+
 /// The values the daemon reads once at startup.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
@@ -24,6 +65,8 @@ pub struct Config {
     pub border: f32,
     /// The five palette colours, normalized to `#rrggbb` or `#rrggbbaa`.
     pub colors: [String; COLOR_COUNT],
+    /// The screen edge the edit-mode toolbar is docked to.
+    pub toolbar: ToolbarPosition,
 }
 
 impl Default for Config {
@@ -31,6 +74,7 @@ impl Default for Config {
         Self {
             border: DEFAULT_BORDER,
             colors: DEFAULT_COLORS.map(str::to_string),
+            toolbar: ToolbarPosition::default(),
         }
     }
 }
@@ -131,6 +175,15 @@ pub fn load_from(path: &Path) -> Config {
             }
         }
     }
+    if let Some(toolbar) = file.toolbar {
+        match parse_toolbar_position(&toolbar) {
+            Some(position) => config.toolbar = position,
+            None => crate::log::write(&format!(
+                "config: toolbar must be left, right, top or bottom, not `{toolbar}`; using {}",
+                config.toolbar.name()
+            )),
+        }
+    }
     config
 }
 
@@ -140,6 +193,8 @@ struct File {
     border: Option<Number>,
     #[serde(default)]
     colors: Option<Vec<String>>,
+    #[serde(default)]
+    toolbar: Option<String>,
 }
 
 /// TOML has separate integer and float types, and `border = 2` must mean the same as `2.0`.
@@ -458,6 +513,34 @@ mod tests {
         assert_eq!(negative.border, DEFAULT_BORDER);
         let malformed = config_in(&dir, "border = \n");
         assert_eq!(malformed, Config::default());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_toolbar_edge_is_case_insensitive_and_keeps_left_when_invalid() {
+        let dir =
+            std::env::temp_dir().join(format!("sgraffito-config-toolbar-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for (value, expected) in [
+            ("left", ToolbarPosition::Left),
+            ("Right", ToolbarPosition::Right),
+            (" TOP ", ToolbarPosition::Top),
+            ("bOtToM", ToolbarPosition::Bottom),
+        ] {
+            let config = config_in(&dir, &format!("toolbar = \"{value}\"\n"));
+            assert_eq!(config.toolbar, expected, "toolbar = {value:?}");
+        }
+        assert_eq!(
+            config_in(&dir, "toolbar = \"diagonal\"\n").toolbar,
+            ToolbarPosition::Left,
+            "an invalid edge must keep the built-in default"
+        );
+        assert_eq!(
+            config_in(&dir, "").toolbar,
+            ToolbarPosition::Left,
+            "an absent edge must keep the built-in default"
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 }

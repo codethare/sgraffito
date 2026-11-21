@@ -18,18 +18,22 @@ use crate::canvas::{
     selection_frame_with,
 };
 use crate::config;
+use crate::config::ToolbarPosition;
 use crate::sketch::{self, Seg};
 /// Radius of the eraser marker circle, in logical pixels.
 const ERASER_MARKER_RADIUS: f32 = 8.0;
-/// The edit-mode toolbar: a vertical rail of square blocks against the left edge, in the macOS
+/// The edit-mode toolbar: a rail of square blocks docked to one edge of the output, in the macOS
 /// HUD idiom, built around the 13 pt control size the HIG gives as the macOS default. All of it
 /// is logical pixels.
 ///
-/// The rail hugs the left edge (the side measured fastest for toolbar targets) with its vertical
-/// centre at the optical centre, roughly 5% above the geometric centre, where the gaze rests.
+/// A left or right edge gives a vertical column of blocks; a top or bottom edge gives a horizontal
+/// row. The blocks themselves stay upright — an icon or a label is never rotated — and every panel
+/// opens across the rail toward the interior. The default is the left edge (the side measured
+/// fastest for toolbar targets), with its vertical centre at the optical centre, roughly 5% above
+/// the geometric centre, where the gaze rests.
 const TOOLBAR_MARGIN: f32 = 8.0;
 const TOOLBAR_CENTRE: f32 = 0.45;
-/// Side of one block: the rail is a column of these, above the HIG's minimum pointer target.
+/// Side of one block: the rail is a column or row of these, above the HIG's minimum pointer target.
 const TOOLBAR_BLOCK: f32 = 30.0;
 /// Between two blocks of the same group.
 const TOOLBAR_GAP: f32 = 4.0;
@@ -308,15 +312,24 @@ fn badge_of(action: ToolbarAction) -> Option<&'static str> {
     (!key.contains('+')).then_some(key)
 }
 
-/// Where a block's text starts, relative to the rail's origin: after that block's own square and the gap, and
-/// — for a row of names, which has no square — a pad inside its own capsule. It used to be measured from the
-/// rail's own edge whatever column the block was in, so a panel row's text began inside its own icon and the
-/// icon covered the first glyphs of every name in the list.
-fn label_x(column_x: f32, bare: bool) -> f32 {
-    if bare {
-        column_x + TOOLBAR_LABEL_PAD
+/// Where a block's text starts, in logical screen coordinates, given the capsule it sits in. Text
+/// always reads left to right: it starts after the block's own square, and on a right-docked rail,
+/// where the square is the capsule's right end, it ends before it instead.
+fn label_origin(
+    position: crate::config::ToolbarPosition,
+    capsule: Rect,
+    bare: bool,
+    text_width: f32,
+) -> f32 {
+    let pad = if bare {
+        TOOLBAR_LABEL_PAD
     } else {
-        column_x + TOOLBAR_BLOCK + TOOLBAR_LABEL_GAP
+        TOOLBAR_BLOCK + TOOLBAR_LABEL_GAP
+    };
+    if position == crate::config::ToolbarPosition::Right {
+        capsule.x + capsule.w - pad - text_width
+    } else {
+        capsule.x + pad
     }
 }
 
@@ -472,6 +485,112 @@ fn owner_row(rail: &[Block], owner: ToolbarAction) -> Option<f32> {
     None
 }
 
+/// A rectangle in the rail's own coordinates: `along` runs down a left/right rail or across a
+/// top/bottom one, and `across` runs from the rail's edge toward the interior of the output. Keeping
+/// the layout in these terms is what lets one set of block positions serve all four edges.
+#[derive(Debug, Clone, Copy)]
+struct RailRect {
+    along: f32,
+    across: f32,
+    along_extent: f32,
+    across_extent: f32,
+}
+
+impl ToolbarPosition {
+    /// The output dimension the rail is laid out along: the height of a side rail, the width of one
+    /// at the top or bottom.
+    fn along_surface(self, surface: (f32, f32)) -> f32 {
+        if self.horizontal() {
+            surface.0
+        } else {
+            surface.1
+        }
+    }
+
+    /// The output dimension across the rail: the width of a side rail, the height of one at the
+    /// top or bottom. Panels stack their rows across the rail, so this is the room they have.
+    fn across_surface(self, surface: (f32, f32)) -> f32 {
+        if self.horizontal() {
+            surface.1
+        } else {
+            surface.0
+        }
+    }
+
+    /// Where the rail's local origin — the start of its blocks, at the inner face of its plate —
+    /// sits on the output. The rail's centre is at the optical centre of the edge it is docked to.
+    fn origin(self, surface: (f32, f32), column: f32) -> (f32, f32) {
+        if self.horizontal() {
+            (
+                (surface.0 * TOOLBAR_CENTRE - column / 2.0).max(TOOLBAR_MARGIN),
+                match self {
+                    ToolbarPosition::Top => TOOLBAR_MARGIN,
+                    _ => surface.1 - TOOLBAR_MARGIN,
+                },
+            )
+        } else {
+            (
+                match self {
+                    ToolbarPosition::Left => TOOLBAR_MARGIN,
+                    _ => surface.0 - TOOLBAR_MARGIN,
+                },
+                (surface.1 * TOOLBAR_CENTRE - column / 2.0).max(TOOLBAR_MARGIN),
+            )
+        }
+    }
+
+    /// A local rectangle on the output. The across axis always points inward, so the same layout
+    /// opens toward the interior on every edge.
+    fn place(self, origin: (f32, f32), r: RailRect) -> Rect {
+        match self {
+            ToolbarPosition::Left => Rect {
+                x: origin.0 + r.across,
+                y: origin.1 + r.along,
+                w: r.across_extent,
+                h: r.along_extent,
+            },
+            ToolbarPosition::Right => Rect {
+                x: origin.0 - r.across - r.across_extent,
+                y: origin.1 + r.along,
+                w: r.across_extent,
+                h: r.along_extent,
+            },
+            ToolbarPosition::Top => Rect {
+                x: origin.0 + r.along,
+                y: origin.1 + r.across,
+                w: r.along_extent,
+                h: r.across_extent,
+            },
+            ToolbarPosition::Bottom => Rect {
+                x: origin.0 + r.along,
+                y: origin.1 - r.across - r.across_extent,
+                w: r.along_extent,
+                h: r.across_extent,
+            },
+        }
+    }
+
+    /// A local point on the output.
+    fn point(self, origin: (f32, f32), along: f32, across: f32) -> (f32, f32) {
+        match self {
+            ToolbarPosition::Left => (origin.0 + across, origin.1 + along),
+            ToolbarPosition::Right => (origin.0 - across, origin.1 + along),
+            ToolbarPosition::Top => (origin.0 + along, origin.1 + across),
+            ToolbarPosition::Bottom => (origin.0 + along, origin.1 - across),
+        }
+    }
+
+    /// A pointer position in the rail's local coordinates.
+    fn to_local(self, origin: (f32, f32), x: f32, y: f32) -> (f32, f32) {
+        match self {
+            ToolbarPosition::Left => (y - origin.1, x - origin.0),
+            ToolbarPosition::Right => (y - origin.1, origin.0 - x),
+            ToolbarPosition::Top => (x - origin.0, y - origin.1),
+            ToolbarPosition::Bottom => (x - origin.0, origin.1 - y),
+        }
+    }
+}
+
 /// The rail and its open panel on one output, decided once: the fitted column, the panel's own rows and plate,
 /// and the extent the two reach together — what the frame paints, what the hit test accepts and what a frame
 /// that repaints only the rail damages. Pure: no text is measured here, so a damage box can be worked out
@@ -481,24 +600,30 @@ struct RailLayout {
     rail: Vec<Block>,
     /// The controls the rail had no room for, in the rail's order.
     overflow: Vec<Block>,
-    /// Height of the rail's column.
+    /// Length of the rail's own column, along the rail's axis.
     column: f32,
     /// The open panel's owner, its rows and its box, when one is open.
-    panel: Option<(ToolbarAction, Vec<Block>, Rect)>,
-    /// How far the rail and its panel reach, from the rail's own origin.
-    height: f32,
+    panel: Option<(ToolbarAction, Vec<Block>, RailRect)>,
+    /// How far the rail and its panel reach along the rail's axis.
+    reach: f32,
 }
 
-fn rail_layout(toolbar: &Toolbar, surface: (f32, f32)) -> RailLayout {
-    let (rail, overflow) = fitted_blocks(toolbar, surface.1);
+fn rail_layout(toolbar: &Toolbar, surface: (f32, f32), position: ToolbarPosition) -> RailLayout {
+    let along_surface = position.along_surface(surface);
+    let (rail, overflow) = fitted_blocks(toolbar, along_surface);
     let column = column_of(&rail);
-    let Some((owner, rows)) = open_panel(toolbar, &overflow, panel_room(surface.1)) else {
+    let panel_surface = if position.horizontal() {
+        position.across_surface(surface)
+    } else {
+        along_surface
+    };
+    let Some((owner, rows)) = open_panel(toolbar, &overflow, panel_room(panel_surface)) else {
         return RailLayout {
             rail,
             overflow,
             column,
             panel: None,
-            height: column,
+            reach: column,
         };
     };
     let rows_h = rows
@@ -506,41 +631,81 @@ fn rail_layout(toolbar: &Toolbar, surface: (f32, f32)) -> RailLayout {
         .map(|block| TOOLBAR_BLOCK + block.gap)
         .sum::<f32>()
         - rows.first().map_or(0.0, |block| block.gap);
-    let owner_y = owner_row(&rail, owner).unwrap_or(TOOLBAR_PAD);
-    // One row is level with the block that opened the panel and the rest grow away from it: down the column
-    // while they fit, up when they do not.
-    let top = if owner_y + rows_h <= column - TOOLBAR_PAD {
-        owner_y
+    let owner_along = owner_row(&rail, owner).unwrap_or(TOOLBAR_PAD);
+    // One row is level with the block that opened the panel and the rest grow away from it: down the
+    // column while they fit, up when they do not. A top or bottom rail drops its menu from the block
+    // itself, with each row ending under it, so the walk from the block into the list is direct.
+    let along = if position.horizontal() || owner_along + rows_h <= column - TOOLBAR_PAD {
+        owner_along
     } else {
-        (owner_y + TOOLBAR_BLOCK - rows_h).max(TOOLBAR_PAD)
+        (owner_along + TOOLBAR_BLOCK - rows_h).max(TOOLBAR_PAD)
     };
-    let plate = Rect {
-        x: TOOLBAR_DRAWER_X - TOOLBAR_PAD,
-        y: top - TOOLBAR_PAD,
-        w: TOOLBAR_RESERVE - TOOLBAR_DRAWER_X + TOOLBAR_PAD,
-        h: rows_h + 2.0 * TOOLBAR_PAD,
+    let plate = if position.horizontal() {
+        // A top or bottom rail's panel drops down (or rises, from the bottom edge) as a menu: its
+        // rows stack across the rail, each right-aligned under the block that opened it and with the
+        // room a stretched block may take along the rail. The strip is kept inside the output.
+        let origin = position.origin(surface, column);
+        let room = (along_surface - TOOLBAR_MARGIN - origin.0).max(0.0);
+        let width = room.min(TOOLBAR_RESERVE);
+        let start = (along + TOOLBAR_BLOCK - width)
+            .max(0.0)
+            .min((room - width).max(0.0));
+        RailRect {
+            along: start,
+            across: TOOLBAR_DRAWER_X - TOOLBAR_PAD,
+            along_extent: width,
+            across_extent: rows_h + 2.0 * TOOLBAR_PAD,
+        }
+    } else {
+        RailRect {
+            along: along - TOOLBAR_PAD,
+            across: TOOLBAR_DRAWER_X - TOOLBAR_PAD,
+            along_extent: rows_h + 2.0 * TOOLBAR_PAD,
+            across_extent: TOOLBAR_RESERVE - TOOLBAR_DRAWER_X + TOOLBAR_PAD,
+        }
     };
-    let height = (plate.y + plate.h).max(column);
+    let reach = (plate.along + plate.along_extent).max(column);
+    // A top or bottom rail's capsule grows along the rail, past its own last block; the hit test's
+    // early bound has to reach as far as a capsule may.
+    let reach = if position.horizontal() {
+        reach.max(column + TOOLBAR_RESERVE)
+    } else {
+        reach
+    };
     RailLayout {
         rail,
         overflow,
         column,
         panel: Some((owner, rows, plate)),
-        height,
+        reach,
     }
 }
 
-/// The rail's column on an output of this height: what the fitted blocks need. The plate, the hit boxes, the
-/// panels anchored to the foot and the box a rail-only frame damages are all placed from this one number.
+/// The rail's column on an output of this length: what the fitted blocks need. The plate, the hit
+/// boxes, the panels anchored to the foot and the box a rail-only frame damages are all placed from this
+/// one number. `surface` is the dimension the rail runs along: the output's height for a side rail,
+/// its width for one at the top or bottom.
 pub fn rail_column(toolbar: &Toolbar, surface: f32) -> f32 {
-    rail_layout(toolbar, (0.0, surface)).column
+    let position = config::current().toolbar;
+    let output = if position.horizontal() {
+        (surface, 0.0)
+    } else {
+        (0.0, surface)
+    };
+    rail_layout(toolbar, output, position).column
 }
 
 /// The rail's blocks and its open panel's rows, in the order they are laid out: the list the tests walk, and the
 /// shape the layout gives a frame.
 #[cfg(test)]
-fn toolbar_blocks(toolbar: &Toolbar, height: f32) -> Vec<Block> {
-    let layout = rail_layout(toolbar, (0.0, height));
+fn toolbar_blocks(toolbar: &Toolbar, surface: f32) -> Vec<Block> {
+    let position = config::current().toolbar;
+    let output = if position.horizontal() {
+        (surface, 0.0)
+    } else {
+        (0.0, surface)
+    };
+    let layout = rail_layout(toolbar, output, position);
     let mut blocks = layout.rail;
     if let Some((_, rows, _)) = layout.panel {
         blocks.extend(rows);
@@ -879,6 +1044,17 @@ fn drawer_caption(action: ToolbarAction) -> Option<&'static str> {
     })
 }
 
+/// Which side a growing capsule uncovers its label from. A side rail's capsule opens away from
+/// its edge, and so does the text; on a right-docked rail both open leftwards, and the glyphs
+/// have to disappear past the capsule's left edge rather than its right.
+#[derive(Debug, Clone, Copy)]
+enum Reveal {
+    /// Show glyphs left of the edge: the capsule opens to the right.
+    After(f32),
+    /// Show glyphs right of the edge: the capsule opens to the left.
+    Before(f32),
+}
+
 pub struct Renderer {
     font_system: FontSystem,
     cache: SwashCache,
@@ -1002,6 +1178,7 @@ struct PreparedText {
 struct CachedToolbar {
     toolbar: Toolbar,
     surface: (f32, f32),
+    position: crate::config::ToolbarPosition,
     pill: ToolbarPill,
 }
 
@@ -1585,10 +1762,21 @@ impl Renderer {
             pixmap.width() as f32 / scale,
             pixmap.height() as f32 / scale,
         );
-        let Some(pill) = self.cached_toolbar_pill(toolbar, surface) else {
+        let position = config::current().toolbar;
+        let Some(pill) = self.cached_toolbar_pill(toolbar, surface, position) else {
             return;
         };
-        let (ox, oy) = toolbar_origin(surface.1, pill.column);
+        let origin = position.origin(surface, pill.column);
+        let local = |r: RailRect| position.place(origin, r);
+        let device = |r: RailRect| {
+            let r = local(r);
+            Rect {
+                x: r.x * scale,
+                y: r.y * scale,
+                w: r.w * scale,
+                h: r.h * scale,
+            }
+        };
         // The plate the whole rail sits on: the block column, inset `TOOLBAR_PAD` from the blocks on
         // all four sides — which is exactly the column's own extent, since the column already carries
         // that padding at each end. Its width is the block column and not the room a stretched capsule
@@ -1596,12 +1784,12 @@ impl Renderer {
         // than the plate appearing to grow.
         round_rect(
             pixmap,
-            Rect {
-                x: (ox - TOOLBAR_PAD) * scale,
-                y: oy * scale,
-                w: (TOOLBAR_BLOCK + 2.0 * TOOLBAR_PAD) * scale,
-                h: pill.column * scale,
-            },
+            device(RailRect {
+                along: 0.0,
+                across: -TOOLBAR_PAD,
+                along_extent: pill.column,
+                across_extent: TOOLBAR_BLOCK + 2.0 * TOOLBAR_PAD,
+            }),
             TOOLBAR_RADIUS * scale,
             parse_hex(TOOLBAR_PLATE_FILL),
             None,
@@ -1609,23 +1797,53 @@ impl Renderer {
         // The line through the middle of the backdrop options: the four modes are one family, and
         // the line says so without a second plate. It is drawn behind the buttons.
         if toolbar.more
-            && let Some(scrim_y) = pill
+            && let Some(scrim) = pill
                 .controls
                 .iter()
                 .find(|control| control.block.action == Some(ToolbarAction::Scrim))
-                .map(|control| control.y)
+                .map(|control| (control.along, control.across))
         {
             let c = parse_hex(TOOLBAR_BLOCK_EDGE);
-            let y = (oy + scrim_y + TOOLBAR_BLOCK / 2.0) * scale;
-            let x0 = (ox + TOOLBAR_DRAWER_X + TOOLBAR_BLOCK) * scale;
             let last = 2.0 + (Backdrop::ALL.len() - 1) as f32;
-            let x1 = (ox + last * TOOLBAR_DRAWER_X + TOOLBAR_BLOCK / 2.0) * scale;
+            let (start, end) = if position.horizontal() {
+                (
+                    position.point(
+                        origin,
+                        scrim.0 + TOOLBAR_BLOCK,
+                        scrim.1 + TOOLBAR_BLOCK / 2.0,
+                    ),
+                    position.point(
+                        origin,
+                        scrim.0
+                            + (Backdrop::ALL.len() as f32) * TOOLBAR_DRAWER_X
+                            + TOOLBAR_BLOCK / 2.0,
+                        scrim.1 + TOOLBAR_BLOCK / 2.0,
+                    ),
+                )
+            } else {
+                (
+                    position.point(
+                        origin,
+                        scrim.0 + TOOLBAR_BLOCK / 2.0,
+                        TOOLBAR_DRAWER_X + TOOLBAR_BLOCK,
+                    ),
+                    position.point(
+                        origin,
+                        scrim.0 + TOOLBAR_BLOCK / 2.0,
+                        last * TOOLBAR_DRAWER_X + TOOLBAR_BLOCK / 2.0,
+                    ),
+                )
+            };
+            let (x0, y0) = (start.0 * scale, start.1 * scale);
+            let (x1, y1) = (end.0 * scale, end.1 * scale);
+            let (dx, dy) = ((x1 - x0).abs(), (y1 - y0).abs());
+            let thin = scale.max(1.0);
             fill(
                 pixmap,
-                x0,
-                y - 0.5 * scale,
-                x1 - x0,
-                scale.max(1.0),
+                x0.min(x1) - if dx < 0.01 { thin / 2.0 } else { 0.0 },
+                y0.min(y1) - if dy < 0.01 { thin / 2.0 } else { 0.0 },
+                dx.max(thin),
+                dy.max(thin),
                 Color::rgba(c[0], c[1], c[2], c[3]),
             );
         }
@@ -1640,28 +1858,51 @@ impl Renderer {
             } else {
                 toolbar.panel_grow.clamp(0.0, 1.0)
             };
-            let width = if control.stretched {
-                TOOLBAR_BLOCK + (control.width - TOOLBAR_BLOCK) * opening
+            let full = if position.horizontal() {
+                control.along_extent
             } else {
-                control.width
+                control.across_extent
             };
-            // A block of the drawer is offset a column to the right of the rail's.
-            let column_x = control.block.column as f32 * TOOLBAR_DRAWER_X;
-            let block = Rect {
-                x: (ox + column_x) * scale,
-                y: (oy + control.y) * scale,
-                w: width * scale,
-                h: TOOLBAR_BLOCK * scale,
+            let extent = if control.stretched {
+                TOOLBAR_BLOCK + (full - TOOLBAR_BLOCK) * opening
+            } else {
+                full
             };
+            // A block of the drawer is offset a column inward from the rail's.
+            let block_local = RailRect {
+                along: control.along,
+                across: control.across,
+                along_extent: if position.horizontal() {
+                    extent
+                } else {
+                    TOOLBAR_BLOCK
+                },
+                across_extent: if position.horizontal() {
+                    TOOLBAR_BLOCK
+                } else {
+                    extent
+                },
+            };
+            let block = device(block_local);
+            let capsule = local(block_local);
             // A stretched block is a capsule; a square block is a rounded square.
             let radius = if control.stretched {
                 TOOLBAR_BLOCK / 2.0
             } else {
                 TOOLBAR_RADIUS
             } * scale;
+            let square_local = position.place(
+                origin,
+                RailRect {
+                    along: control.along,
+                    across: control.across,
+                    along_extent: TOOLBAR_BLOCK,
+                    across_extent: TOOLBAR_BLOCK,
+                },
+            );
             let square = Rect {
-                y: block.y,
-                x: block.x,
+                x: square_local.x * scale,
+                y: square_local.y * scale,
                 w: TOOLBAR_BLOCK * scale,
                 h: TOOLBAR_BLOCK * scale,
             };
@@ -1738,8 +1979,8 @@ impl Renderer {
                         Mark::Value(value) => {
                             let width = self.text_width(value, TOOLBAR_TEXT_SIZE);
                             let item = toolbar_text(
-                                ox + (TOOLBAR_BLOCK - width) / 2.0,
-                                oy + control.y,
+                                square_local.x + (TOOLBAR_BLOCK - width) / 2.0,
+                                square_local.y,
                                 TOOLBAR_BLOCK,
                                 TOOLBAR_TEXT_SIZE,
                                 TOOLBAR_FOREGROUND,
@@ -1774,10 +2015,29 @@ impl Renderer {
                 None => 0.0,
             };
             let label = row_label(toolbar, &control.block);
+            let button_rect = |slot: f32| {
+                let local = if position.horizontal() {
+                    RailRect {
+                        along: control.along + extent - slot * TOOLBAR_BLOCK,
+                        across: control.across,
+                        along_extent: TOOLBAR_BLOCK,
+                        across_extent: TOOLBAR_BLOCK,
+                    }
+                } else {
+                    RailRect {
+                        along: control.along,
+                        across: control.across + extent - slot * TOOLBAR_BLOCK,
+                        along_extent: TOOLBAR_BLOCK,
+                        across_extent: TOOLBAR_BLOCK,
+                    }
+                };
+                device(local)
+            };
             if (control.stretched || bare) && !label.is_empty() {
+                let text_width = self.text_width(label, TOOLBAR_TEXT_SIZE);
                 let item = toolbar_text(
-                    ox + label_x(column_x, bare),
-                    oy + control.y,
+                    label_origin(position, capsule, bare, text_width),
+                    capsule.y,
                     TOOLBAR_BLOCK,
                     TOOLBAR_TEXT_SIZE,
                     TOOLBAR_LABEL_TEXT,
@@ -1785,7 +2045,12 @@ impl Renderer {
                 );
                 // The label is uncovered by the capsule growing over it: a glyph appears once
                 // the edge has passed it, and at rest the edge is past its trailing padding.
-                self.draw_text(
+                let reveal = if position == ToolbarPosition::Right {
+                    Reveal::Before(capsule.x + buttons_w)
+                } else {
+                    Reveal::After(capsule.x + capsule.w - buttons_w)
+                };
+                self.draw_text_with(
                     pixmap,
                     &item,
                     Screen {
@@ -1793,9 +2058,7 @@ impl Renderer {
                         view: View::default(),
                     },
                     None,
-                    // The clip that uncovers the text as the capsule opens is measured from the block's own
-                    // column too, or a panel row's name is cut off 34 points before the end of its capsule.
-                    Some(ox + column_x + width - buttons_w),
+                    Some(reveal),
                     None,
                 );
             }
@@ -1811,12 +2074,7 @@ impl Renderer {
                     ];
                     for (number, (label, action)) in actions.iter().enumerate() {
                         let slot = (actions.len() - number) as f32;
-                        let square = Rect {
-                            x: (ox + column_x + width - slot * TOOLBAR_BLOCK) * scale,
-                            y: (oy + control.y) * scale,
-                            w: TOOLBAR_BLOCK * scale,
-                            h: TOOLBAR_BLOCK * scale,
-                        };
+                        let square = button_rect(slot);
                         self.draw_board_button(
                             pixmap,
                             toolbar.hover == Some(*action),
@@ -1833,12 +2091,7 @@ impl Renderer {
                     actions.push((Icon::Pencil, ToolbarAction::RenameBoard(index)));
                     for (number, (icon, action)) in actions.iter().enumerate() {
                         let slot = (actions.len() - number) as f32;
-                        let square = Rect {
-                            x: (ox + column_x + width - slot * TOOLBAR_BLOCK) * scale,
-                            y: (oy + control.y) * scale,
-                            w: TOOLBAR_BLOCK * scale,
-                            h: TOOLBAR_BLOCK * scale,
-                        };
+                        let square = button_rect(slot);
                         // The button under the pointer states its own shape: a wash inside a hairline,
                         // inset far enough that the outline never meets the row's own rounded edge.
                         if toolbar.hover == Some(*action) {
@@ -1862,11 +2115,13 @@ impl Renderer {
                 && edit.index == index
             {
                 let typed: String = edit.text.chars().take(edit.cursor).collect();
-                let x = ox + label_x(column_x, bare) + self.text_width(&typed, TOOLBAR_TEXT_SIZE);
+                let text_width = self.text_width(label, TOOLBAR_TEXT_SIZE);
+                let x = label_origin(position, capsule, bare, text_width)
+                    + self.text_width(&typed, TOOLBAR_TEXT_SIZE);
                 if edit.caret {
                     let caret = Rect {
                         x: x * scale,
-                        y: (oy + control.y + TOOLBAR_BLOCK * 0.2) * scale,
+                        y: (capsule.y + TOOLBAR_BLOCK * 0.2) * scale,
                         w: TOOLBAR_HAIRLINE.max(1.0) * scale,
                         h: TOOLBAR_BLOCK * 0.6 * scale,
                     };
@@ -1875,13 +2130,18 @@ impl Renderer {
                 if !edit.preedit.is_empty() {
                     let item = toolbar_text(
                         x + TOOLBAR_HAIRLINE,
-                        oy + control.y,
+                        capsule.y,
                         TOOLBAR_BLOCK,
                         TOOLBAR_TEXT_SIZE,
                         TOOLBAR_FOREGROUND,
                         &edit.preedit,
                     );
-                    self.draw_text(
+                    let reveal = if position == ToolbarPosition::Right {
+                        Reveal::Before(capsule.x)
+                    } else {
+                        Reveal::After(capsule.x + capsule.w)
+                    };
+                    self.draw_text_with(
                         pixmap,
                         &item,
                         Screen {
@@ -1889,7 +2149,7 @@ impl Renderer {
                             view: View::default(),
                         },
                         None,
-                        Some(ox + column_x + width),
+                        Some(reveal),
                         None,
                     );
                 }
@@ -1907,9 +2167,20 @@ impl Renderer {
                 && self.text_width(&legend, TOOLBAR_TEXT_SIZE)
                     <= toolbar_ceiling(pixmap.width() as f32 / scale) - TOOLBAR_DRAWER_X
             {
+                let anchor = position.point(
+                    origin,
+                    control.along + TOOLBAR_BLOCK + TOOLBAR_LABEL_GAP,
+                    TOOLBAR_DRAWER_X,
+                );
+                let width = self.text_width(&legend, TOOLBAR_TEXT_SIZE);
+                let x = if position == ToolbarPosition::Right {
+                    anchor.0 - width
+                } else {
+                    anchor.0
+                };
                 let item = toolbar_text(
-                    ox + TOOLBAR_DRAWER_X,
-                    oy + control.y + TOOLBAR_BLOCK + TOOLBAR_LABEL_GAP,
+                    x,
+                    anchor.1,
                     TOOLBAR_BLOCK,
                     TOOLBAR_TEXT_SIZE,
                     TOOLBAR_LABEL_TEXT,
@@ -1941,29 +2212,41 @@ impl Renderer {
         x: f32,
         y: f32,
     ) -> Option<ToolbarAction> {
-        let pill = self.cached_toolbar_pill(toolbar, (width, height))?;
-        let (ox, oy) = toolbar_origin(height, pill.column);
-        let (column_x, column_y) = (x - ox, y - oy);
-        if column_x < 0.0 || column_y < 0.0 || column_y >= pill.height {
+        self.toolbar_hit_at(config::current().toolbar, toolbar, width, height, x, y)
+    }
+
+    /// The toolbar block under a pointer position for a rail docked to `position`. The public
+    /// [`toolbar_hit`] uses the configured edge; this is the one the edge tests drive directly.
+    fn toolbar_hit_at(
+        &mut self,
+        position: ToolbarPosition,
+        toolbar: &Toolbar,
+        width: f32,
+        height: f32,
+        x: f32,
+        y: f32,
+    ) -> Option<ToolbarAction> {
+        let pill = self.cached_toolbar_pill(toolbar, (width, height), position)?;
+        let origin = position.origin((width, height), pill.column);
+        let (along, across) = position.to_local(origin, x, y);
+        if along < 0.0 || across < 0.0 || along >= pill.reach {
             return None;
         }
+        let inside = |r: &RailRect| {
+            along >= r.along
+                && along < r.along + r.along_extent
+                && across >= r.across
+                && across < r.across + r.across_extent
+        };
         // The corridor answers before the rail's own rows: it is the way from the block into the list.
         if let Some((corridor, owner)) = pill.corridor
-            && column_x >= corridor.x
-            && column_x < corridor.x + corridor.w
-            && column_y >= corridor.y
-            && column_y < corridor.y + corridor.h
+            && inside(&corridor)
         {
             return Some(owner);
         }
         pill.hits
             .iter()
-            .find(|(hit, _)| {
-                column_x >= hit.x
-                    && column_x < hit.x + hit.w
-                    && column_y >= hit.y
-                    && column_y < hit.y + hit.h
-            })
+            .find(|(hit, _)| inside(hit))
             .map(|(_, action)| *action)
     }
 
@@ -1971,21 +2254,23 @@ impl Renderer {
         &mut self,
         toolbar: &Toolbar,
         surface: (f32, f32),
+        position: crate::config::ToolbarPosition,
     ) -> Option<ToolbarPill> {
-        if let Some(cached) = self
-            .toolbar_cache
-            .iter()
-            .find(|cached| same_layout(&cached.toolbar, toolbar) && cached.surface == surface)
-        {
+        if let Some(cached) = self.toolbar_cache.iter().find(|cached| {
+            same_layout(&cached.toolbar, toolbar)
+                && cached.surface == surface
+                && cached.position == position
+        }) {
             return Some(cached.pill.clone());
         }
-        let pill = self.toolbar_pill(toolbar, surface);
+        let pill = self.toolbar_pill(toolbar, surface, position);
         if self.toolbar_cache.len() == TOOLBAR_CACHE_CAP {
             self.toolbar_cache.remove(0);
         }
         self.toolbar_cache.push(CachedToolbar {
             toolbar: toolbar.clone(),
             surface,
+            position,
             pill: pill.clone(),
         });
         Some(pill)
@@ -1994,18 +2279,22 @@ impl Renderer {
     /// Lay the rail out top to bottom. Only the block under the pointer is measured: every other
     /// block is a square, and a block only stretches when its meaning fits the room the damage
     /// accounting reserves for the rail.
-    fn toolbar_pill(&mut self, toolbar: &Toolbar, surface: (f32, f32)) -> ToolbarPill {
-        let surface_pair = surface;
-        let surface = surface.0;
-        let ceiling = toolbar_ceiling(surface);
-        let layout = rail_layout(toolbar, surface_pair);
+    fn toolbar_pill(
+        &mut self,
+        toolbar: &Toolbar,
+        surface: (f32, f32),
+        position: crate::config::ToolbarPosition,
+    ) -> ToolbarPill {
+        let ceiling = toolbar_ceiling(surface.0);
+        let layout = rail_layout(toolbar, surface, position);
         let RailLayout {
             rail,
             overflow,
             column,
             panel,
-            height: reach,
+            reach,
         } = layout;
+        let origin = position.origin(surface, column);
         let mut controls = Vec::new();
         let mut hits = Vec::new();
         // The drawer is the `more` block's own list, so its column starts on that block's row and grows
@@ -2017,9 +2306,11 @@ impl Renderer {
         // opened it and the rest grow away from it. Placing them here as well is how the rows and the plate
         // drifted apart by a row.
         let plate = panel.as_ref().map(|(_, _, plate)| *plate);
-        // One row counter per column: the drawer is a second column, so a block in it starts at the
-        // top of its own column and leaves the rail's height alone.
-        let mut y = [TOOLBAR_PAD; 2];
+        // One along counter per column: a side rail stacks its blocks down the column, and the drawer
+        // is a second column that leaves the rail's length alone. A top or bottom rail stacks the
+        // panel's rows across itself instead, below (or above) the block that opened them.
+        let mut along = [TOOLBAR_PAD; 2];
+        let mut panel_across = plate.map_or(TOOLBAR_PAD, |plate| plate.across + TOOLBAR_PAD);
         let blocks: Vec<Block> = rail
             .iter()
             .cloned()
@@ -2034,10 +2325,18 @@ impl Renderer {
             let column = block.column as usize;
             if column == 1
                 && let Some(plate) = plate
+                && !position.horizontal()
             {
-                y[column] = y[column].max(plate.y + TOOLBAR_PAD);
+                along[column] = along[column].max(plate.along + TOOLBAR_PAD);
             }
-            let x = block.column as f32 * TOOLBAR_DRAWER_X;
+            let (row, across) = if position.horizontal() && block.column > 0 {
+                (
+                    plate.map_or(TOOLBAR_PAD, |plate| plate.along + TOOLBAR_PAD),
+                    panel_across,
+                )
+            } else {
+                (along[column], block.column as f32 * TOOLBAR_DRAWER_X)
+            };
             let gap = block.gap;
             // The block that owns the open panel stays a square: the list it opened says what it is,
             // and a caption growing over it would push against the list's own rows.
@@ -2055,13 +2354,24 @@ impl Renderer {
                 (labelled && !text.is_empty()).then(|| self.text_width(text, TOOLBAR_TEXT_SIZE));
             // A row of the drawer starts a column to the right, so it has that much less of the reserve to
             // reach into: the reserve is the room a control may take from the rail's own edge, and
-            // `toolbar_bounds` — what a frame that repaints only the rail damages — is that wide.
-            let ceiling = if block.column == 0 {
+            // `toolbar_bounds` — what a frame that repaints only the rail damages — is that wide. A top
+            // or bottom rail spells its capsule along the rail, so its room is what is left of the
+            // output from the block's own start.
+            let ceiling = if position.horizontal() {
+                if block.column > 0 {
+                    plate.map_or(ceiling, |plate| {
+                        ceiling.min(plate.along_extent - 2.0 * TOOLBAR_LABEL_PAD)
+                    })
+                } else {
+                    let room = surface.0 - TOOLBAR_MARGIN - (origin.0 + row);
+                    ceiling.min(room.max(0.0))
+                }
+            } else if block.column == 0 {
                 ceiling
             } else {
                 ceiling - TOOLBAR_DRAWER_X
             };
-            let width = match label {
+            let mut width = match label {
                 // A row of names has no square, so its capsule is the text and a pad on each side: the
                 // text is centred in the control rather than pushed against one end of it.
                 Some(label) if bare && label + 2.0 * TOOLBAR_LABEL_PAD <= ceiling => {
@@ -2086,60 +2396,108 @@ impl Renderer {
                 Some((false, _)) => TOOLBAR_BLOCK,
                 None => 0.0,
             };
-            let width = (width + button_w).min(ceiling);
+            width = (width + button_w).min(ceiling);
+            // A top or bottom rail stacks panel rows below (or above) the rail, so a row that would
+            // fall past the output's interior is a row nobody could see or click.
+            if position.horizontal() && block.column > 0 {
+                if across + TOOLBAR_BLOCK > surface.1 - TOOLBAR_MARGIN {
+                    continue;
+                }
+                if width < TOOLBAR_BLOCK {
+                    continue;
+                }
+            }
+            // A menu row on a top or bottom rail ends under the block that opened it, so the walk
+            // down from that block lands on the first row rather than beside it.
+            let row = if position.horizontal() && block.column > 0 {
+                plate.map_or(row, |plate| {
+                    plate.along + plate.along_extent - TOOLBAR_LABEL_PAD - width
+                })
+            } else {
+                row
+            };
+            let (along_extent, across_extent) = if position.horizontal() {
+                (width, TOOLBAR_BLOCK)
+            } else {
+                (TOOLBAR_BLOCK, width)
+            };
             if let Some(action) = block.action {
                 // The corridor: while the panel is open, the block that opens it owns the row as far as the
-                // panel's left edge — so the pointer can travel from the block into the list without
+                // panel's own edge — so the pointer can travel from the block into the list without
                 // crossing a region that owns nothing and would close the panel on the way. It stops at
                 // that edge because a hit box reaching into the panel would win over the panel's rows:
                 // the rail's boxes are the ones tested first.
-                let w = if owner == Some(action) {
-                    TOOLBAR_DRAWER_X
+                let (hit_along, hit_across) = if owner == Some(action) {
+                    (TOOLBAR_BLOCK, TOOLBAR_DRAWER_X)
                 } else if buttons.is_some() {
-                    width - button_w
+                    if position.horizontal() {
+                        (along_extent - button_w, across_extent)
+                    } else {
+                        (along_extent, across_extent - button_w)
+                    }
                 } else {
-                    width
+                    (along_extent, across_extent)
                 };
                 hits.push((
-                    Rect {
-                        x,
-                        y: y[column],
-                        w,
-                        h: TOOLBAR_BLOCK,
+                    RailRect {
+                        along: row,
+                        across,
+                        along_extent: hit_along,
+                        across_extent: hit_across,
                     },
                     action,
                 ));
             }
             controls.push(Control {
                 block,
-                y: y[column],
-                width,
+                along: row,
+                across,
+                along_extent,
+                across_extent,
                 stretched: width > TOOLBAR_BLOCK,
             });
-            y[column] += TOOLBAR_BLOCK + gap;
+            if position.horizontal() && column > 0 {
+                panel_across = across + TOOLBAR_BLOCK + gap;
+            } else {
+                along[column] = row + TOOLBAR_BLOCK + gap;
+            }
         }
-        debug_assert_eq!(y[0] + TOOLBAR_PAD, column); // The rail consumes every press on a block, and the rows between its own blocks belong to a
+        debug_assert_eq!(along[0] + TOOLBAR_PAD, column); // The rail consumes every press on a block, and the rows between its own blocks belong to a
         // neighbour as well: a press on the size readout or in a gap has to step something rather than
         // start a stroke under the rail. The drawer's column is not filled that way: it is only as tall
         // as its controls, so a press beside one is the canvas's. The rail's controls are built before
         // the drawer's, so they are the leading rows of `hits`.
-        let rail_rows = hits.iter().take_while(|(r, _)| r.x == 0.0).count();
+        let rail_rows = hits.iter().take_while(|(r, _)| r.across == 0.0).count();
         if let Some((first, _)) = hits.first_mut() {
-            first.h += first.y;
-            first.y = 0.0;
+            first.along_extent = first.along_extent.max(first.along);
+            first.along = 0.0;
         }
         for index in 0..rail_rows.saturating_sub(1) {
-            hits[index].0.h = hits[index + 1].0.y - hits[index].0.y;
+            let next = hits[index + 1].0.along;
+            hits[index].0.along_extent = hits[index].0.along_extent.max(next - hits[index].0.along);
         }
         if rail_rows > 0 {
-            hits[rail_rows - 1].0.h = column - hits[rail_rows - 1].0.y;
+            hits[rail_rows - 1].0.along_extent = hits[rail_rows - 1]
+                .0
+                .along_extent
+                .max(column - hits[rail_rows - 1].0.along);
         }
-        // The panel's column, by the same rule: the four pixels between two rows belong to the row above
-        // them, so moving from one to the next is staying on the list. Only between its own first and last
-        // row, though — the strip beside the rail at any other height is the canvas's, and the block level
-        // with a row is the rail's, whose box is tested first.
-        for index in rail_rows..hits.len().saturating_sub(1) {
-            hits[index].0.h = hits[index + 1].0.y - hits[index].0.y;
+        // The panel's rows, by the same rule: the four pixels between two rows belong to the row above
+        // them, so moving from one to the next is staying on the list. Only between its own first and
+        // last row, though — the strip beside the rail at any other height is the canvas's, and the
+        // block level with a row is the rail's, whose box is tested first. A side rail stacks its rows
+        // down the column and fills the gap along the rail; a top or bottom rail stacks them down the
+        // output instead, so the gap is filled across it.
+        if position.horizontal() {
+            for index in rail_rows..hits.len().saturating_sub(1) {
+                let next = hits[index + 1].0.across;
+                hits[index].0.across_extent =
+                    hits[index].0.across_extent.max(next - hits[index].0.across);
+            }
+        } else {
+            for index in rail_rows..hits.len().saturating_sub(1) {
+                hits[index].0.along_extent = hits[index + 1].0.along - hits[index].0.along;
+            }
         }
         // A board's two buttons answer before the row they sit on: their rects are inside the row's
         // box, past the name, and a hit is the first rect that contains the point. They are appended
@@ -2151,13 +2509,13 @@ impl Renderer {
             let Some((delete, _)) = board_actions(toolbar, index) else {
                 continue;
             };
-            // A button takes the height its row was given, so the strip between two rows belongs to
-            // the row above and the pointer can walk down a column of buttons.
+            // A button takes the strip its row was given, so the gap between two rows belongs to the
+            // row above and the pointer can walk a column of buttons without falling out of it.
             let row_h = hits
                 .iter()
                 .rev()
                 .find(|(_, action)| Some(*action) == control.block.action)
-                .map_or(TOOLBAR_BLOCK, |(rect, _)| rect.h);
+                .map_or(TOOLBAR_BLOCK, |(rect, _)| rect.along_extent);
             let mut actions = Vec::new();
             if board_confirms(toolbar, index) {
                 actions.push(ToolbarAction::CancelDeleteBoard);
@@ -2170,25 +2528,36 @@ impl Renderer {
             }
             for (number, action) in actions.iter().enumerate() {
                 let slot = (actions.len() - number) as f32;
-                hits.push((
-                    Rect {
-                        x: TOOLBAR_DRAWER_X + control.width - slot * TOOLBAR_BLOCK,
-                        y: control.y,
-                        w: TOOLBAR_BLOCK,
-                        h: row_h,
-                    },
-                    *action,
-                ));
+                let rect = if position.horizontal() {
+                    // The capsule grows along the rail, so its buttons sit at its trailing end.
+                    RailRect {
+                        along: control.along + control.along_extent - slot * TOOLBAR_BLOCK,
+                        across: control.across,
+                        along_extent: TOOLBAR_BLOCK,
+                        across_extent: TOOLBAR_BLOCK,
+                    }
+                } else {
+                    // The capsule grows across the rail, so its buttons sit at the inward end, and
+                    // take the row's gap so a column of them stays contiguous.
+                    RailRect {
+                        along: control.along,
+                        across: control.across + control.across_extent - slot * TOOLBAR_BLOCK,
+                        along_extent: row_h,
+                        across_extent: TOOLBAR_BLOCK,
+                    }
+                };
+                hits.push((rect, *action));
             }
         }
         // The backdrop row expands sideways: four mode buttons level with the `backdrop` row,
-        // starting one drawer-column to its right. The drawer's plate already covers them, and
-        // their vertical position is the row's, not a column walk.
+        // starting one drawer-column to its right. On a top or bottom rail they are the same row
+        // stepped across the rail instead. The drawer's plate already covers them, and their vertical
+        // position is the row's, not a column walk.
         if toolbar.more
-            && let Some(scrim_y) = controls
+            && let Some(scrim) = controls
                 .iter()
                 .find(|control| control.block.action == Some(ToolbarAction::Scrim))
-                .map(|control| control.y)
+                .map(|control| (control.along, control.across))
         {
             for (index, mode) in Backdrop::ALL.iter().enumerate() {
                 let column = 2 + index as u8;
@@ -2199,6 +2568,14 @@ impl Renderer {
                     Backdrop::Dots => Icon::Dots,
                     Backdrop::Black => Icon::Scrim,
                 };
+                // A side rail puts the four options beside the backdrop row; a top or bottom rail,
+                // whose panel rows already point inward, puts them after the row's own square along
+                // the rail. Either way they are one strip with the row they belong to.
+                let (along, across) = if position.horizontal() {
+                    (scrim.0 + (index as f32 + 1.0) * TOOLBAR_DRAWER_X, scrim.1)
+                } else {
+                    (scrim.0, column as f32 * TOOLBAR_DRAWER_X)
+                };
                 controls.push(Control {
                     block: Block {
                         mark: Mark::Icon(icon),
@@ -2208,38 +2585,39 @@ impl Renderer {
                         active: toolbar.backdrop == *mode,
                         gap: 0.0,
                     },
-                    y: scrim_y,
-                    width: TOOLBAR_BLOCK,
+                    along,
+                    across,
+                    along_extent: TOOLBAR_BLOCK,
+                    across_extent: TOOLBAR_BLOCK,
                     stretched: false,
                 });
                 hits.push((
-                    Rect {
-                        x: column as f32 * TOOLBAR_DRAWER_X,
-                        y: scrim_y,
-                        w: TOOLBAR_BLOCK,
-                        h: TOOLBAR_BLOCK,
+                    RailRect {
+                        along,
+                        across,
+                        along_extent: TOOLBAR_BLOCK,
+                        across_extent: TOOLBAR_BLOCK,
                     },
                     action,
                 ));
             }
         }
-        let height = reach;
         // The walkway into a panel. The drawer and the boards list own the strip beside the rail, from
         // their first row to their last — a block level with a row answers for the list, which is how the
         // pointer walks into a tall list from any height. The width list hangs off the readout, whose rows
         // reach the boards block just below it, so a full strip would shadow that block; it needs only the
         // gap beside the rail's blocks, and those keep their own press.
-        let corridor_x = match owner {
+        let corridor_across = match owner {
             Some(ToolbarAction::Size) => TOOLBAR_BLOCK,
             _ => 0.0,
         };
         let corridor = match (plate, owner) {
             (Some(plate), Some(owner)) => Some((
-                Rect {
-                    x: corridor_x,
-                    y: plate.y,
-                    w: TOOLBAR_DRAWER_X - corridor_x,
-                    h: plate.h,
+                RailRect {
+                    along: plate.along,
+                    across: corridor_across,
+                    along_extent: plate.along_extent,
+                    across_extent: TOOLBAR_DRAWER_X - corridor_across,
                 },
                 owner,
             )),
@@ -2250,7 +2628,7 @@ impl Renderer {
             hits,
             corridor,
             column,
-            height,
+            reach,
             overflow,
         }
     }
@@ -2485,7 +2863,7 @@ impl Renderer {
             .h
     }
 
-    /// `reveal` is the logical x a progress animation has uncovered: glyphs to its right are
+    /// `reveal` is the logical x a progress animation has uncovered: glyphs on its far side are
     /// left out, so the text appears as the shape around it grows.
     fn draw_prepared_text(
         &mut self,
@@ -2493,20 +2871,28 @@ impl Renderer {
         item: &TextItem,
         screen: Screen,
         prepared: &mut PreparedText,
-        reveal: Option<f32>,
+        reveal: Option<Reveal>,
     ) {
         let origin = screen.point([item.x, item.y]);
         let (ox, oy) = (origin[0], origin[1]);
         let c = parse_hex(&item.color);
         let color = Color::rgba(c[0], c[1], c[2], c[3]);
         let (clip_w, clip_h) = (pixmap.width(), pixmap.height());
-        let reveal = reveal.map(|x| screen.point([x, 0.0])[0]);
+        let reveal = reveal.map(|reveal| match reveal {
+            Reveal::After(x) => Reveal::After(screen.point([x, 0.0])[0]),
+            Reveal::Before(x) => Reveal::Before(screen.point([x, 0.0])[0]),
+        });
         prepared.buffer.draw(
             &mut self.font_system,
             &mut self.cache,
             color,
             |x, y, w, h, c| {
-                if reveal.is_some_and(|reveal| ox + x as f32 > reveal) {
+                let hidden = match reveal {
+                    Some(Reveal::After(reveal)) => ox + x as f32 > reveal,
+                    Some(Reveal::Before(reveal)) => ox + x as f32 + (w as f32) < reveal,
+                    None => false,
+                };
+                if hidden {
                     return;
                 }
                 blend(
@@ -2544,6 +2930,19 @@ impl Renderer {
         screen: Screen,
         edit: Option<&TextOverlay>,
         reveal: Option<f32>,
+        wrap: Option<f32>,
+    ) {
+        self.draw_text_with(pixmap, item, screen, edit, reveal.map(Reveal::After), wrap);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_text_with(
+        &mut self,
+        pixmap: &mut PixmapMut,
+        item: &TextItem,
+        screen: Screen,
+        edit: Option<&TextOverlay>,
+        reveal: Option<Reveal>,
         wrap: Option<f32>,
     ) {
         let (committed, preedit, caret) = match edit {
@@ -2957,33 +3356,40 @@ fn same_layout(a: &Toolbar, b: &Toolbar) -> bool {
         && a.backdrop == b.backdrop
 }
 
-/// One block of the rail as laid out: where it sits in the column, how wide it is drawn, and
-/// whether the pointer stretched it into a capsule.
+/// One block of the rail as laid out: where it sits along the rail and across it, and the extent it
+/// occupies in each direction. A stretched rail block grows across a side rail and along a top or
+/// bottom one, because its text always reads left to right.
 #[derive(Clone)]
 struct Control {
     block: Block,
-    /// Top of the block, in its column's coordinates.
-    y: f32,
-    width: f32,
+    /// Start of the block along the rail's axis.
+    along: f32,
+    /// Start of the block across the rail, toward the interior.
+    across: f32,
+    /// Extent along the rail: `TOOLBAR_BLOCK` for a row of a side rail, the capsule's width for a
+    /// block of a top or bottom one.
+    along_extent: f32,
+    /// Extent across the rail: the capsule's width for a side rail, `TOOLBAR_BLOCK` otherwise.
+    across_extent: f32,
     stretched: bool,
 }
 
-/// A laid-out rail: what to paint and what to hit, in logical pixels relative to the rail's own
-/// origin at its top-left corner.
+/// A laid-out rail: what to paint and what to hit, in logical pixels in the rail's own coordinates,
+/// where `along` runs down or across the rail and `across` runs toward the interior.
 #[derive(Clone)]
 struct ToolbarPill {
     controls: Vec<Control>,
-    hits: Vec<(Rect, ToolbarAction)>,
+    hits: Vec<(RailRect, ToolbarAction)>,
     /// Waiting to answer first: while a panel is open, the strip of the rail's column beside it belongs to the
     /// block that opened it. The pointer leaves the block at whatever row it likes on its way into the list,
     /// and a step into a neighbouring block would read as leaving the menu. It is a strip of its own rather
     /// than a wider box on the block, because the rail's rows answer in column order and a later row would win.
-    corridor: Option<(Rect, ToolbarAction)>,
-    /// Height of the rail's own column on this output, which the plate and the origin are placed from.
+    corridor: Option<(RailRect, ToolbarAction)>,
+    /// Length of the rail's own column on this output, which the plate and the origin are placed from.
     column: f32,
-    /// Everything the rail and its open panel reach, from the rail's own origin: what the frame paints, what
+    /// Everything the rail and its open panel reach along the rail's axis: what the frame paints, what
     /// the hit test accepts and what a rail-only frame damages.
-    height: f32,
+    reach: f32,
     /// The controls the rail had no room for: the drawer lists them after its own rows.
     overflow: Vec<Block>,
 }
@@ -3006,33 +3412,57 @@ fn toolbar_ceiling(surface: f32) -> f32 {
     (surface - 2.0 * TOOLBAR_MARGIN).min(TOOLBAR_RESERVE)
 }
 
-/// Where the rail sits on an output of this logical height: `TOOLBAR_MARGIN` from the left edge,
-/// its vertical centre at the optical centre. Short outputs keep the top margin rather than
-/// pushing the rail off the screen.
-fn toolbar_origin(height: f32, column: f32) -> (f32, f32) {
-    (
-        TOOLBAR_MARGIN,
-        (height * TOOLBAR_CENTRE - column / 2.0).max(TOOLBAR_MARGIN),
-    )
+/// Everything the rail paints. A stretched block's width depends on the font, so the damage
+/// accounting reserves the widest block `toolbar_pill` will build, as a strip on the output's edge
+/// the rail is docked to; the strip only joins a damage box that reaches it.
+pub fn toolbar_bounds(toolbar: &Toolbar, width: f32, height: f32) -> Rect {
+    toolbar_bounds_at(config::current().toolbar, toolbar, width, height)
 }
 
-/// Everything the rail paints. A stretched block's width depends on the font, so the damage
-/// accounting reserves the widest block `toolbar_pill` will build, as a strip on the left of the
-/// output; the strip only joins a damage box that reaches it.
-pub fn toolbar_bounds(toolbar: &Toolbar, width: f32, height: f32) -> Rect {
-    let layout = rail_layout(toolbar, (width, height));
-    let (x, y) = toolbar_origin(height, layout.column);
-    Rect {
-        // The plate reaches a pad outside the blocks horizontally and starts at the column's own top,
-        // which already carries that padding — and the hairline edge is stroked around a path, so it
-        // reaches one logical pixel past. The box therefore holds every pixel the rail paints: any less
-        // and part of the plate would fall outside a frame that repaints only the rail, keeping stale
-        // pixels behind.
-        x: x - TOOLBAR_PAD - TOOLBAR_HAIRLINE,
-        y: y - TOOLBAR_HAIRLINE,
-        w: (width - 2.0 * TOOLBAR_MARGIN).clamp(0.0, TOOLBAR_RESERVE)
-            + 2.0 * (TOOLBAR_PAD + TOOLBAR_HAIRLINE),
-        h: layout.height + 2.0 * TOOLBAR_HAIRLINE,
+/// The damage box for a rail docked to `position`. The public [`toolbar_bounds`] uses the
+/// configured edge; this is the one the edge tests drive directly.
+fn toolbar_bounds_at(
+    position: ToolbarPosition,
+    toolbar: &Toolbar,
+    width: f32,
+    height: f32,
+) -> Rect {
+    let surface = (width, height);
+    let layout = rail_layout(toolbar, surface, position);
+    let origin = position.origin(surface, layout.column);
+    // The plate reaches a pad outside the blocks and the hairline is stroked around a path, so it
+    // reaches one logical pixel past. The box therefore holds every pixel the rail paints: any less
+    // and part of the plate would fall outside a frame that repaints only the rail, keeping stale
+    // pixels behind.
+    let outer = TOOLBAR_PAD + TOOLBAR_HAIRLINE;
+    let strip = toolbar_ceiling(width) + 2.0 * outer;
+    if position.horizontal() {
+        let strip = strip.min(height);
+        let reach = layout
+            .reach
+            .max(layout.column + TOOLBAR_RESERVE)
+            .min((width - origin.0).max(0.0));
+        let y = match position {
+            ToolbarPosition::Top => origin.1 - outer,
+            _ => origin.1 - strip + outer,
+        }
+        .clamp(0.0, (height - strip).max(0.0));
+        Rect {
+            x: origin.0 - TOOLBAR_HAIRLINE,
+            y,
+            w: reach + 2.0 * TOOLBAR_HAIRLINE,
+            h: strip,
+        }
+    } else {
+        Rect {
+            x: match position {
+                ToolbarPosition::Left => origin.0 - outer,
+                _ => origin.0 - toolbar_ceiling(width) - outer,
+            },
+            y: origin.1 - TOOLBAR_HAIRLINE,
+            w: strip,
+            h: layout.reach + 2.0 * TOOLBAR_HAIRLINE,
+        }
     }
 }
 
@@ -4047,6 +4477,307 @@ mod tests {
     use super::*;
     use crate::canvas::{Note, View};
 
+    const EDGES: [ToolbarPosition; 4] = [
+        ToolbarPosition::Left,
+        ToolbarPosition::Right,
+        ToolbarPosition::Top,
+        ToolbarPosition::Bottom,
+    ];
+
+    /// A block's painted rectangle on an output, from the layout the frame draws.
+    fn block_rect(
+        position: ToolbarPosition,
+        surface: (f32, f32),
+        pill: &ToolbarPill,
+        control: &Control,
+    ) -> Rect {
+        position.place(
+            position.origin(surface, pill.column),
+            RailRect {
+                along: control.along,
+                across: control.across,
+                along_extent: control.along_extent,
+                across_extent: control.across_extent,
+            },
+        )
+    }
+
+    fn on_screen(rect: Rect, surface: (f32, f32), what: &str) {
+        assert!(
+            rect.x >= -TOOLBAR_HAIRLINE
+                && rect.y >= -TOOLBAR_HAIRLINE
+                && rect.x + rect.w <= surface.0 + TOOLBAR_HAIRLINE
+                && rect.y + rect.h <= surface.1 + TOOLBAR_HAIRLINE,
+            "{what} is off screen: {rect:?} on {surface:?}"
+        );
+    }
+
+    /// Every edge lays the rail out as a real column or row: the blocks keep their upright squares,
+    /// a stretched capsule grows toward the interior, the origin is inside the output, the first
+    /// block sits on the edge it is docked to, and every block answers a press at its centre.
+    #[test]
+    fn the_rail_docks_to_every_edge() {
+        let surface = (900.0, 1000.0);
+        let rail = rail_for_legend();
+        for position in EDGES {
+            let mut renderer = Renderer::new();
+            let pill = renderer.toolbar_pill(&rail, surface, position);
+            let origin = position.origin(surface, pill.column);
+            assert!(
+                origin.0 >= 0.0
+                    && origin.0 <= surface.0
+                    && origin.1 >= 0.0
+                    && origin.1 <= surface.1,
+                "{position:?} put the rail's origin off screen: {origin:?}"
+            );
+            on_screen(
+                toolbar_bounds_at(position, &rail, surface.0, surface.1),
+                surface,
+                "the rail's damage box",
+            );
+            let blocks: Vec<&Control> = pill
+                .controls
+                .iter()
+                .filter(|control| control.block.column == 0)
+                .collect();
+            assert!(blocks.len() > 4, "the rail has no blocks on {position:?}");
+            for control in &blocks {
+                let rect = block_rect(position, surface, &pill, control);
+                on_screen(rect, surface, "a rail block");
+                let action = control.block.action.expect("a rail block is an action");
+                assert_eq!(
+                    renderer.toolbar_hit_at(
+                        position,
+                        &rail,
+                        surface.0,
+                        surface.1,
+                        rect.x + rect.w / 2.0,
+                        rect.y + rect.h / 2.0
+                    ),
+                    Some(action),
+                    "{position:?}: no hit on {action:?} at its own centre"
+                );
+            }
+            // The rail is a line of squares along its edge. A side rail advances down a column and
+            // a top or bottom rail along a row; neither rotates a block.
+            let (first, second) = (blocks[0], blocks[1]);
+            let (a, b) = (
+                block_rect(position, surface, &pill, first),
+                block_rect(position, surface, &pill, second),
+            );
+            assert!(
+                (a.w - TOOLBAR_BLOCK).abs() < f32::EPSILON
+                    && (a.h - TOOLBAR_BLOCK).abs() < f32::EPSILON,
+                "{position:?}: a block was rotated out of its square: {a:?}"
+            );
+            if position.horizontal() {
+                assert!((a.y - b.y).abs() < f32::EPSILON, "a row stepped vertically");
+                assert!(b.x > a.x, "a top or bottom rail does not advance sideways");
+            } else {
+                assert!(
+                    (a.x - b.x).abs() < f32::EPSILON,
+                    "a column stepped sideways"
+                );
+                assert!(b.y > a.y, "a side rail does not advance down");
+            }
+            // A stretched capsule grows toward the interior and keeps its text upright: across the
+            // rail on a side, along it on a top or bottom edge. It is laid out from the same square,
+            // so the block itself never rotates.
+            let hovered = Toolbar {
+                hover: Some(ToolbarAction::Tool(Tool::Pen)),
+                grow: 1.0,
+                ..rail_for_legend()
+            };
+            let hovered_pill = renderer.toolbar_pill(&hovered, surface, position);
+            let pen = hovered_pill
+                .controls
+                .iter()
+                .find(|control| control.block.action == Some(ToolbarAction::Tool(Tool::Pen)))
+                .expect("the pen block");
+            assert!(
+                pen.stretched,
+                "{position:?}: the hovered pen did not stretch"
+            );
+            if position.horizontal() {
+                assert!(pen.along_extent > TOOLBAR_BLOCK);
+                assert_eq!(pen.across_extent, TOOLBAR_BLOCK);
+            } else {
+                assert!(pen.across_extent > TOOLBAR_BLOCK);
+                assert_eq!(pen.along_extent, TOOLBAR_BLOCK);
+            }
+            // The first block is on the edge the rail is docked to.
+            let centre = (a.x + a.w / 2.0, a.y + a.h / 2.0);
+            let near = |edge: f32| edge < 100.0;
+            match position {
+                ToolbarPosition::Left => assert!(centre.0 < 100.0, "left rail at {centre:?}"),
+                ToolbarPosition::Right => {
+                    assert!(centre.0 > surface.0 - 100.0, "right rail at {centre:?}")
+                }
+                ToolbarPosition::Top => assert!(near(centre.1), "top rail at {centre:?}"),
+                ToolbarPosition::Bottom => {
+                    assert!(centre.1 > surface.1 - 100.0, "bottom rail at {centre:?}")
+                }
+            }
+        }
+    }
+
+    /// A panel opens toward the interior on every edge: its rows sit between the rail and the middle
+    /// of the output, each row answers a press, and the plate and damage box stay on screen.
+    #[test]
+    fn every_edge_opens_its_panel_toward_the_interior() {
+        let surface = (900.0, 1000.0);
+        for position in EDGES {
+            let rail = Toolbar {
+                more: true,
+                ..rail_for_legend()
+            };
+            let mut renderer = Renderer::new();
+            let pill = renderer.toolbar_pill(&rail, surface, position);
+            let origin = position.origin(surface, pill.column);
+            let (corridor, owner) = pill.corridor.expect("an open drawer has a corridor");
+            assert_eq!(owner, ToolbarAction::More);
+            on_screen(
+                position.place(origin, corridor),
+                surface,
+                "the drawer's corridor",
+            );
+            on_screen(
+                toolbar_bounds_at(position, &rail, surface.0, surface.1),
+                surface,
+                "the open drawer's damage box",
+            );
+            let row = pill
+                .controls
+                .iter()
+                .find(|control| control.block.action == Some(ToolbarAction::Scrim))
+                .expect("the drawer's backdrop row");
+            let row_rect = block_rect(position, surface, &pill, row);
+            on_screen(row_rect, surface, "a drawer row");
+            match position {
+                ToolbarPosition::Left => {
+                    assert!(
+                        row_rect.x >= origin.0 + TOOLBAR_BLOCK,
+                        "the drawer opened left"
+                    )
+                }
+                ToolbarPosition::Right => assert!(
+                    row_rect.x + row_rect.w <= origin.0 - TOOLBAR_BLOCK,
+                    "the drawer opened right"
+                ),
+                ToolbarPosition::Top => assert!(
+                    row_rect.y >= origin.1 + TOOLBAR_BLOCK,
+                    "the drawer opened up"
+                ),
+                ToolbarPosition::Bottom => assert!(
+                    row_rect.y + row_rect.h <= origin.1 - TOOLBAR_BLOCK,
+                    "the drawer opened down"
+                ),
+            }
+            assert_eq!(
+                renderer.toolbar_hit_at(
+                    position,
+                    &rail,
+                    surface.0,
+                    surface.1,
+                    row_rect.x + row_rect.w / 2.0,
+                    row_rect.y + row_rect.h / 2.0
+                ),
+                Some(ToolbarAction::Scrim),
+                "{position:?}: the drawer's row does not answer its own press"
+            );
+            // The whole drawer fits on a normal output whichever edge it opens from, and each of
+            // its rows answers at its own centre.
+            for action in DRAWER {
+                let row = pill
+                    .controls
+                    .iter()
+                    .find(|control| control.block.action == Some(action))
+                    .unwrap_or_else(|| panic!("{position:?}: the drawer lost {action:?}"));
+                let rect = block_rect(position, surface, &pill, row);
+                on_screen(rect, surface, "a drawer row");
+                assert_eq!(
+                    renderer.toolbar_hit_at(
+                        position,
+                        &rail,
+                        surface.0,
+                        surface.1,
+                        rect.x + rect.w / 2.0,
+                        rect.y + rect.h / 2.0
+                    ),
+                    Some(action),
+                    "{position:?}: {action:?} does not answer its own press"
+                );
+            }
+            // An open menu must not swallow the rail's way out: `Esc` keeps its own press even when
+            // the drawer hangs over the blocks beside it.
+            let lock = pill
+                .controls
+                .iter()
+                .find(|control| control.block.action == Some(ToolbarAction::Lock))
+                .expect("the lock block");
+            let rect = block_rect(position, surface, &pill, lock);
+            assert_eq!(
+                renderer.toolbar_hit_at(
+                    position,
+                    &rail,
+                    surface.0,
+                    surface.1,
+                    rect.x + rect.w / 2.0,
+                    rect.y + rect.h / 2.0
+                ),
+                Some(ToolbarAction::Lock),
+                "{position:?}: the open drawer shadowed the lock block"
+            );
+            // The boards list and the clipboard list are panels too, and follow the same edge.
+            let panels = [
+                (
+                    Toolbar {
+                        boards_open: true,
+                        boards: vec![crate::canvas::BoardRow {
+                            name: "laptop".into(),
+                            current: true,
+                        }],
+                        ..rail_for_legend()
+                    },
+                    ToolbarAction::Board(0),
+                ),
+                (
+                    Toolbar {
+                        clipboard_open: true,
+                        clips: vec![crate::canvas::ClipRow {
+                            items: 2,
+                            preview: "note".into(),
+                        }],
+                        ..rail_for_legend()
+                    },
+                    ToolbarAction::Clip(0),
+                ),
+            ];
+            for (panel_rail, action) in panels {
+                let pill = renderer.toolbar_pill(&panel_rail, surface, position);
+                let row = pill
+                    .controls
+                    .iter()
+                    .find(|control| control.block.action == Some(action))
+                    .unwrap_or_else(|| panic!("{position:?}: no row for {action:?}"));
+                let rect = block_rect(position, surface, &pill, row);
+                on_screen(rect, surface, "a panel row");
+                assert_eq!(
+                    renderer.toolbar_hit_at(
+                        position,
+                        &panel_rail,
+                        surface.0,
+                        surface.1,
+                        rect.x + rect.w / 2.0,
+                        rect.y + rect.h / 2.0
+                    ),
+                    Some(action),
+                    "{position:?}: {action:?} does not answer its own press"
+                );
+            }
+        }
+    }
+
     /// Who is in the drawer is one list, and both of the rules that close it are built from that list.
     #[test]
     fn the_drawer_and_its_closing_rules_name_the_same_controls() {
@@ -4122,10 +4853,14 @@ mod tests {
         // deliberately ignores the opening, so one renderer would serve the first answer to both.
         let layout = |opening: f32| {
             let mut renderer = Renderer::new();
-            let pill = renderer.toolbar_pill(&rail(opening), (900.0, 1000.0));
+            let pill = renderer.toolbar_pill(
+                &rail(opening),
+                (900.0, 1000.0),
+                crate::config::ToolbarPosition::Left,
+            );
             pill.controls
                 .iter()
-                .map(|control| (control.block.action, control.y, control.width))
+                .map(|control| (control.block.action, control.along, control.across_extent))
                 .collect::<Vec<_>>()
         };
         assert_eq!(layout(0.0), layout(1.0), "the opening moved the controls");
@@ -4149,13 +4884,17 @@ mod tests {
             ..crate::render::tests::rail_for_legend()
         };
         let mut renderer = Renderer::new();
-        let pill = renderer.toolbar_pill(&rail, (900.0, 1000.0));
+        let pill =
+            renderer.toolbar_pill(&rail, (900.0, 1000.0), crate::config::ToolbarPosition::Left);
         let readout = pill
             .controls
             .iter()
             .find(|control| matches!(control.block.mark, Mark::Value(_)))
             .expect("the rail has no width readout");
-        assert_eq!(readout.width, TOOLBAR_BLOCK, "the readout stretched");
+        assert_eq!(
+            readout.across_extent, TOOLBAR_BLOCK,
+            "the readout stretched"
+        );
         assert!(!readout.stretched);
     }
 
@@ -4206,16 +4945,17 @@ mod tests {
         };
         let (w, h) = (900.0, 1000.0);
         let mut renderer = Renderer::new();
-        let pill = renderer.toolbar_pill(&rail, (w, h));
+        let position = crate::config::ToolbarPosition::Left;
+        let pill = renderer.toolbar_pill(&rail, (w, h), position);
         let boards = pill
             .controls
             .iter()
             .find(|control| control.block.action == Some(ToolbarAction::Boards))
             .expect("the boards block is not on the rail");
-        let (ox, oy) = toolbar_origin(h, pill.column);
+        let (ox, oy) = position.origin((w, h), pill.column);
         for x in [4.0, 12.0, 20.0, 28.0] {
             assert_eq!(
-                renderer.toolbar_hit(&rail, w, h, ox + x, oy + boards.y + 5.0),
+                renderer.toolbar_hit(&rail, w, h, ox + x, oy + boards.along + 5.0),
                 Some(ToolbarAction::Boards),
                 "the width list answered for the boards block at x={x}"
             );
@@ -4226,10 +4966,10 @@ mod tests {
             pill.controls
                 .iter()
                 .find(|control| control.block.action == Some(action))
-                .map(|control| control.y)
+                .map(|control| control.along)
                 .unwrap_or_else(|| panic!("{action:?} is not on the rail"))
         };
-        for y in [row_y(ToolbarAction::Size), boards.y] {
+        for y in [row_y(ToolbarAction::Size), boards.along] {
             for x in [TOOLBAR_BLOCK + 1.0, TOOLBAR_DRAWER_X - 1.0] {
                 assert_eq!(
                     renderer.toolbar_hit(&rail, w, h, ox + x, oy + y + 5.0),
@@ -4458,7 +5198,8 @@ mod tests {
             more: true,
             ..crate::render::tests::rail_for_legend()
         };
-        let pill = renderer.toolbar_pill(&rail, (900.0, 1000.0));
+        let position = crate::config::ToolbarPosition::Left;
+        let pill = renderer.toolbar_pill(&rail, (900.0, 1000.0), position);
         let row = pill
             .controls
             .iter()
@@ -4471,17 +5212,17 @@ mod tests {
             .collect();
         assert_eq!(options.len(), Backdrop::ALL.len());
         for (index, control) in options.iter().enumerate() {
-            assert_eq!(control.y, row.y, "an option left the backdrop row");
+            assert_eq!(control.along, row.along, "an option left the backdrop row");
             assert_eq!(control.block.column, 2 + index as u8);
             assert_eq!(
                 control.block.action,
                 Some(ToolbarAction::Backdrop(Backdrop::ALL[index]))
             );
         }
-        let (ox, oy) = toolbar_origin(1000.0, pill.column);
+        let (ox, oy) = position.origin((900.0, 1000.0), pill.column);
         for (index, mode) in Backdrop::ALL.iter().enumerate() {
             let x = ox + (2.0 + index as f32) * TOOLBAR_DRAWER_X + TOOLBAR_BLOCK / 2.0;
-            let y = oy + row.y + TOOLBAR_BLOCK / 2.0;
+            let y = oy + row.along + TOOLBAR_BLOCK / 2.0;
             assert_eq!(
                 renderer.toolbar_hit(&rail, 900.0, 1000.0, x, y),
                 Some(ToolbarAction::Backdrop(*mode)),
@@ -4499,8 +5240,9 @@ mod tests {
             more,
             ..crate::render::tests::rail_for_legend()
         };
+        let position = crate::config::ToolbarPosition::Left;
         let pill = |renderer: &mut Renderer, more: bool| {
-            renderer.toolbar_pill(&rail(more), (900.0, 1000.0))
+            renderer.toolbar_pill(&rail(more), (900.0, 1000.0), position)
         };
         let closed = pill(&mut renderer, false);
         let open = pill(&mut renderer, true);
@@ -4509,14 +5251,14 @@ mod tests {
             pill.controls
                 .iter()
                 .find(|c| c.block.action == action)
-                .map(|c| c.y)
+                .map(|c| c.along)
         };
         let more = row_y(&open, Some(ToolbarAction::More)).expect("the more block");
         let rows: Vec<f32> = open
             .controls
             .iter()
             .filter(|c| c.block.column == 1)
-            .map(|c| c.y)
+            .map(|c| c.along)
             .collect();
         assert_eq!(rows.len(), drawer_blocks(&rail(true), &[]).len());
         // One row is level with the block's own row, so the block and its list are one control and the
@@ -4528,10 +5270,13 @@ mod tests {
         // The plate holds its rows, and both are inside the column and the reserve the rail declares.
         let panel = open.corridor.expect("an open drawer has a panel").0;
         for y in &rows {
-            assert!(*y >= panel.y && *y + TOOLBAR_BLOCK <= panel.y + panel.h);
+            assert!(*y >= panel.along && *y + TOOLBAR_BLOCK <= panel.along + panel.along_extent);
         }
-        assert!(panel.x >= 0.0 && panel.x + panel.w <= TOOLBAR_RESERVE);
-        assert!(panel.y >= 0.0 && panel.y + panel.h <= open.column);
+        assert!(panel.across >= 0.0 && panel.across + panel.across_extent <= TOOLBAR_RESERVE);
+        assert!(
+            panel.along >= 0.0 && panel.along + panel.along_extent <= open.column,
+            "the panel's plate left the rail's column"
+        );
         // A row states its name and key without the pointer on it: an icon-only row would have to be
         // probed one at a time to be read. The backdrop row is the exception: its four mode buttons
         // beside it are the readable state, so it shrinks to its square.
@@ -4541,7 +5286,7 @@ mod tests {
             .filter(|c| c.block.column == 1 && c.block.action != Some(ToolbarAction::Scrim))
         {
             assert!(
-                control.width > TOOLBAR_BLOCK,
+                control.across_extent > TOOLBAR_BLOCK,
                 "{:?} is icon-only at rest",
                 control.block.label
             );
@@ -4642,15 +5387,20 @@ mod tests {
         // The row's box and its screen origin, from the layout the frame draws.
         let row = |toolbar: &Toolbar| {
             let mut renderer = Renderer::new();
-            let pill = renderer.toolbar_pill(toolbar, (900.0, 1000.0));
+            let position = crate::config::ToolbarPosition::Left;
+            let pill = renderer.toolbar_pill(toolbar, (900.0, 1000.0), position);
             let control = pill
                 .controls
                 .iter()
                 .find(|control| control.block.action == Some(ToolbarAction::Board(0)))
                 .expect("no row for the first board")
                 .clone();
-            let (ox, oy) = toolbar_origin(1000.0, pill.column);
-            (ox + TOOLBAR_DRAWER_X, oy + control.y, control.width)
+            let (ox, oy) = position.origin((900.0, 1000.0), pill.column);
+            (
+                ox + TOOLBAR_DRAWER_X,
+                oy + control.along,
+                control.across_extent,
+            )
         };
         let hit = |toolbar: &Toolbar, x: f32, y: f32| {
             let mut renderer = Renderer::new();
@@ -4810,12 +5560,16 @@ mod tests {
                 ..crate::render::tests::rail_for_legend()
             };
             let mut renderer = Renderer::new();
-            let pill = renderer.toolbar_pill(&toolbar, (900.0, 1000.0));
+            let pill = renderer.toolbar_pill(
+                &toolbar,
+                (900.0, 1000.0),
+                crate::config::ToolbarPosition::Left,
+            );
             pill.controls
                 .iter()
                 .find(|control| control.block.action == Some(ToolbarAction::Boards))
                 .expect("no block for the boards list")
-                .width
+                .across_extent
         };
         assert_eq!(width(true), TOOLBAR_BLOCK, "the open block grew a caption");
         assert!(
@@ -4849,12 +5603,16 @@ mod tests {
                 caret: true,
             });
             let mut renderer = Renderer::new();
-            let pill = renderer.toolbar_pill(&toolbar, (900.0, 1000.0));
+            let pill = renderer.toolbar_pill(
+                &toolbar,
+                (900.0, 1000.0),
+                crate::config::ToolbarPosition::Left,
+            );
             pill.controls
                 .iter()
                 .find(|control| control.block.action == Some(ToolbarAction::Board(0)))
                 .expect("no row for the first board")
-                .width
+                .across_extent
         };
         let short = row(Some("Board 1"), 2);
         let long = row(Some("a much longer name"), 2);
@@ -4971,14 +5729,41 @@ mod tests {
     /// a pad inside its own capsule so the name is centred in it.
     #[test]
     fn a_labels_text_starts_after_its_own_block() {
-        assert_eq!(label_x(0.0, false), TOOLBAR_BLOCK + TOOLBAR_LABEL_GAP);
+        let left = crate::config::ToolbarPosition::Left;
+        let capsule = |x| Rect {
+            x,
+            y: 0.0,
+            w: TOOLBAR_BLOCK,
+            h: TOOLBAR_BLOCK,
+        };
+        assert_eq!(
+            label_origin(left, capsule(0.0), false, 20.0),
+            TOOLBAR_BLOCK + TOOLBAR_LABEL_GAP
+        );
         assert!(
-            label_x(TOOLBAR_DRAWER_X, false) >= TOOLBAR_DRAWER_X + TOOLBAR_BLOCK,
+            label_origin(left, capsule(TOOLBAR_DRAWER_X), false, 20.0)
+                >= TOOLBAR_DRAWER_X + TOOLBAR_BLOCK,
             "a panel row's text starts inside its own square"
         );
         assert_eq!(
-            label_x(TOOLBAR_DRAWER_X, true),
+            label_origin(left, capsule(TOOLBAR_DRAWER_X), true, 20.0),
             TOOLBAR_DRAWER_X + TOOLBAR_LABEL_PAD
+        );
+        let right = crate::config::ToolbarPosition::Right;
+        assert_eq!(
+            label_origin(
+                right,
+                Rect {
+                    x: 100.0,
+                    y: 0.0,
+                    w: 140.0,
+                    h: TOOLBAR_BLOCK,
+                },
+                false,
+                20.0
+            ),
+            100.0 + 140.0 - TOOLBAR_BLOCK - TOOLBAR_LABEL_GAP - 20.0,
+            "a right rail's label ends before its square"
         );
     }
 
@@ -5687,7 +6472,10 @@ mod tests {
             let (w, h) = (640.0, 1600.0);
             let (wd, hd) = ((w * scale) as u32, (h * scale) as u32);
             let mut renderer = Renderer::new();
-            let pill = renderer.cached_toolbar_pill(&rail, (w, h)).unwrap();
+            let position = crate::config::ToolbarPosition::Left;
+            let pill = renderer
+                .cached_toolbar_pill(&rail, (w, h), position)
+                .unwrap();
             let mut buf = vec![0; (wd * hd * 4) as usize];
             renderer.render(
                 &mut buf,
@@ -5702,7 +6490,7 @@ mod tests {
                 },
                 None,
             );
-            let (ox, oy) = toolbar_origin(h, pill.column);
+            let (ox, oy) = position.origin((w, h), pill.column);
             let mut icons = 0;
             for control in &pill.controls {
                 let Mark::Icon(icon) = control.block.mark else {
@@ -5713,11 +6501,11 @@ mod tests {
                 // rounded corner can be mistaken for the icon.
                 let (x0, y0) = (
                     ((ox + 3.0) * scale) as u32,
-                    ((oy + control.y + 3.0) * scale) as u32,
+                    ((oy + control.along + 3.0) * scale) as u32,
                 );
                 let (x1, y1) = (
                     ((ox + TOOLBAR_BLOCK - 3.0) * scale) as u32,
-                    ((oy + control.y + TOOLBAR_BLOCK - 3.0) * scale) as u32,
+                    ((oy + control.along + TOOLBAR_BLOCK - 3.0) * scale) as u32,
                 );
                 let ink = (y0..y1)
                     .flat_map(|y| (x0..x1).map(move |x| (x, y)))
