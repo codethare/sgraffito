@@ -2903,6 +2903,7 @@ impl App {
             width,
             from,
             to: from,
+            rotate: 0.0,
             id: 0,
             attach,
         });

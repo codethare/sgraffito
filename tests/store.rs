@@ -40,6 +40,7 @@ fn sample() -> Doc {
                 width: 3.0,
                 from: [30.0, 400.0],
                 to: [180.0, 260.0],
+                rotate: 0.0,
                 id: 0,
                 attach: [None, None],
             }],
@@ -127,6 +128,34 @@ fn a_shape_survives_a_round_trip() {
     store::save(&p, &sample()).unwrap();
     let back = store::load(&p);
     assert_eq!(back.boards["eDP-1"].shapes, sample().boards["eDP-1"].shapes);
+}
+
+#[test]
+fn a_turned_shape_survives_the_round_trip_and_an_old_file_loads_upright() {
+    let dir = tmpdir("shape-rotation");
+    let p = dir.join("annotations.json");
+    let mut doc = sample();
+    let angle = std::f32::consts::FRAC_PI_4;
+    doc.boards.get_mut("eDP-1").unwrap().shapes[0].rotate = angle;
+    store::save(&p, &doc).unwrap();
+
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+    let saved = v["boards"]["eDP-1"]["shapes"][0]["rotate"]
+        .as_f64()
+        .unwrap();
+    assert!((saved as f32 - angle).abs() < 1e-6, "the angle is written");
+    let loaded = store::load(&p).boards["eDP-1"].shapes[0].rotate;
+    assert!((loaded - angle).abs() < 1e-6, "the angle round-trips");
+
+    // A file from before rotation existed has no key at all; it loads with the shape upright.
+    std::fs::write(
+        &p,
+        r##"{"version":6,"boards":{"old":{"shapes":[{"kind":"rect","color":"#ffffff","width":2.0,"from":[0.0,0.0],"to":[10.0,10.0]}]}}}"##,
+    )
+    .unwrap();
+    let old = store::load(&p);
+    assert_eq!(old.boards["old"].shapes[0].rotate, 0.0);
+    assert_eq!(old.boards["old"].shapes[0].outline()[0], [0.0, 0.0]);
 }
 
 #[test]
@@ -430,6 +459,7 @@ fn stepping_a_selection_steps_its_widths_and_text_sizes() {
             width: 6.0,
             from: [10.0, 80.0],
             to: [110.0, 140.0],
+            rotate: 0.0,
             id: 0,
             attach: [None, None],
         }],
@@ -874,6 +904,7 @@ fn connector_attachments_survive_the_round_trip() {
         width: 3.0,
         from: [0.0, 0.0],
         to: [100.0, 100.0],
+        rotate: 0.0,
         id: 0,
         attach: [None, None],
     });
@@ -884,6 +915,7 @@ fn connector_attachments_survive_the_round_trip() {
         width: 3.0,
         from: [0.0, 50.0],
         to: [200.0, 50.0],
+        rotate: 0.0,
         id: 0,
         attach: [
             Some(Attachment {

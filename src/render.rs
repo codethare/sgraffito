@@ -3157,6 +3157,7 @@ fn draw_icon(pixmap: &mut PixmapMut, icon: Icon, square: Rect, scale: f32, color
                 width: ICON_STROKE,
                 from,
                 to,
+                rotate: 0.0,
                 id: 0,
                 attach: [None, None],
             },
@@ -3593,6 +3594,16 @@ fn sketched_shape(s: &Shape, seed: u64) -> Vec<Seg> {
     if segs.is_empty() {
         segs.push(Seg::Move(s.from));
     }
+    if s.kind.is_closed() && s.turn_angle() != 0.0 {
+        for seg in &mut segs {
+            *seg = match *seg {
+                Seg::Move(p) => Seg::Move(s.to_world(p)),
+                Seg::Line(p) => Seg::Line(s.to_world(p)),
+                Seg::Quad(c, p) => Seg::Quad(s.to_world(c), s.to_world(p)),
+                Seg::Cubic(a, b, p) => Seg::Cubic(s.to_world(a), s.to_world(b), s.to_world(p)),
+            };
+        }
+    }
     segs
 }
 
@@ -3702,7 +3713,19 @@ fn draw_exact_shape(
                 }
             }
             if let Some(path) = pb.finish() {
-                pixmap.stroke_path(&path, paint, stroke, Transform::identity(), None);
+                let path = if s.turn_angle() != 0.0 {
+                    let centre = screen.point(s.centre());
+                    path.transform(Transform::from_rotate_at(
+                        s.turn_angle().to_degrees(),
+                        centre[0],
+                        centre[1],
+                    ))
+                } else {
+                    Some(path)
+                };
+                if let Some(path) = path {
+                    pixmap.stroke_path(&path, paint, stroke, Transform::identity(), None);
+                }
             }
         }
         ShapeKind::Line | ShapeKind::Arrow => {
@@ -4187,6 +4210,7 @@ mod tests {
             width: 3.0,
             from: [50.0, 20.0],
             to: [150.0, 120.0],
+            rotate: 0.0,
             id: 7,
             attach: [None, None],
         };
@@ -4199,6 +4223,7 @@ mod tests {
                 width: 2.0,
                 from: [50.0, 70.0],
                 to: [250.0, 70.0],
+                rotate: 0.0,
                 id: 0,
                 attach: [
                     Some(crate::canvas::Attachment {
@@ -4249,6 +4274,7 @@ mod tests {
             width: 3.0,
             from: [10.0, 20.0],
             to: [400.0, 200.0],
+            rotate: 0.0,
             id: 0,
             attach: [
                 Some(crate::canvas::Attachment {
@@ -5391,6 +5417,7 @@ mod tests {
             width: 3.0,
             from: [40.0, 20.0],
             to: [160.0, 80.0],
+            rotate: 0.0,
             id: 0,
             attach: [None, None],
         };

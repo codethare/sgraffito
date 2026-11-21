@@ -1717,6 +1717,7 @@ fn the_default_view_draws_what_no_view_drew() {
             width: 3.0,
             from: [200.0, 150.0],
             to: [300.0, 250.0],
+            rotate: 0.0,
             id: 0,
             attach: [None, None],
         }],
@@ -2555,6 +2556,7 @@ fn a_shape_is_drawn_as_a_hand_drawn_outline() {
             width: 3.0,
             from: [60.0, 50.0],
             to: [180.0, 120.0],
+            rotate: 0.0,
             id: 0,
             attach: [None, None],
         }],
@@ -2591,6 +2593,7 @@ fn rect_shape(from: [f32; 2], to: [f32; 2]) -> Shape {
         width: 3.0,
         from,
         to,
+        rotate: 0.0,
         id: 0,
         attach: [None, None],
     }
@@ -2634,6 +2637,53 @@ fn sketched_ink_stays_inside_the_paint_box() {
             "{left},{top}..{right},{bottom} escaped {bounds:?}"
         );
     }
+}
+
+#[test]
+fn a_turned_rectangle_paints_tall_instead_of_wide() {
+    use std::f32::consts::FRAC_PI_2;
+    let (w, h) = (360u32, 300u32);
+    let flat = rect_shape([100.0, 130.0], [260.0, 170.0]);
+    let turned = Transform::Turn {
+        pivot: flat.centre(),
+        radians: FRAC_PI_2,
+    }
+    .shape(&flat);
+
+    let mut before = buffer(w, h);
+    frame(
+        &mut before,
+        w,
+        h,
+        &sole_shape(flat),
+        &Overlay::default(),
+        None,
+    );
+    let (left, top, right, bottom) = inked_box(&before, w, h).expect("the flat rectangle painted");
+    assert!(right - left > bottom - top, "it starts out wider than tall");
+
+    let mut after = buffer(w, h);
+    frame(
+        &mut after,
+        w,
+        h,
+        &sole_shape(turned.clone()),
+        &Overlay::default(),
+        None,
+    );
+    let (left, top, right, bottom) = inked_box(&after, w, h).expect("the turned rectangle painted");
+    assert!(
+        bottom - top > right - left,
+        "a quarter turn makes the same rectangle taller than it is wide: {left},{top}..{right},{bottom}"
+    );
+    let bounds = turned.paint_bounds();
+    assert!(
+        left as f32 >= bounds.x - 1.0
+            && top as f32 >= bounds.y - 1.0
+            && right as f32 <= bounds.x + bounds.w + 1.0
+            && bottom as f32 <= bounds.y + bounds.h + 1.0,
+        "the turned ink escaped its damage box {bounds:?}"
+    );
 }
 
 #[test]

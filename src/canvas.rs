@@ -475,9 +475,15 @@ impl ShapeKind {
     }
 }
 
-/// A shape is two points and a kind, and nothing else: its outline is derived from the pair when it
-/// is drawn and when it is hit, so it costs the same in the file whether it is ten pixels or a whole
-/// output across, and a resize or a rotation is the arithmetic a pair of points already takes.
+/// Whether a serde field is the default zero, so a file written before it existed stays byte-for-byte
+/// the same when it is written again.
+fn is_zero(value: &f32) -> bool {
+    *value == 0.0
+}
+
+/// A shape is two points, a kind and the angle a closed outline is turned by. Its outline is derived
+/// from those when it is drawn and when it is hit, so it costs the same in the file whether it is ten
+/// pixels or a whole output across, and a resize or a rotation is arithmetic on that small state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Shape {
     pub kind: ShapeKind,
@@ -486,6 +492,11 @@ pub struct Shape {
     pub width: f32,
     pub from: [f32; 2],
     pub to: [f32; 2],
+    /// The angle a closed outline is drawn at, in radians about the centre of `from`/`to`. Kept apart
+    /// from the two points so rotating keeps the shape's size; lines and arrows turn their endpoints
+    /// instead and ignore it. Files written before rotation existed load as zero.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub rotate: f32,
     /// A stable id inside its board, so a connector can keep pointing at this shape after other
     /// shapes are deleted or moved. Zero is assigned a real id when the shape enters a board.
     #[serde(default)]
@@ -1228,8 +1239,34 @@ impl Shape {
         )
     }
 
+    /// The centre of the box `from` and `to` span.
+    pub fn centre(&self) -> [f32; 2] {
+        self.box_geometry().0
+    }
+
+    /// The angle a closed outline is drawn at. Lines and arrows turn their endpoints instead, so
+    /// any angle stored on them is ignored.
+    pub fn turn_angle(&self) -> f32 {
+        if self.kind.is_closed() {
+            self.rotate
+        } else {
+            0.0
+        }
+    }
+
+    /// A point of the unrotated outline in world coordinates.
+    pub fn to_world(&self, p: [f32; 2]) -> [f32; 2] {
+        rotate_about(p, self.centre(), self.turn_angle())
+    }
+
+    /// A world point in the shape's unrotated frame, which is where its box and attachments live.
+    fn to_local(&self, p: [f32; 2]) -> [f32; 2] {
+        rotate_about(p, self.centre(), -self.turn_angle())
+    }
+
     /// The point on this shape's outline nearest to `p`, for a closed shape. Lines and arrows have
-    /// no interior to attach to.
+    /// no interior to attach to. The search runs in the outline's own unrotated frame and the result
+    /// is turned back, so a rotated shape is attached to and hit on the outline the user sees.
     pub fn nearest_boundary(&self, p: [f32; 2]) -> Option<[f32; 2]> {
         if !self.kind.is_closed() {
             return None;
@@ -1238,8 +1275,9 @@ impl Shape {
         if half[0] <= f32::EPSILON || half[1] <= f32::EPSILON {
             return Some(centre);
         }
+        let p = self.to_local(p);
         let box_ = rect_of(self.from, self.to);
-        match self.kind {
+        let hit = match self.kind {
             ShapeKind::Circle => {
                 let u = (p[0] - centre[0]) / half[0];
                 let v = (p[1] - centre[1]) / half[1];
@@ -1249,7 +1287,7 @@ impl Shape {
                 } else {
                     (u / len, v / len)
                 };
-                Some([centre[0] + u * half[0], centre[1] + v * half[1]])
+                [centre[0] + u * half[0], centre[1] + v * half[1]]
             }
             ShapeKind::Rect => {
                 let corners = [
@@ -1258,17 +1296,7 @@ impl Shape {
                     [box_.x + box_.w, box_.y + box_.h],
                     [box_.x, box_.y + box_.h],
                 ];
-                let mut best = corners[0];
-                let mut best_d = f32::INFINITY;
-                for index in 0..4 {
-                    let point = nearest_on_segment(p, corners[index], corners[(index + 1) % 4]);
-                    let d = dist_squared(point, p);
-                    if d < best_d {
-                        best = point;
-                        best_d = d;
-                    }
-                }
-                Some(best)
+                nearest_on_polygon(p, &corners)
             }
             ShapeKind::Diamond => {
                 let corners = [
@@ -1277,25 +1305,17 @@ impl Shape {
                     [centre[0], box_.y + box_.h],
                     [box_.x, centre[1]],
                 ];
-                let mut best = corners[0];
-                let mut best_d = f32::INFINITY;
-                for index in 0..4 {
-                    let point = nearest_on_segment(p, corners[index], corners[(index + 1) % 4]);
-                    let d = dist_squared(point, p);
-                    if d < best_d {
-                        best = point;
-                        best_d = d;
-                    }
-                }
-                Some(best)
+                nearest_on_polygon(p, &corners)
             }
-            ShapeKind::Line | ShapeKind::Arrow => None,
-        }
+            ShapeKind::Line | ShapeKind::Arrow => return None,
+        };
+        Some(self.to_world(hit))
     }
 
-    /// The attachment that keeps `p`, a point on this shape's outline, on the same edge after the
-    /// shape moves or is resized.
+    /// The attachment that keeps `p`, a point on this shape's outline, on the same local point after
+    /// the shape moves, is resized or is turned.
     pub fn attachment_at(&self, p: [f32; 2]) -> Attachment {
+        let p = self.to_local(p);
         let (centre, half) = self.box_geometry();
         let at = [
             if half[0] > f32::EPSILON {
@@ -1312,13 +1332,13 @@ impl Shape {
         Attachment { shape: self.id, at }
     }
 
-    /// The world point an attachment names.
+    /// The world point an attachment names: the same local point, on the rotated outline.
     pub fn attachment_point(&self, attachment: Attachment) -> [f32; 2] {
         let (centre, half) = self.box_geometry();
-        [
+        self.to_world([
             centre[0] + attachment.at[0] * half[0],
             centre[1] + attachment.at[1] * half[1],
-        ]
+        ])
     }
 
     /// Length of the arrowhead, from the pen width with a floor so a hairline arrow still reads as
@@ -1343,14 +1363,47 @@ impl Shape {
     }
 
     /// Axis-aligned box of everything the shape draws, in logical pixels, anti-aliasing and the
-    /// arrowhead included. A rectangle and a diamond are inside the box of their two points, a
-    /// circle touches the middle of its edges, and the head of an arrow leaves that box.
+    /// arrowhead included. An unrotated rectangle and diamond are inside the box of their two points,
+    /// a circle touches the middle of its edges, and the head of an arrow leaves that box. A rotated
+    /// closed shape measures the box its turned outline sweeps.
     pub fn bounds(&self) -> Rect {
         let head = match self.kind {
             ShapeKind::Arrow => self.head_half(),
             _ => 0.0,
         };
-        rect_of(self.from, self.to).grown(self.width / 2.0 + 1.0 + head)
+        let box_ = if self.kind.is_closed() && self.turn_angle() != 0.0 {
+            self.rotated_box()
+        } else {
+            rect_of(self.from, self.to)
+        };
+        box_.grown(self.width / 2.0 + 1.0 + head)
+    }
+
+    /// The axis-aligned box a closed outline sweeps once it is turned about the box centre. Each
+    /// kind uses its own extreme points, so the frame hugs a turned diamond as tightly as a turned
+    /// rectangle, and an ellipse uses the exact extent of the rotated ellipse rather than its box's.
+    fn rotated_box(&self) -> Rect {
+        let (centre, half) = self.box_geometry();
+        let (sin, cos) = self.turn_angle().sin_cos();
+        let (sx, cx) = (sin.abs(), cos.abs());
+        let (hw, hh) = match self.kind {
+            ShapeKind::Circle => (
+                ((half[0] * cos).powi(2) + (half[1] * sin).powi(2)).sqrt(),
+                ((half[0] * sin).powi(2) + (half[1] * cos).powi(2)).sqrt(),
+            ),
+            ShapeKind::Rect => (half[0] * cx + half[1] * sx, half[0] * sx + half[1] * cx),
+            ShapeKind::Diamond => (
+                (half[0] * cx).max(half[1] * sx),
+                (half[0] * sx).max(half[1] * cx),
+            ),
+            ShapeKind::Line | ShapeKind::Arrow => (half[0], half[1]),
+        };
+        Rect {
+            x: centre[0] - hw,
+            y: centre[1] - hh,
+            w: 2.0 * hw,
+            h: 2.0 * hh,
+        }
     }
 
     /// The box this shape paints: its bounds plus the reach of the hand-drawn style. Every shape kind is
@@ -1386,7 +1439,7 @@ impl Shape {
         let Rect { x, y, w, h } = rect_of(self.from, self.to);
         let (x1, y1) = (x + w, y + h);
         let (cx, cy) = (x + w / 2.0, y + h / 2.0);
-        match self.kind {
+        let points: Vec<[f32; 2]> = match self.kind {
             ShapeKind::Circle => (0..=ELLIPSE_SEGMENTS)
                 .map(|i| {
                     let t = i as f32 / ELLIPSE_SEGMENTS as f32 * std::f32::consts::TAU;
@@ -1414,6 +1467,16 @@ impl Shape {
                     self.to,
                 ]
             }
+        };
+        if self.kind.is_closed() && self.turn_angle() != 0.0 {
+            let centre = [cx, cy];
+            let angle = self.turn_angle();
+            points
+                .into_iter()
+                .map(|p| rotate_about(p, centre, angle))
+                .collect()
+        } else {
+            points
         }
     }
 
@@ -1914,12 +1977,33 @@ impl Transform {
 
     /// The shape this makes of one the document holds: its two points moved, with its kind and its
     /// pen width untouched, so a scaled circle stays a circle and a turned arrow keeps its head.
+    ///
+    /// A closed shape also carries its own angle. A turn moves its centre about the pivot and adds
+    /// the same angle to that state, so the shape keeps its size and turns about the pivot instead
+    /// of being squashed into a new axis-aligned box. Lines and arrows have no such state: turning
+    /// their two points is the whole of their turn.
     pub fn shape(self, s: &Shape) -> Shape {
-        Shape {
+        let mut out = Shape {
             from: self.point(s.from),
             to: self.point(s.to),
             ..s.clone()
+        };
+        if let Transform::Turn { pivot, radians } = self
+            && s.kind.is_closed()
+        {
+            let centre = s.centre();
+            let turned = rotate_about(centre, pivot, radians);
+            out.from = [
+                s.from[0] + turned[0] - centre[0],
+                s.from[1] + turned[1] - centre[1],
+            ];
+            out.to = [
+                s.to[0] + turned[0] - centre[0],
+                s.to[1] + turned[1] - centre[1],
+            ];
+            out.rotate = s.rotate + radians;
         }
+        out
     }
 }
 
@@ -2600,6 +2684,32 @@ pub fn cycle_selection(ann: &Board, held: &[ItemId], forward: bool) -> Vec<ItemI
 /// The direction from `pivot` to `p`, as an angle in radians.
 fn angle_of(p: [f32; 2], pivot: [f32; 2]) -> f32 {
     (p[1] - pivot[1]).atan2(p[0] - pivot[0])
+}
+
+/// `p` turned `radians` about `centre`, the same arithmetic `Transform::Turn` applies.
+fn rotate_about(p: [f32; 2], centre: [f32; 2], radians: f32) -> [f32; 2] {
+    let (sin, cos) = radians.sin_cos();
+    let (dx, dy) = (p[0] - centre[0], p[1] - centre[1]);
+    [
+        centre[0] + dx * cos - dy * sin,
+        centre[1] + dx * sin + dy * cos,
+    ]
+}
+
+/// The point on a closed polygon nearest to `p`.
+fn nearest_on_polygon(p: [f32; 2], corners: &[[f32; 2]]) -> [f32; 2] {
+    let mut best = corners[0];
+    let mut best_d = f32::INFINITY;
+    for (index, &from) in corners.iter().enumerate() {
+        let to = corners[(index + 1) % corners.len()];
+        let point = nearest_on_segment(p, from, to);
+        let d = dist_squared(point, p);
+        if d < best_d {
+            best = point;
+            best_d = d;
+        }
+    }
+    best
 }
 
 fn dist_squared(p: [f32; 2], q: [f32; 2]) -> f32 {

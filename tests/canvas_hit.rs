@@ -592,6 +592,7 @@ fn shape(kind: ShapeKind, from: [f32; 2], to: [f32; 2]) -> Shape {
         width: 3.0,
         from,
         to,
+        rotate: 0.0,
         id: 0,
         attach: [None, None],
     }
@@ -811,6 +812,196 @@ fn a_transform_moves_both_points_of_a_shape_and_keeps_its_kind() {
     .shape(&circle);
     assert_eq!((scaled.from, scaled.to), ([0.0, 0.0], [200.0, 200.0]));
     assert_eq!(scaled.kind, ShapeKind::Circle);
+}
+
+fn close(a: [f32; 2], b: [f32; 2]) -> bool {
+    (a[0] - b[0]).abs() < 1e-3 && (a[1] - b[1]).abs() < 1e-3
+}
+
+#[test]
+fn a_turn_visibly_rotates_every_closed_shape() {
+    use std::f32::consts::FRAC_PI_2;
+    for kind in [ShapeKind::Circle, ShapeKind::Rect, ShapeKind::Diamond] {
+        let original = shape(kind, [100.0, 100.0], [200.0, 150.0]);
+        let pivot = original.centre();
+        let turned = Transform::Turn {
+            pivot,
+            radians: FRAC_PI_2,
+        }
+        .shape(&original);
+
+        assert!((turned.rotate - FRAC_PI_2).abs() < 1e-6);
+        assert_eq!(
+            (turned.from, turned.to),
+            (original.from, original.to),
+            "{kind:?} kept its local box, so it kept its size"
+        );
+        assert!(
+            close(turned.centre(), pivot),
+            "{kind:?} turned about its own centre"
+        );
+        assert_ne!(
+            turned.outline(),
+            original.outline(),
+            "{kind:?} draws a different outline turned"
+        );
+        // The first outline point swings about the centre: the drawn geometry really moved.
+        let expected = match kind {
+            ShapeKind::Circle => [150.0, 175.0],
+            ShapeKind::Rect => [175.0, 75.0],
+            _ => [175.0, 125.0],
+        };
+        assert!(
+            close(turned.outline()[0], expected),
+            "{kind:?} outline starts at {:?}",
+            turned.outline()[0]
+        );
+    }
+}
+
+#[test]
+fn a_turn_swings_a_shape_around_a_pivot_outside_it() {
+    use std::f32::consts::FRAC_PI_2;
+    let original = shape(ShapeKind::Rect, [100.0, 100.0], [200.0, 150.0]);
+    let turned = Transform::Turn {
+        pivot: [0.0, 0.0],
+        radians: FRAC_PI_2,
+    }
+    .shape(&original);
+    // The centre (150, 125) turns a quarter turn about the origin.
+    assert!(close(turned.centre(), [-125.0, 150.0]));
+    // A rigid turn keeps the box's own extents, so the shape is not squashed by the bounding box.
+    let before = original.box_geometry().1;
+    let after = turned.box_geometry().1;
+    assert!(
+        close(before, after),
+        "half-extents {:?} became {:?}",
+        before,
+        after
+    );
+    assert_eq!(turned.outline().len(), original.outline().len());
+}
+
+#[test]
+fn a_turned_shape_is_hit_on_the_outline_the_user_sees() {
+    use std::f32::consts::FRAC_PI_2;
+    let original = shape(ShapeKind::Rect, [0.0, 0.0], [100.0, 50.0]);
+    let turned = Transform::Turn {
+        pivot: original.centre(),
+        radians: FRAC_PI_2,
+    }
+    .shape(&original);
+
+    // The old top-left corner is now the turned top-right corner.
+    assert!(
+        close(turned.outline()[0], [75.0, -25.0]),
+        "corner at {:?}",
+        turned.outline()[0]
+    );
+    assert!(
+        turned.distance_squared(75.0, -25.0) <= 1.0,
+        "the drawn corner is a hit"
+    );
+    assert!(
+        original.distance_squared(50.0, 0.0) <= 1.0,
+        "the unrotated top edge is still a hit"
+    );
+    assert!(
+        turned.distance_squared(50.0, 0.0) > ERASER_THRESHOLD.powi(2),
+        "the middle of the old top edge is inside the turned rectangle, not on it"
+    );
+    // A point above the turned top edge snaps to the edge that is actually drawn.
+    let nearest = turned.nearest_boundary([50.0, -40.0]).unwrap();
+    assert!(close(nearest, [50.0, -25.0]), "nearest {nearest:?}");
+}
+
+#[test]
+fn a_connector_follows_a_turned_shape_and_keeps_its_local_attachment() {
+    use std::f32::consts::FRAC_PI_2;
+    let mut board = Board::default();
+    board.add_shape(shape(ShapeKind::Rect, [0.0, 0.0], [100.0, 100.0]));
+    let target = board.shapes[0].id;
+    board.add_shape(Shape {
+        kind: ShapeKind::Line,
+        color: "#000000".into(),
+        width: 2.0,
+        from: [50.0, 0.0],
+        to: [200.0, 0.0],
+        rotate: 0.0,
+        id: 0,
+        attach: [
+            Some(sgraffito::canvas::Attachment {
+                shape: target,
+                at: [0.0, -1.0],
+            }),
+            None,
+        ],
+    });
+    assert_eq!(board.shapes[1].from, [50.0, 0.0]);
+
+    let turned = Transform::Turn {
+        pivot: [50.0, 50.0],
+        radians: FRAC_PI_2,
+    }
+    .shape(&board.shapes[0]);
+    board.shapes[0] = turned;
+    board.sync_connectors();
+
+    let moved = board.shapes[1].from;
+    assert!(close(moved, [100.0, 50.0]), "the end followed to {moved:?}");
+    let attachment = board.shapes[0].attachment_at(moved);
+    assert_eq!(attachment.shape, target);
+    assert!(
+        close(attachment.at, [0.0, -1.0]),
+        "the same local point is kept: {:?}",
+        attachment.at
+    );
+}
+
+#[test]
+fn a_turn_turns_a_lines_endpoints_and_leaves_no_angle_on_it() {
+    use std::f32::consts::FRAC_PI_2;
+    for kind in [ShapeKind::Line, ShapeKind::Arrow] {
+        let line = shape(kind, [10.0, 0.0], [20.0, 0.0]);
+        let turned = Transform::Turn {
+            pivot: [0.0, 0.0],
+            radians: FRAC_PI_2,
+        }
+        .shape(&line);
+        assert!(close(turned.from, [0.0, 10.0]), "{kind:?} from");
+        assert!(close(turned.to, [0.0, 20.0]), "{kind:?} to");
+        assert_eq!(turned.rotate, 0.0, "{kind:?} has no second rotation");
+        assert_eq!(turned.turn_angle(), 0.0);
+    }
+}
+
+#[test]
+fn a_turned_shape_widens_the_frame_and_the_rotation_handle_stays_above_it() {
+    use std::f32::consts::FRAC_PI_2;
+    let mut board = Board {
+        strokes: vec![],
+        texts: vec![],
+        shapes: vec![shape(ShapeKind::Rect, [80.0, 80.0], [180.0, 130.0])],
+        notes: vec![],
+    };
+    let held = [ItemId::Shape(0)];
+    let before = selection_frame(&board, &held, None).unwrap();
+    board.shapes[0] = Transform::Turn {
+        pivot: board.shapes[0].centre(),
+        radians: FRAC_PI_2,
+    }
+    .shape(&board.shapes[0]);
+    let after = selection_frame(&board, &held, None).unwrap();
+
+    assert!(after.h > before.h, "the turned shape is taller");
+    assert!(after.w < before.w, "the turned shape is narrower");
+    let knob = rotate_handle(after, SELECT_ROTATE_GAP);
+    assert!((knob[0] - after.centre()[0]).abs() < 1e-4);
+    assert_eq!(knob[1], after.y - SELECT_ROTATE_GAP);
+    assert_eq!(
+        grab_at(after, knob[0], knob[1], SELECT_HANDLE_HIT),
+        Some(Grab::Rotate)
+    );
 }
 
 #[test]
@@ -1482,6 +1673,7 @@ fn the_selection_walk_visits_every_kind_in_document_order() {
             width: 3.0,
             from: [0.0, 0.0],
             to: [10.0, 10.0],
+            rotate: 0.0,
             id: 0,
             attach: [None, None],
         }],
@@ -1534,6 +1726,7 @@ fn the_walk_wraps_backwards_and_steps_from_a_marquee() {
             width: 3.0,
             from: [0.0, 0.0],
             to: [10.0, 10.0],
+            rotate: 0.0,
             id: 0,
             attach: [None, None],
         }],
@@ -1846,6 +2039,7 @@ fn a_connector_snaps_to_a_shape_and_follows_both_endpoints() {
         width: 2.0,
         from: [0.0, 50.0],
         to: [400.0, 50.0],
+        rotate: 0.0,
         id: 0,
         attach: [Some(left), Some(right)],
     };
@@ -1896,6 +2090,7 @@ fn a_shape_id_is_unique_and_connectors_are_remapped_on_a_copy() {
         width: 2.0,
         from: [0.0, 50.0],
         to: [100.0, 50.0],
+        rotate: 0.0,
         id: 0,
         attach: [
             Some(sgraffito::canvas::Attachment {
@@ -1947,6 +2142,7 @@ fn a_moved_shape_snaps_to_a_free_connector_end() {
         width: 2.0,
         from: [100.0, 50.0],
         to: [300.0, 50.0],
+        rotate: 0.0,
         id: 0,
         attach: [None, None],
     });
