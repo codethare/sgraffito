@@ -1766,7 +1766,6 @@ impl Renderer {
                         };
                         self.draw_board_button(
                             pixmap,
-                            *action,
                             toolbar.hover == Some(*action),
                             square,
                             scale,
@@ -2217,7 +2216,6 @@ impl Renderer {
     fn draw_board_button(
         &mut self,
         pixmap: &mut PixmapMut,
-        action: ToolbarAction,
         hover: bool,
         square: Rect,
         scale: f32,
@@ -2239,11 +2237,7 @@ impl Renderer {
             square.y / scale,
             TOOLBAR_BLOCK,
             TOOLBAR_TEXT_SIZE,
-            if matches!(action, ToolbarAction::DeleteBoard(_)) {
-                TOOLBAR_ACCENT
-            } else {
-                TOOLBAR_FOREGROUND
-            },
+            TOOLBAR_FOREGROUND,
             label,
         );
         self.draw_text(
@@ -2870,6 +2864,7 @@ fn same_layout(a: &Toolbar, b: &Toolbar) -> bool {
         && a.clips == b.clips
         && a.target == b.target
         && a.rename == b.rename
+        && a.delete_confirm == b.delete_confirm
         && a.boards == b.boards
         && a.shared == b.shared
         && a.backdrop == b.backdrop
@@ -4562,6 +4557,13 @@ mod tests {
         assert_eq!(rows[0].label, "delete laptop?");
         assert_eq!(rows[0].action, Some(ToolbarAction::Board(0)));
         assert_eq!(board_actions(&toolbar, 0), Some((true, true)));
+        // The cached layout must see the question: the confirmation changes the row's label and
+        // reserved button slots even when the pointer did not move.
+        let plain = Toolbar {
+            delete_confirm: None,
+            ..toolbar.clone()
+        };
+        assert!(!same_layout(&toolbar, &plain));
     }
 
     /// Delete is a pick that closes the list; the rename is the one row press that leaves it open,
