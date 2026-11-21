@@ -21,12 +21,14 @@ fn sample() -> Doc {
         "eDP-1".into(),
         Board {
             strokes: vec![Stroke {
+                id: 1,
                 color: "#e01b24".into(),
                 width: 3.0,
                 points: vec![[12.0, 40.0], [14.0, 44.0]],
                 attach: [None, None],
             }],
             texts: vec![TextItem {
+                attach: None,
                 x: 100.0,
                 y: 200.0,
                 color: "#ffffff".into(),
@@ -41,7 +43,7 @@ fn sample() -> Doc {
                 from: [30.0, 400.0],
                 to: [180.0, 260.0],
                 rotate: 0.0,
-                id: 0,
+                id: 1,
                 attach: [None, None],
             }],
             notes: vec![],
@@ -83,7 +85,7 @@ fn saved_file_has_version_boards_and_the_picked_one() {
     doc.active = "eDP-1".into();
     store::save(&p, &doc).unwrap();
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-    assert_eq!(v["version"], 6);
+    assert_eq!(v["version"], 7);
     assert_eq!(v["active"], "eDP-1");
     assert_eq!(v["boards"]["eDP-1"]["strokes"][0]["points"][0][0], 12.0);
     assert_eq!(v["boards"]["eDP-1"]["texts"][0]["text"], "买牛奶"); // CJK survives the round trip
@@ -94,8 +96,8 @@ fn saved_file_has_version_boards_and_the_picked_one() {
     assert_eq!(shape["to"], serde_json::json!([180.0, 260.0]));
     assert_eq!(
         shape.as_object().unwrap().len(),
-        5,
-        "kind, color, width, from, to"
+        7,
+        "kind, color, width, from, to, id, attach"
     );
 }
 
@@ -323,7 +325,7 @@ fn a_version_3_file_becomes_boards() {
     // The next save is the current version.
     store::save(&p, &doc).unwrap();
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-    assert_eq!(v["version"], 6);
+    assert_eq!(v["version"], 7);
     assert!(v["boards"]["eDP-1"].is_object());
 }
 
@@ -440,12 +442,14 @@ fn deleting_the_picked_board_moves_the_pick_to_the_one_that_takes_its_place() {
 fn stepping_a_selection_steps_its_widths_and_text_sizes() {
     let mut board = Board {
         strokes: vec![Stroke {
+            id: 0,
             color: "#e01b24".into(),
             width: 4.0,
             points: vec![[10.0, 10.0], [110.0, 10.0]],
             attach: [None, None],
         }],
         texts: vec![TextItem {
+            attach: None,
             x: 10.0,
             y: 40.0,
             color: "#ffffff".into(),
@@ -499,12 +503,14 @@ fn stepping_a_selection_steps_its_widths_and_text_sizes() {
 fn a_size_step_at_the_bound_writes_nothing() {
     let mut board = Board {
         strokes: vec![Stroke {
+            id: 0,
             color: "#e01b24".into(),
             width: PEN_WIDTH_MAX,
             points: vec![[10.0, 10.0], [110.0, 10.0]],
             attach: [None, None],
         }],
         texts: vec![TextItem {
+            attach: None,
             x: 10.0,
             y: 40.0,
             color: "#ffffff".into(),
@@ -538,12 +544,14 @@ fn the_size_step_clamps_to_its_range() {
 fn a_shrinking_step_reports_the_ink_it_left() {
     let mut board = Board {
         strokes: vec![Stroke {
+            id: 0,
             color: "#e01b24".into(),
             width: 5.0,
             points: vec![[10.0, 10.0], [110.0, 10.0]],
             attach: [None, None],
         }],
         texts: vec![TextItem {
+            attach: None,
             x: 10.0,
             y: 40.0,
             color: "#ffffff".into(),
@@ -573,12 +581,14 @@ fn a_shrinking_step_reports_the_ink_it_left() {
 fn a_mixed_selection_reports_only_what_changed() {
     let mut board = Board {
         strokes: vec![Stroke {
+            id: 0,
             color: "#e01b24".into(),
             width: PEN_WIDTH_MAX,
             points: vec![[10.0, 10.0], [110.0, 10.0]],
             attach: [None, None],
         }],
         texts: vec![TextItem {
+            attach: None,
             x: 10.0,
             y: 40.0,
             color: "#ffffff".into(),
@@ -670,7 +680,7 @@ fn a_version_4_file_loads_and_a_link_survives_the_round_trip() {
     store::save(&p, &doc).unwrap();
     let saved: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-    assert_eq!(saved["version"], 6);
+    assert_eq!(saved["version"], 7);
     assert_eq!(store::load(&p).boards["a"].texts[0].link, Some("b".into()));
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -684,6 +694,7 @@ fn links_follow_a_board_rename_and_are_dropped_with_its_deletion() {
         doc.boards.insert(name.into(), Board::default());
     }
     doc.boards.get_mut("a").unwrap().texts.push(TextItem {
+        attach: None,
         x: 0.0,
         y: 0.0,
         color: "#ffffff".into(),
@@ -709,12 +720,14 @@ fn moving_elements_leaves_the_source_board_without_them() {
     doc.boards.insert("b".into(), Board::default());
     let board = doc.boards.get_mut("a").unwrap();
     board.strokes.push(Stroke {
+        id: 0,
         color: "#ffffff".into(),
         width: 3.0,
         points: vec![[0.0, 0.0], [10.0, 10.0]],
         attach: [None, None],
     });
     board.texts.push(TextItem {
+        attach: None,
         x: 0.0,
         y: 0.0,
         color: "#ffffff".into(),
@@ -745,6 +758,7 @@ fn a_cut_records_one_copy_then_removes_the_originals() {
             color: "#fff".into(),
             width: 3.0,
             points: vec![[0.0, 0.0], [4.0, 4.0]],
+            id: 0,
             attach: [None, None],
         }],
         texts: vec![TextItem {
@@ -754,6 +768,7 @@ fn a_cut_records_one_copy_then_removes_the_originals() {
             size: 18.0,
             text: "cut".into(),
             link: None,
+            attach: None,
         }],
         ..Board::default()
     };
@@ -784,6 +799,7 @@ fn an_empty_or_refused_cut_changes_nothing() {
                 color: "#fff".into(),
                 width: 3.0,
                 points: vec![[i as f32, 0.0]],
+                id: 0,
                 attach: [None, None],
             })
             .collect(),
@@ -802,6 +818,7 @@ fn a_copy_over_the_cap_is_refused_whole() {
     let board = Board {
         strokes: (0..=MAX_CLIP_ITEMS)
             .map(|i| Stroke {
+                id: 0,
                 color: "#fff".into(),
                 width: 3.0,
                 points: vec![[i as f32, 0.0]],
@@ -814,6 +831,7 @@ fn a_copy_over_the_cap_is_refused_whole() {
 
     let mut wordy = Board::default();
     wordy.texts.push(TextItem {
+        attach: None,
         x: 0.0,
         y: 0.0,
         color: "#fff".into(),
@@ -830,6 +848,7 @@ fn a_link_source_is_one_text_box_and_the_jump_centres_it() {
     let board = Board {
         texts: vec![
             TextItem {
+                attach: None,
                 x: 0.0,
                 y: 0.0,
                 color: "#fff".into(),
@@ -838,6 +857,7 @@ fn a_link_source_is_one_text_box_and_the_jump_centres_it() {
                 link: Some("b".into()),
             },
             TextItem {
+                attach: None,
                 x: 0.0,
                 y: 0.0,
                 color: "#fff".into(),

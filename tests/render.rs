@@ -46,6 +46,7 @@ fn ann(strokes: Vec<Stroke>, texts: Vec<TextItem>) -> Board {
 
 fn line(y: f32, x0: f32, x1: f32) -> Stroke {
     Stroke {
+        id: 0,
         color: "#e01b24".into(),
         width: 4.0,
         points: vec![[x0, y], [x1, y]],
@@ -113,6 +114,7 @@ fn text_item_draws_ink() {
     let a = ann(
         vec![],
         vec![TextItem {
+            attach: None,
             x: 10.0,
             y: 10.0,
             color: "#ffffff".into(),
@@ -182,6 +184,7 @@ fn overlay_text_box_draws_text_and_cursor() {
     let overlay = Overlay {
         text: Some(TextOverlay {
             item: TextItem {
+                attach: None,
                 x: 10.0,
                 y: 10.0,
                 color: "#ffffff".into(),
@@ -218,6 +221,7 @@ fn the_caret_spans_the_whole_line_box() {
     let overlay = Overlay {
         text: Some(TextOverlay {
             item: TextItem {
+                attach: None,
                 x: 10.0,
                 y: 10.0,
                 color: "#ffffff".into(),
@@ -256,6 +260,7 @@ fn the_caret_spans_the_whole_line_box() {
 #[test]
 fn preedit_renders_more_ink_than_committed_text_alone() {
     let item = TextItem {
+        attach: None,
         x: 10.0,
         y: 10.0,
         color: "#ffffff".into(),
@@ -309,6 +314,7 @@ fn stroke_is_smoothed_through_the_sample_midpoints() {
     let points = vec![[10.0, 60.0], [40.0, 20.0], [70.0, 60.0], [100.0, 20.0]];
     let a = ann(
         vec![Stroke {
+            id: 0,
             color: "#e01b24".into(),
             width: 4.0,
             points,
@@ -340,6 +346,7 @@ fn single_sample_stroke_is_a_dot() {
     let mut buf = buffer(W, H);
     let a = ann(
         vec![Stroke {
+            id: 0,
             color: "#e01b24".into(),
             width: 4.0,
             points: vec![[60.0, 40.0]],
@@ -403,6 +410,7 @@ fn rail() -> Toolbar {
 fn dot(x: f32, y: f32) -> Overlay {
     Overlay {
         stroke: Some(Stroke {
+            id: 0,
             color: "#f6d32d".into(),
             width: 3.0,
             points: vec![[x, y]],
@@ -839,6 +847,7 @@ fn bounding_box_frame_is_pixel_identical_to_a_whole_surface_frame() {
     let doc = ann(
         vec![line(50.0, 20.0, 180.0), line(70.0, 20.0, 180.0)],
         vec![TextItem {
+            attach: None,
             x: 120.0,
             y: 60.0,
             color: "#ffffff".into(),
@@ -973,6 +982,7 @@ fn long_text_damage_contains_everything_rasterised() {
     let doc = ann(
         vec![],
         vec![TextItem {
+            attach: None,
             x: 10.0,
             y: 20.0,
             color: "#ffffff".into(),
@@ -1211,6 +1221,7 @@ fn edit_frame(w: u32, h: u32, text: &str, cursor: usize, preedit: &str) -> Vec<u
     let overlay = Overlay {
         text: Some(TextOverlay {
             item: TextItem {
+                attach: None,
                 x: 10.0,
                 y: 10.0,
                 color: "#ffffff".into(),
@@ -1298,6 +1309,7 @@ fn a_cjk_click_lands_inside_the_measured_box() {
     // font-size estimate the eraser uses is 0.6 em per character: too narrow for full-width
     // scripts, which is why a click on such a glyph used to start a new box instead.
     let item = TextItem {
+        attach: None,
         x: 10.0,
         y: 10.0,
         color: "#ffffff".into(),
@@ -1588,6 +1600,7 @@ fn a_cached_frame_keeps_the_scrim_after_a_document_change() {
     let before = Board::default();
     let mut after = before.clone();
     after.strokes = vec![Stroke {
+        id: 0,
         color: "#e01b24".into(),
         width: 4.0,
         points: vec![[20.0, 20.0], [120.0, 60.0]],
@@ -1650,6 +1663,7 @@ fn a_panned_and_zoomed_frame_puts_the_drawing_where_the_view_says() {
     let (w, h) = (400u32, 300u32);
     let doc = Board {
         strokes: vec![Stroke {
+            id: 0,
             color: "#e01b24".into(),
             width: 4.0,
             points: vec![[100.0, 100.0], [140.0, 100.0]],
@@ -1698,12 +1712,14 @@ fn the_default_view_draws_what_no_view_drew() {
     let (w, h) = (400u32, 300u32);
     let doc = Board {
         strokes: vec![Stroke {
+            id: 0,
             color: "#e01b24".into(),
             width: 4.0,
             points: vec![[40.0, 40.0], [180.0, 90.0]],
             attach: [None, None],
         }],
         texts: vec![TextItem {
+            attach: None,
             x: 40.0,
             y: 140.0,
             color: "#ffffff".into(),
@@ -2086,6 +2102,7 @@ fn a_note_is_drawn_over_the_ink_that_crosses_it() {
     let view = View::default();
     let note = Note::new(80.0, 60.0, PALETTE[1], "2026/10/14".into());
     let stroke = Stroke {
+        id: 0,
         color: PALETTE[0].to_string(),
         width: 6.0,
         points: vec![[40.0, 110.0], [300.0, 110.0]],
@@ -3086,6 +3103,7 @@ fn cached_document() -> Board {
     Board {
         strokes: vec![line(50.0, 20.0, 180.0)],
         texts: vec![TextItem {
+            attach: None,
             x: 20.0,
             y: 20.0,
             color: "#ffffff".into(),
@@ -3919,6 +3937,7 @@ fn a_panel_paints_no_plate_behind_its_rows() {
 fn a_link_draws_an_underline_and_the_move_button_is_bottom_centred() {
     let (w, h) = (400u32, 200u32);
     let text = TextItem {
+        attach: None,
         x: 20.0,
         y: 20.0,
         color: "#ffffff".into(),
@@ -3979,6 +3998,7 @@ fn a_selected_texts_frame_is_measured_not_estimated() {
     let mut renderer = Renderer::new();
     let ann = Board {
         texts: vec![TextItem {
+            attach: None,
             x: 0.0,
             y: 0.0,
             color: "#fff".into(),

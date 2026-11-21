@@ -966,6 +966,7 @@ impl App {
                         color: crate::config::current().colors[self.color_idx].clone(),
                         width,
                         points: vec![first],
+                        id: 0,
                         attach,
                     });
                 }
@@ -1310,7 +1311,7 @@ impl App {
                 {
                     changed = stroke.paint_bounds();
                     let board = self.doc.boards.entry(board_name.clone()).or_default();
-                    board.strokes.push(stroke);
+                    board.add_stroke(stroke);
                     if let Some(settled) = board.sync_connectors() {
                         changed = Some(changed.map_or(settled, |box_| box_.union(settled)));
                     }

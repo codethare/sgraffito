@@ -33,6 +33,7 @@ fn opt_level() -> String {
 
 fn line(y: f32, x0: f32, x1: f32, width: f32) -> Stroke {
     Stroke {
+        id: 0,
         color: "#e01b24".into(),
         width,
         points: vec![[x0, y], [x1, y]],
@@ -50,6 +51,7 @@ fn document(stroke_count: usize, width: f32, height: f32) -> Board {
     Board {
         strokes,
         texts: vec![TextItem {
+            attach: None,
             x: width * 0.1,
             y: height * 0.12,
             color: "#ffffff".into(),
@@ -64,6 +66,7 @@ fn document(stroke_count: usize, width: f32, height: f32) -> Board {
 
 fn live_stroke(width: f32, height: f32) -> Stroke {
     Stroke {
+        id: 0,
         color: "#3584e4".into(),
         width: 3.0,
         points: vec![[width * 0.2, height * 0.3], [width * 0.24, height * 0.34]],
@@ -75,6 +78,7 @@ fn text_overlay(width: f32, height: f32, preedit: &str) -> Overlay {
     Overlay {
         text: Some(TextOverlay {
             item: TextItem {
+                attach: None,
                 x: width * 0.1,
                 y: height * 0.2,
                 color: "#ffffff".into(),

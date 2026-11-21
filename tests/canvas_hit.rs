@@ -3,6 +3,7 @@ use sgraffito::sketch::SKETCH_SLACK;
 
 fn line(y: f32, x0: f32, x1: f32) -> Stroke {
     Stroke {
+        id: 0,
         color: "#e01b24".into(),
         width: 3.0,
         points: vec![[x0, y], [x1, y]],
@@ -21,6 +22,7 @@ fn ann(strokes: Vec<Stroke>, texts: Vec<TextItem>) -> Board {
 
 fn text(x: f32, y: f32, s: &str) -> TextItem {
     TextItem {
+        attach: None,
         x,
         y,
         color: "#ffffff".into(),
@@ -174,6 +176,7 @@ fn rect_union_and_intersection() {
 #[test]
 fn stroke_bounds_cover_the_width_and_its_paint_box_adds_the_wander() {
     let s = Stroke {
+        id: 0,
         color: "#ffffff".into(),
         width: 4.0,
         points: vec![[10.0, 20.0], [30.0, 20.0]],
@@ -217,6 +220,7 @@ fn the_wander_is_room_for_painting_and_not_for_hitting() {
     // The bounds grew so a damaged region repaints the whole mark. The eraser must not grow with
     // them: what a mark looks like never changes what it is.
     let line = Stroke {
+        id: 0,
         color: "#ffffff".into(),
         width: 2.0,
         points: vec![[0.0, 0.0], [100.0, 0.0]],
@@ -247,6 +251,7 @@ use sgraffito::canvas::{
 
 fn stroke_at(x: f32, y: f32) -> Stroke {
     Stroke {
+        id: 0,
         color: "#e01b24".into(),
         width: 2.0,
         points: vec![[x, y], [x + 10.0, y]],
@@ -404,6 +409,7 @@ fn a_corner_resize_keeps_the_opposite_corner_still() {
     let gesture = Gesture::start(Some(Grab::Handle(Handle::Se)), frame, 300.0, 200.0, false);
     let t = gesture.transform([500.0, 300.0], false).unwrap();
     let s = Stroke {
+        id: 0,
         color: "#ffffff".into(),
         width: 2.0,
         points: vec![[100.0, 100.0], [300.0, 200.0]],
@@ -485,6 +491,7 @@ fn a_rotation_turns_the_points_about_the_frames_centre_and_moves_the_text_uprigh
         .transform([100.0, 50.0], false)
         .unwrap();
     let turned = t.stroke(&Stroke {
+        id: 0,
         color: "#ffffff".into(),
         width: 2.0,
         points: vec![[50.0, 0.0], [50.0, 50.0]],
@@ -1770,6 +1777,7 @@ fn the_selection_frame_is_the_stored_geometry_and_not_the_ink() {
     // hang on and what a marquee measures, so it stays the stored box: a frame that grew with the
     // wander would put its handles where a resize is not.
     let stroke = Stroke {
+        id: 0,
         color: "#e01b24".into(),
         width: 4.0,
         points: vec![[10.0, 20.0], [110.0, 20.0]],
@@ -1803,6 +1811,7 @@ fn the_selection_frame_is_the_stored_geometry_and_not_the_ink() {
 fn a_dot_is_not_painted_beyond_its_own_disc() {
     // A one-sample stroke is never sketched, so its paint box is its bounds.
     let dot = Stroke {
+        id: 0,
         color: "#ffffff".into(),
         width: 4.0,
         points: vec![[5.0, 5.0]],
@@ -1955,6 +1964,7 @@ fn toggling_an_element_in_and_out_returns_the_list() {
 fn a_shift_press_toggles_and_a_handle_still_wins() {
     // The held stroke is long enough that a press on it can be away from every handle of its frame.
     let long = Stroke {
+        id: 0,
         color: "#e01b24".into(),
         width: 2.0,
         points: vec![[0.0, 0.0], [400.0, 0.0]],
@@ -1999,6 +2009,7 @@ fn a_shift_press_toggles_and_a_handle_still_wins() {
 #[test]
 fn a_shift_press_inside_the_frame_starts_nothing() {
     let long = |y: f32| Stroke {
+        id: 0,
         color: "#e01b24".into(),
         width: 2.0,
         points: vec![[0.0, y], [400.0, y]],
