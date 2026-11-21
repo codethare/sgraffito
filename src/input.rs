@@ -421,6 +421,10 @@ impl KeyboardHandler for App {
         }
         if event.keysym == Keysym::Escape {
             self.escape();
+        } else if self.ctrl && self.shift && matches!(event.keysym, Keysym::z | Keysym::Z) {
+            // Redo, outside a text box, like undo below: typing keeps its own keys, and the edit
+            // is the unit undo and redo work in once it has landed.
+            self.redo();
         } else if self.ctrl && matches!(event.keysym, Keysym::z | Keysym::Z) {
             // Document undo, outside a text box: typing keeps its own keys, and the edit is the
             // unit undo works in once it has landed.
@@ -1153,6 +1157,15 @@ impl App {
             ToolbarAction::More => self.toggle_more(),
             // A click on the readout toggles its list, like every other control on the rail.
             ToolbarAction::Size => self.set_size(!self.size_open),
+            // No block shows these yet, but they are the same two actions the keys reach: the edit
+            // in hand has already been committed above, so the snapshot they restore is the one
+            // before that edit.
+            ToolbarAction::Undo => {
+                self.undo();
+            }
+            ToolbarAction::Redo => {
+                self.redo();
+            }
             ToolbarAction::Scrim => self.cycle_backdrop(),
             ToolbarAction::Backdrop(mode) => self.set_backdrop(mode),
             ToolbarAction::Boards => self.toggle_boards(),

@@ -166,6 +166,10 @@ pub enum ToolbarAction {
     Size,
     /// The `Esc` control: finish the text box being edited first, lock on the next click.
     Lock,
+    /// Step the document back one change, like `Ctrl+Z`. No block shows this one yet.
+    Undo,
+    /// Step the document forward again, like `Ctrl+Shift+Z`. No block shows this one yet.
+    Redo,
     /// Open or close the drawer of controls that are not used often.
     More,
     /// Switch the edit-mode backdrop off and on.

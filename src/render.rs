@@ -261,6 +261,9 @@ fn key_of(action: ToolbarAction) -> Option<&'static str> {
             }
         }
         ToolbarAction::Lock => "Esc",
+        // No block shows these yet; if one does, its text names the key that does the same thing.
+        ToolbarAction::Undo => "Ctrl+Z",
+        ToolbarAction::Redo => "Ctrl+Shift+Z",
         // The width readout has no key: hovering it is the way in, and the steps it opens carry `[` and `]`.
         ToolbarAction::Size => return None,
     })
@@ -5743,7 +5746,9 @@ mod tests {
                 | ToolbarAction::Clipboard
                 | ToolbarAction::Clip(_)
                 | ToolbarAction::AskDeleteBoard(_)
-                | ToolbarAction::CancelDeleteBoard => false,
+                | ToolbarAction::CancelDeleteBoard
+                | ToolbarAction::Undo
+                | ToolbarAction::Redo => false,
                 ToolbarAction::Backdrop(_) => false,
                 ToolbarAction::Size => unreachable!("no key, filtered above"),
             };

@@ -281,8 +281,8 @@ pub struct App {
 
     pub(crate) renderer: Renderer,
     pub(crate) doc: Doc,
-    /// Document snapshots taken before each user-visible change, newest last. In memory only: a
-    /// restart begins without a history, and there is no redo.
+    /// Document snapshots taken before each user-visible change, newest last, plus the ones undo
+    /// left behind for redo. In memory only: a restart begins without a history.
     pub(crate) undo: UndoHistory,
     pub(crate) store: Store,
     path: PathBuf,
@@ -439,14 +439,17 @@ struct Duplicate {
 /// change arrives, so a long session costs a bounded amount of memory.
 pub const UNDO_LIMIT: usize = 64;
 
-/// The document's undo history: snapshots taken before user-visible changes to [`Doc`].
+/// The document's undo history: snapshots taken before user-visible changes to [`Doc`], and the
+/// snapshots undo left behind so they can be redone.
 ///
 /// The snapshot is always taken *before* the mutation. A gesture and a text edit keep their
-/// snapshot aside until they land, so one drag or one typing session is one undo step. Undo only
-/// takes a snapshot out; it never puts one in, which is what keeps undo itself out of the history.
+/// snapshot aside until they land, so one drag or one typing session is one undo step. Undo moves
+/// the current document onto the redo stack; redo moves it back; a new change clears redo. Neither
+/// direction records a change of its own, which is what keeps undo and redo out of the history.
 #[derive(Debug, Default)]
 pub struct UndoHistory {
     snapshots: VecDeque<Doc>,
+    redo_snapshots: VecDeque<Doc>,
     /// Taken when a pointer gesture began: recorded once, when the gesture lands.
     gesture: Option<Doc>,
     /// Taken when a text edit began: recorded once, when the edit ends.
@@ -467,6 +470,21 @@ impl UndoHistory {
         self.snapshots.is_empty()
     }
 
+    /// Whether [`Self::undo`] has a snapshot to restore.
+    pub fn can_undo(&self) -> bool {
+        !self.snapshots.is_empty()
+    }
+
+    /// Number of changes that can be redone.
+    pub fn redo_len(&self) -> usize {
+        self.redo_snapshots.len()
+    }
+
+    /// Whether [`Self::redo`] has a snapshot to restore.
+    pub fn can_redo(&self) -> bool {
+        !self.redo_snapshots.is_empty()
+    }
+
     fn push(&mut self, snapshot: Doc) {
         self.snapshots.push_back(snapshot);
         while self.snapshots.len() > UNDO_LIMIT {
@@ -474,16 +492,22 @@ impl UndoHistory {
         }
     }
 
+    /// A new change: the redo branch no longer describes this document, so it is dropped.
+    fn push_change(&mut self, snapshot: Doc) {
+        self.redo_snapshots.clear();
+        self.push(snapshot);
+    }
+
     /// Keep the document as it is before a change that is known to happen.
     pub fn checkpoint(&mut self, doc: &Doc) {
-        self.push(doc.clone());
+        self.push_change(doc.clone());
     }
 
     /// Keep `before` only if the document actually changed: a shift-click or a recolour of
     /// nothing must not leave an undo step behind.
     pub fn record(&mut self, before: Doc, after: &Doc) {
         if before != *after {
-            self.push(before);
+            self.push_change(before);
         }
     }
 
@@ -520,13 +544,29 @@ impl UndoHistory {
         }
     }
 
-    /// Take out the newest snapshot, for restoring. This adds nothing: undo is not itself a change
-    /// to the document. Any pending gesture or edit snapshot is dropped, because the document they
-    /// described no longer exists.
-    pub fn undo(&mut self) -> Option<Doc> {
+    /// Take out the newest snapshot, for restoring, and keep `current` for redo. This adds no
+    /// undo step: undo is not itself a change to the document. Any pending gesture or edit
+    /// snapshot is dropped, because the document they described no longer exists.
+    pub fn undo(&mut self, current: &Doc) -> Option<Doc> {
         self.gesture = None;
         self.edit = None;
-        self.snapshots.pop_back()
+        let snapshot = self.snapshots.pop_back()?;
+        self.redo_snapshots.push_back(current.clone());
+        while self.redo_snapshots.len() > UNDO_LIMIT {
+            self.redo_snapshots.pop_front();
+        }
+        Some(snapshot)
+    }
+
+    /// Take out the newest redo snapshot, for restoring, and keep `current` as an undo step again.
+    /// Like undo, this records no change of its own, and it leaves the rest of the redo stack in
+    /// place so several undos can be redone one at a time.
+    pub fn redo(&mut self, current: &Doc) -> Option<Doc> {
+        self.gesture = None;
+        self.edit = None;
+        let snapshot = self.redo_snapshots.pop_back()?;
+        self.push(current.clone());
+        Some(snapshot)
     }
 }
 
@@ -1740,12 +1780,32 @@ impl App {
     /// Every transient that names document indices (a selection, a live gesture, a text box) is
     /// dropped before the restore, and every output whose board is gone is moved to a board the
     /// restored document holds. The raster is invalidated, and the write is scheduled, because the
-    /// file and the screen have to agree with the document again. No snapshot is taken: undo is not
-    /// itself a change in the history, and there is no redo.
+    /// file and the screen have to agree with the document again. The document being left is kept
+    /// for [`Self::redo`], but no undo step is added: undo is not itself a change in the history.
     pub(crate) fn undo(&mut self) -> bool {
-        let Some(previous) = self.undo.undo() else {
+        let Some(previous) = self.undo.undo(&self.doc) else {
             return false;
         };
+        self.restore_document(previous);
+        log("undo");
+        true
+    }
+
+    /// Restore the newest redo snapshot. Returns `false` when there is nothing to redo, which
+    /// changes nothing — not even a dirty flag or a repaint. Like undo, this takes no new history
+    /// step: the snapshot returns to the undo stack, where it came from.
+    pub(crate) fn redo(&mut self) -> bool {
+        let Some(next) = self.undo.redo(&self.doc) else {
+            return false;
+        };
+        self.restore_document(next);
+        log("redo");
+        true
+    }
+
+    /// Put a document snapshot back on screen and make everything that names the replaced
+    /// document's contents agree with it.
+    fn restore_document(&mut self, doc: Doc) {
         self.gesture = None;
         self.selection_grab = None;
         self.pending_duplicate = None;
@@ -1757,7 +1817,7 @@ impl App {
         self.im_preedit = None;
         self.im_commit.clear();
         self.im_delete = None;
-        self.doc = previous;
+        self.doc = doc;
         // A document with no boards is nowhere to draw, and every output must name a board the
         // restored document holds: an undo of "create the only board" or "delete this board" would
         // otherwise leave the screen pointing at a name that is gone.
@@ -1781,15 +1841,14 @@ impl App {
             out.dirty = true;
             if !known.contains(&out.board) {
                 out.board = fallback.clone();
-                // The fallback is where undo put this screen; a late output name must not move it.
+                // The fallback is where the restore put this screen; a late output name must not
+                // move it.
                 out.board_picked = true;
             }
         }
         self.doc_changed();
         self.refresh_toolbar();
         self.sync_text_input();
-        log("undo");
-        true
     }
 
     /// Commit any in-progress stroke or shape before a tool change or a new pointer gesture.
