@@ -257,6 +257,21 @@ impl Tool {
         !matches!(self, Tool::Text)
     }
 
+    /// Whether a completed mark with this tool hands the pointer back to `select`. One-shot drawing
+    /// tools do; the eraser, the hand and the note tool keep their tool, and `select` is already there.
+    pub fn hands_to_select(self) -> bool {
+        matches!(
+            self,
+            Tool::Pen
+                | Tool::Text
+                | Tool::Circle
+                | Tool::Rect
+                | Tool::Diamond
+                | Tool::Line
+                | Tool::Arrow
+        )
+    }
+
     /// The key that arms this tool, as the rail states it and as [`crate::input::tool_for_keysym`]
     /// maps it. One letter per tool, so a block's text cannot name a key that does nothing.
     pub fn key(self) -> &'static str {

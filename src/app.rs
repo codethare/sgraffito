@@ -1670,6 +1670,19 @@ impl App {
         }
     }
 
+    /// Hand the pointer back to `select` once a drawing tool has produced something. A drawing is a
+    /// one-shot act: the next gesture is a pick or a move, not another accidental mark. Tool and
+    /// panel state are not document changes, so this never creates an undo step.
+    pub(crate) fn select_after_drawing(&mut self) {
+        if !self.tool.hands_to_select() {
+            return;
+        }
+        self.tool = Tool::Selection;
+        log("tool switched to Selection after drawing");
+        self.refresh_toolbar();
+        self.sync_cursor();
+    }
+
     pub(crate) fn set_tool(&mut self, tool: Tool) {
         if self.tool != tool {
             self.end_text_edit();
@@ -2718,6 +2731,7 @@ impl App {
     /// Write the text box being edited back into the document (empty boxes are dropped).
     pub(crate) fn end_text_edit(&mut self) {
         let mut changed = false;
+        let mut text_committed = false;
         let keys: Vec<u32> = self.outputs.keys().copied().collect();
         for key in keys {
             let Some(out) = self.outputs.get_mut(&key) else {
@@ -2791,6 +2805,7 @@ impl App {
                 _ => ann.texts.push(item),
             }
             changed = true;
+            text_committed = true;
         }
         if changed {
             self.doc_changed();
@@ -2802,6 +2817,9 @@ impl App {
         self.im_delete = None;
         self.dirty = true;
         self.sync_text_input();
+        if text_committed {
+            self.select_after_drawing();
+        }
     }
 
     pub(crate) fn begin_text_edit(&mut self, key: &u32, x: f32, y: f32) {

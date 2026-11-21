@@ -1343,6 +1343,7 @@ impl App {
                 }
             }
         }
+        let drew = changed.is_some();
         match changed {
             Some(box_) => {
                 if let Some(before) = before {
@@ -1352,6 +1353,11 @@ impl App {
             }
             // The eraser marker was showing and is gone, with nothing erased.
             None => self.dirty = true,
+        }
+        // A pen or shape tool hands the pointer to `select` after the mark that was actually drawn.
+        // A click that produced nothing, and the eraser, keep their tool.
+        if drew {
+            self.select_after_drawing();
         }
         // The transient overlay is empty again, so this output is repainted from its own box.
         if let Some(out) = self.outputs.get_mut(key) {

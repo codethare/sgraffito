@@ -2168,3 +2168,25 @@ fn a_moved_shape_snaps_to_a_free_connector_end() {
     board.sync_connectors();
     assert_eq!(board.shapes[1].from, [100.0, 50.0]);
 }
+
+#[test]
+fn one_shot_drawing_tools_hand_the_pointer_back_to_select() {
+    use sgraffito::canvas::Tool;
+    for tool in [
+        Tool::Pen,
+        Tool::Text,
+        Tool::Circle,
+        Tool::Rect,
+        Tool::Diamond,
+        Tool::Line,
+        Tool::Arrow,
+    ] {
+        assert!(
+            tool.hands_to_select(),
+            "{tool:?} should hand back to select"
+        );
+    }
+    for tool in [Tool::Eraser, Tool::Selection, Tool::Hand, Tool::Note] {
+        assert!(!tool.hands_to_select(), "{tool:?} should keep its tool");
+    }
+}
