@@ -1298,9 +1298,6 @@ impl Renderer {
                 }
             }
         }
-        for text in &overlay.attached_texts {
-            self.draw_text(&mut pixmap, &text.item, screen, None, None, None);
-        }
         draw_snap_hints(&mut pixmap, ann, overlay, screen);
         // The frame is drawn on the measured text, not on the damage estimate, so its trailing edge
         // sits on the last glyph instead of past it.
@@ -2660,15 +2657,10 @@ pub fn transient_bounds(overlay: &Overlay) -> Option<Rect> {
             LiveConnector::Stroke(_, stroke) => stroke.paint_bounds(),
             LiveConnector::Shape(_, shape) => Some(shape.paint_bounds()),
         });
-    let texts = overlay
-        .attached_texts
-        .iter()
-        .map(|text| text.item.paint_bounds());
     [stroke, shape, note, eraser, marquee]
         .into_iter()
         .flatten()
         .chain(connectors)
-        .chain(texts)
         .reduce(Rect::union)
 }
 
@@ -2912,7 +2904,6 @@ struct ToolbarPill {
 /// A label vertically centred in a `height`-tall box whose top edge is `top`.
 fn toolbar_text(x: f32, top: f32, height: f32, size: f32, color: &str, text: &str) -> TextItem {
     TextItem {
-        attach: None,
         x,
         y: top + (height - size * LINE_HEIGHT_SCALE) / 2.0,
         color: color.into(),
@@ -3299,7 +3290,6 @@ fn draw_icon(pixmap: &mut PixmapMut, icon: Icon, square: Rect, scale: f32, color
         draw_stroke(
             pixmap,
             &Stroke {
-                id: 0,
                 color: color.into(),
                 width: ICON_STROKE,
                 points: vec![
@@ -4956,7 +4946,6 @@ mod tests {
 
     fn text_item(text: &str) -> TextItem {
         TextItem {
-            attach: None,
             x: 10.0,
             y: 10.0,
             color: "#ffffff".into(),
@@ -4992,7 +4981,6 @@ mod tests {
     fn document() -> Board {
         Board {
             strokes: vec![Stroke {
-                id: 0,
                 color: "#e01b24".into(),
                 width: 4.0,
                 points: vec![[10.0, 50.0], [190.0, 60.0]],
@@ -5609,7 +5597,6 @@ mod tests {
         draw_stroke(
             &mut exact.as_mut(),
             &Stroke {
-                id: 0,
                 color: "#ffffffee".into(),
                 width: ICON_STROKE,
                 points: vec![

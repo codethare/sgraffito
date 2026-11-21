@@ -11,7 +11,6 @@ fn stroke(y: f32) -> Stroke {
         color: "#e01b24".into(),
         width: 3.0,
         points: vec![[0.0, y], [100.0, y]],
-        id: 0,
         attach: [None, None],
     }
 }

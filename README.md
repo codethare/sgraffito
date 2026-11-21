@@ -180,28 +180,20 @@ Errors and state changes go to stderr and to `$XDG_STATE_HOME/sgraffito/sgraffit
 - With `select`, dragging a connected shape stretches every attached connector live, even when the connector is not selected. Both ends stay on their shapes, so a line between two shapes follows whichever end moved.
 - Attachments are saved with stable shape ids; deleting a shape clears the ends that pointed at it, and copying or moving shapes remaps their connectors to the copies.
 
-## Text attachment
-
-- Dragging a selection made only of `text` near a `circle`, `rectangle` or `diamond` border snaps the box just inside that border, between the drawn lines. Near a `line`, `arrow` or `pen`, it stays on the side it approached from, beside the ink.
-- The snap radius is 12 logical pixels. The gap is 4 logical pixels from the drawn ink, after the stroke's own half-width and the hand-drawn wander are accounted for.
-- Releasing the drag records the attachment. Moving the attached shape or stroke — by selection drag or arrow-key nudge — moves the text with it, live during the drag and on the final write.
-- Attachments name a stable shape id or stroke id. Deleting the target clears the text's attachment; copying remaps it to the copy.
-
 ## Data
 
 `$XDG_DATA_HOME/sgraffito/annotations.json` (default `~/.local/share/sgraffito/`):
 
 ```json
-{"version":7,
- "boards":{"office":{"strokes":[{"color":"#e01b24","width":3,"points":[[12,40],[14,44]],"id":1,"attach":[null,null]}],
-  "texts":[{"x":100,"y":200,"color":"#ffffff","size":18,"text":"buy milk","link":"desk",
-            "attach":{"target":{"stroke":1},"offset":[88,160]}}],
+{"version":6,
+ "boards":{"office":{"strokes":[{"color":"#e01b24","width":3,"points":[[12,40],[14,44]],"attach":[null,null]}],
+  "texts":[{"x":100,"y":200,"color":"#ffffff","size":18,"text":"buy milk","link":"desk"}],
   "shapes":[{"kind":"rect","color":"#3584e4","width":3,"from":[30,400],"to":[180,260],"rotate":0.4,"id":2,"attach":[null,null]},
             {"kind":"arrow","color":"#3584e4","width":3,"from":[180,430],"to":[400,430],"id":3,"attach":[{"shape":2,"at":[1.0,0.0]},null]}]}},
  "active":"office"}
 ```
 
-A shape is a `kind` (`circle`, `rect`, `diamond`, `line` or `arrow`), its colour, its width and its two points — never its outline, and never a box. A closed shape may also carry `rotate`, in radians about its centre; upright shapes omit it. Shapes and pen strokes carry stable board-local `id`s. A line, arrow or pen's `attach` names the shapes its two ends stick to, with `at` the point on that shape (the centre is `(0, 0)` and its half-extents are `1`). A text's optional `link` is the board it jumps to; `attach` is the drawing it follows, as `{"shape": id}` or `{"stroke": id}` plus the text origin's offset from that drawing's anchor. `link` is absent from files written before version 5, attachments before version 7. Versions 1 to 6 load as well: old shapes and strokes get fresh ids, old texts have no attachment, and a version 1–3 `outputs` map, keyed by output name, becomes boards of the same name. `active` is the board picked last — what a screen connected after a restart shows. An unknown version is still backed up rather than guessed at.
+A shape is a `kind` (`circle`, `rect`, `diamond`, `line` or `arrow`), its colour, its width and its two points — never its outline, and never a box. A closed shape may also carry `rotate`, in radians about its centre; upright shapes omit it. Closed shapes carry a stable board-local `id`; a line, arrow or pen's `attach` names the shapes its two ends stick to, with `at` the point on that shape (the centre is `(0, 0)` and its half-extents are `1`). A text's optional `link` is the board it jumps to; it is absent from files written before version 5. Versions 1 to 5 load as well: old shapes get fresh ids and no attachments, and a version 1–3 `outputs` map, keyed by output name, becomes boards of the same name. `active` is the board picked last — what a screen connected after a restart shows. An unknown version is still backed up rather than guessed at.
 
 - Coordinates are **canvas coordinates** — the canvas is unbounded and a board is one canvas — and annotations are bucketed by **board name**, not by output.
 - Changes land on disk within 1 second at most, written through a temp file in the same directory plus `rename`; `clear` and shutdown flush immediately. If a write fails, the change stays pending and the daemon retries without dropping the in-memory annotations.

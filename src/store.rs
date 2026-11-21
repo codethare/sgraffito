@@ -12,12 +12,11 @@ use crate::canvas::{Board, Doc};
 
 /// The version this daemon writes. Version 1 had no `shapes` list, version 2 adds that, version 3
 /// adds the `notes` list, version 4 keys the annotations by board name instead of output name and
-/// records the board picked last, version 5 adds a text's board link, version 6 gives shapes
-/// stable ids and connector attachments, and version 7 gives pen strokes stable ids and texts a
-/// persistent attachment to a shape or a stroke. All of them are read, because an older file's
-/// missing fields default, and an older build reading a newer file would silently drop what it does
-/// not know on its next save — which is what the number is for.
-pub const VERSION: u32 = 7;
+/// records the board picked last, version 5 adds a text's board link, and version 6 gives shapes
+/// stable ids and connector attachments. All of them are read, because an older file's missing
+/// fields default, and an older build reading a newer file would silently drop what it does not
+/// know on its next save — which is what the number is for.
+pub const VERSION: u32 = 6;
 /// The oldest version whose files still load.
 pub const MIN_VERSION: u32 = 1;
 pub const DEBOUNCE: Duration = Duration::from_secs(1);
@@ -89,9 +88,7 @@ pub fn load(path: &Path) -> Doc {
             };
             for board in doc.boards.values_mut() {
                 board.ensure_shape_ids();
-                board.ensure_stroke_ids();
                 board.drop_dangling_attachments();
-                board.sync_attached_texts();
             }
             doc
         }

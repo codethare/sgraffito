@@ -44,11 +44,10 @@ use crate::canvas::{
     Attachment, Backdrop, Board, BoardEdit, BoardRow, ClipEntry, ClipRow, Doc, ERASER_THRESHOLD,
     Gesture, Grab, Handle, ItemId, LiveConnector, Motion, Note, Overlay, PEN_WIDTH_MAX,
     PEN_WIDTH_MIN, PEN_WIDTH_STEP, Press, Rect, SNAP_RADIUS, Selection, Shape, ShapeKind,
-    TEXT_SIZE_MAX, TEXT_SIZE_MIN, TEXT_SIZE_STEP, TEXT_SNAP_RADIUS, Target, TextAttachment,
-    TextBuffer, TextItem, TextOverlay, TextTarget, Toolbar, Transform, View, ZOOM_STEP, Zoom,
-    date_stamp, link_source, marquee_select, note_drag, nudge_delta, record_clip, selection_bounds,
-    selection_frame, selection_frame_with, selection_press_with, snap_square, stepped_size,
-    toggle_selection,
+    TEXT_SIZE_MAX, TEXT_SIZE_MIN, TEXT_SIZE_STEP, Target, TextBuffer, TextItem, TextOverlay,
+    Toolbar, Transform, View, ZOOM_STEP, Zoom, date_stamp, link_source, marquee_select, note_drag,
+    nudge_delta, record_clip, selection_bounds, selection_frame, selection_frame_with,
+    selection_press_with, snap_square, stepped_size, toggle_selection,
 };
 
 pub use crate::canvas::{Tool, ToolbarAction};
@@ -359,9 +358,6 @@ pub struct App {
     /// A connector end that a shape has magnetically met during the drag, written when the gesture
     /// lands. Indices are valid until the gesture ends, like the selection's.
     pub(crate) pending_links: Vec<PendingLink>,
-    /// The drawing a dragged text selection has snapped to, written as a persistent attachment when
-    /// the gesture lands. `None` while the text is not attached to anything.
-    pub(crate) pending_text_snap: Option<TextTarget>,
     /// Whether the drawer of rarely used controls is open. Transient, like the selection.
     pub(crate) more: bool,
     /// What edit mode paints behind the document. A preference about reading, so it is not persisted.
@@ -617,7 +613,6 @@ impl App {
             alt: false,
             pending_duplicate: None,
             pending_links: Vec::new(),
-            pending_text_snap: None,
             more: false,
             backdrop: Backdrop::Black,
             pan: None,
@@ -1742,7 +1737,6 @@ impl App {
         self.selection_grab = None;
         self.pending_duplicate = None;
         self.pending_links.clear();
-        self.pending_text_snap = None;
         self.note_origin = None;
         self.note_sized = false;
         self.delete_confirm = None;
@@ -1862,7 +1856,6 @@ impl App {
         self.note_origin = None;
         self.note_sized = false;
         self.pending_links.clear();
-        self.pending_text_snap = None;
         let Some(out) = self.outputs.get_mut(&key) else {
             return;
         };
@@ -1873,7 +1866,6 @@ impl App {
             || out.overlay.selection.take().is_some()
             || out.overlay.marquee.take().is_some();
         out.overlay.connectors.clear();
-        out.overlay.attached_texts.clear();
         if changed {
             out.transient_dirty = true;
             out.dirty = true;
@@ -2018,47 +2010,24 @@ impl App {
             self.duplicate_selection(key);
         }
         // A moved closed shape can meet a free connector end from its own side too. The correction
-        // is part of the transform the frame draws, so the shape visibly lands on the end. A
-        // selection made only of text instead snaps to the drawing its ink came near.
-        let items = self
-            .outputs
-            .get(&key)
-            .and_then(|out| out.overlay.selection.as_ref())
-            .map(|selection| selection.items.clone())
-            .unwrap_or_default();
-        let text_only = !items.is_empty() && items.iter().all(|id| matches!(id, ItemId::Text(_)));
+        // is part of the transform the frame draws, so the shape visibly lands on the end.
         let old_links = std::mem::take(&mut self.pending_links);
-        let old_text_snap = self.pending_text_snap;
         if matches!(gesture, Gesture::Move { .. }) && !transform.is_identity() {
-            if text_only {
-                let snap = self.outputs.get(&key).and_then(|out| {
-                    self.doc.boards.get(out.board()).and_then(|board| {
-                        board.snap_text(&items, transform, TEXT_SNAP_RADIUS / out.view.zoom)
-                    })
-                });
-                match snap {
-                    Some(snap) => {
-                        transform = snap.transform;
-                        self.pending_text_snap = Some(snap.target);
-                    }
-                    None => self.pending_text_snap = None,
-                }
-            } else {
-                self.pending_text_snap = None;
-                let (snapped, links) = self.snap_moved_shape(&key, &items, transform);
-                transform = snapped;
-                self.pending_links = links;
-            }
+            let items = self
+                .outputs
+                .get(&key)
+                .and_then(|out| out.overlay.selection.as_ref())
+                .map(|selection| selection.items.clone())
+                .unwrap_or_default();
+            let (snapped, links) = self.snap_moved_shape(&key, &items, transform);
+            transform = snapped;
+            self.pending_links = links;
         } else {
             self.pending_links.clear();
-            self.pending_text_snap = None;
         }
-        let live_changed =
-            old_links != self.pending_links || old_text_snap != self.pending_text_snap;
-        let next = (!transform.is_identity()
-            || !self.pending_links.is_empty()
-            || self.pending_text_snap.is_some())
-        .then_some(transform);
+        let links_changed = old_links != self.pending_links;
+        let next =
+            (!transform.is_identity() || !self.pending_links.is_empty()).then_some(transform);
         let changed = {
             let Some(out) = self.outputs.get_mut(&key) else {
                 return;
@@ -2075,8 +2044,8 @@ impl App {
                 true
             }
         };
-        if changed || live_changed {
-            self.refresh_live(key);
+        if changed || links_changed {
+            self.refresh_live_connectors(key);
         }
     }
 
@@ -2108,9 +2077,9 @@ impl App {
         }
     }
 
-    /// Rebuild the attached-connector and attached-text copies the overlay paints during a selection
-    /// drag, and skip their committed geometry in the raster.
-    fn refresh_live(&mut self, key: u32) {
+    /// Rebuild the attached-connector copies the overlay paints during a selection drag, and skip
+    /// their committed geometry in the raster.
+    fn refresh_live_connectors(&mut self, key: u32) {
         let Some((board_name, items, transform)) = self.outputs.get(&key).and_then(|out| {
             let selection = out.overlay.selection.as_ref()?;
             let transform = selection.transform?;
@@ -2118,7 +2087,6 @@ impl App {
         }) else {
             if let Some(out) = self.outputs.get_mut(&key) {
                 out.overlay.connectors.clear();
-                out.overlay.attached_texts.clear();
             }
             return;
         };
@@ -2127,20 +2095,14 @@ impl App {
             .iter()
             .map(|link| (link.connector, link.end, link.attachment))
             .collect();
-        let (connectors, attached_texts) = self
+        let connectors = self
             .doc
             .boards
             .get(&board_name)
-            .map(|board| {
-                (
-                    board.connector_preview(&items, transform, &pending),
-                    board.attached_text_preview(&items, transform),
-                )
-            })
+            .map(|board| board.connector_preview(&items, transform, &pending))
             .unwrap_or_default();
         if let Some(out) = self.outputs.get_mut(&key) {
             out.overlay.connectors = connectors;
-            out.overlay.attached_texts = attached_texts;
             out.transient_dirty = true;
             self.dirty = true;
         }
@@ -2409,12 +2371,10 @@ impl App {
         self.pending_duplicate = None;
         self.pending_links.clear();
         self.undo.abandon_gesture();
-        self.pending_text_snap = None;
         let mut dropped = false;
         for out in self.outputs.values_mut() {
             let had = out.overlay.selection.take().is_some() | out.overlay.marquee.take().is_some();
             out.overlay.connectors.clear();
-            out.overlay.attached_texts.clear();
             if had {
                 out.transient_dirty = true;
                 dropped = true;
@@ -2494,7 +2454,6 @@ impl App {
     /// time, the way at most one text box is under edit.
     fn set_selection(&mut self, key: u32, items: Vec<ItemId>, transform: Option<Transform>) {
         self.pending_links.clear();
-        self.pending_text_snap = None;
         let owned =
             (!items.is_empty() || transform.is_some()).then_some(Selection { items, transform });
         for (k, out) in self.outputs.iter_mut() {
@@ -2502,7 +2461,6 @@ impl App {
             if out.overlay.selection != next {
                 out.overlay.selection = next;
                 out.overlay.connectors.clear();
-                out.overlay.attached_texts.clear();
                 out.transient_dirty = true;
                 self.dirty = true;
             }
@@ -2544,13 +2502,8 @@ impl App {
         let Some(selection) = out.overlay.selection.as_ref() else {
             return;
         };
-        let pending_text_snap = self.pending_text_snap.take();
-        // A text that was snapped while the gesture never left its own origin still has an
-        // attachment to write: the identity transform is the committed position.
-        let transform = match selection.transform {
-            Some(transform) => transform,
-            None if pending_text_snap.is_some() => Transform::Translate { dx: 0.0, dy: 0.0 },
-            None => return,
+        let Some(transform) = selection.transform else {
+            return;
         };
         let (items, board_name) = (selection.items.clone(), out.board().to_string());
         let links = std::mem::take(&mut self.pending_links);
@@ -2615,62 +2568,11 @@ impl App {
                     _ => {}
                 }
             }
-            // A text that met a drawing takes that attachment now. The offset is stored from the
-            // target's anchor, so the text follows the drawing through any later translation.
-            if let Some((target, anchor)) = pending_text_snap
-                .and_then(|target| ann.text_anchor(target).map(|anchor| (target, anchor)))
-            {
-                for id in &items {
-                    if let ItemId::Text(i) = *id
-                        && let Some(text) = ann.texts.get_mut(i)
-                    {
-                        text.attach = Some(TextAttachment {
-                            target,
-                            offset: [text.x - anchor[0], text.y - anchor[1]],
-                        });
-                    }
-                }
-            }
-            // A moved text that met nothing is dragged away from what it was attached to. A text
-            // whose target is in the same selection keeps its link, because both moved together.
-            let selected_targets: Vec<TextTarget> = items
-                .iter()
-                .filter_map(|id| match *id {
-                    ItemId::Shape(i) => ann
-                        .shapes
-                        .get(i)
-                        .map(|shape| TextTarget::Shape(shape.id))
-                        .filter(|_| ann.shapes[i].id != 0),
-                    ItemId::Stroke(i) => ann
-                        .strokes
-                        .get(i)
-                        .map(|stroke| TextTarget::Stroke(stroke.id))
-                        .filter(|_| ann.strokes[i].id != 0),
-                    _ => None,
-                })
-                .collect();
-            for id in &items {
-                if pending_text_snap.is_some() {
-                    break;
-                }
-                if let ItemId::Text(i) = *id
-                    && let Some(text) = ann.texts.get_mut(i)
-                    && text
-                        .attach
-                        .is_some_and(|attachment| !selected_targets.contains(&attachment.target))
-                {
-                    text.attach = None;
-                }
-            }
             // A moved shape drags every connector attached to it, whether or not the connector was
             // part of the selection. Both endpoints are re-seated on their shapes here, once, on the
             // same commit as the move.
             if let Some(connector_box) = ann.sync_connectors() {
                 box_ = Some(box_.map_or(connector_box, |box_| box_.union(connector_box)));
-            }
-            // The same pass for texts: a moved shape or stroke drags the text attached to it.
-            if let Some(text_box) = ann.sync_attached_texts() {
-                box_ = Some(box_.map_or(text_box, |box_| box_.union(text_box)));
             }
         }
         // A copy the gesture made is ordinary content from here on: it has been dragged, and the gesture
@@ -2683,7 +2585,6 @@ impl App {
         {
             selection.transform = None;
             out.overlay.connectors.clear();
-            out.overlay.attached_texts.clear();
         }
         if let Some(box_) = box_ {
             self.doc_changed_at(key, box_);
@@ -2947,7 +2848,6 @@ impl App {
                     size: self.text_size,
                     text: String::new(),
                     link: None,
-                    attach: None,
                 },
                 None,
             ),
@@ -3617,7 +3517,6 @@ impl App {
             skip.extend_from_slice(selection.live());
         }
         skip.extend(out.overlay.connectors.iter().map(LiveConnector::id));
-        skip.extend(out.overlay.attached_texts.iter().map(|text| text.id));
         let damage = if out.dirty || out.last_buffer != Some(idx) || text_needs_full {
             None
         } else if let Some(pending) = out.pending {

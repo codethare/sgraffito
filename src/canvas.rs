@@ -286,33 +286,6 @@ pub struct Attachment {
     pub at: [f32; 2],
 }
 
-/// The drawing a text box sticks to. A shape is named by the stable `Shape.id`, a pen stroke by the
-/// stable `Stroke.id`; both are board-local.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TextTarget {
-    Shape(u64),
-    Stroke(u64),
-}
-
-/// A text box bound to a drawing. Text has no edge to sit on, so it remembers where its origin was
-/// relative to the target's anchor — a shape's centre, or a stroke's first sample — which is enough
-/// to follow the target through every translation.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct TextAttachment {
-    pub target: TextTarget,
-    /// `text origin - target anchor`, in canvas pixels.
-    pub offset: [f32; 2],
-}
-
-/// A text selection that met a drawing: the corrected translation and the target it should stay
-/// attached to after the release.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct TextSnap {
-    pub transform: Transform,
-    pub target: TextTarget,
-}
-
 /// A connector drawn from the overlay while its attached shapes are being dragged: the document
 /// raster still holds the old geometry, so the frame paints this copy in its place.
 #[derive(Debug, Clone, PartialEq)]
@@ -329,14 +302,6 @@ impl LiveConnector {
     }
 }
 
-/// A text box redrawn by the overlay while the drawing it is attached to is being dragged. The
-/// raster still holds the committed box, so the frame paints this copy and skips that id.
-#[derive(Debug, Clone, PartialEq)]
-pub struct LiveText {
-    pub id: ItemId,
-    pub item: TextItem,
-}
-
 /// A moved shape that has met a free connector end: the corrected translation, the end it met and
 /// the attachment the release should write.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -351,26 +316,12 @@ pub struct ReverseSnap {
 /// sticks to it.
 pub const SNAP_RADIUS: f32 = 12.0;
 
-/// How close a dragged text selection must come to a drawing's ink, in logical pixels, before it
-/// sticks to it. As with a connector's radius, the App divides this by the zoom, so it is an
-/// interface length rather than a canvas one.
-pub const TEXT_SNAP_RADIUS: f32 = 12.0;
-
-/// The visible gap left between a snapped text box and the target's ink, in logical pixels. The
-/// stroke's half-width and [`crate::sketch::SKETCH_SLACK`] are added on top, because those are part
-/// of the ink rather than of the space the eye needs.
-pub const TEXT_SNAP_GAP: f32 = 4.0;
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Stroke {
     /// `#rrggbb`
     pub color: String,
     pub width: f32,
     pub points: Vec<[f32; 2]>,
-    /// A stable id inside its board, like a shape's, so a text box can keep pointing at this stroke
-    /// after other strokes are deleted or moved. Zero is assigned a real id when it enters a board.
-    #[serde(default)]
-    pub id: u64,
     /// The closed shapes the first and last sample stick to, when a pen stroke was started or
     /// finished against one.
     #[serde(default)]
@@ -389,10 +340,6 @@ pub struct TextItem {
     /// written before links existed.
     #[serde(default)]
     pub link: Option<String>,
-    /// The drawing this text was snapped to, if any. Absent in a file written before text
-    /// attachments existed.
-    #[serde(default)]
-    pub attach: Option<TextAttachment>,
 }
 
 /// Padding between a note's text and its edges, its smallest side, the size a click creates, and the
@@ -483,7 +430,6 @@ impl Note {
             size: NOTE_TEXT_SIZE,
             text: self.text.clone(),
             link: None,
-            attach: None,
         }
     }
 
@@ -589,30 +535,12 @@ impl Board {
         self.shapes.iter().map(|shape| shape.id).max().unwrap_or(0) + 1
     }
 
-    /// The next unused stroke id, for the same reason a shape has one.
-    pub fn next_stroke_id(&self) -> u64 {
-        self.strokes
-            .iter()
-            .map(|stroke| stroke.id)
-            .max()
-            .unwrap_or(0)
-            + 1
-    }
-
     /// Push a new shape, giving it an id if it has none or one already taken.
     pub fn add_shape(&mut self, mut shape: Shape) {
         if shape.id == 0 || self.shapes.iter().any(|other| other.id == shape.id) {
             shape.id = self.next_shape_id();
         }
         self.shapes.push(shape);
-    }
-
-    /// Push a new stroke, giving it an id if it has none or one already taken.
-    pub fn add_stroke(&mut self, mut stroke: Stroke) {
-        if stroke.id == 0 || self.strokes.iter().any(|other| other.id == stroke.id) {
-            stroke.id = self.next_stroke_id();
-        }
-        self.strokes.push(stroke);
     }
 
     /// Give every shape a unique non-zero id. Files written before ids existed load with zeroes;
@@ -623,19 +551,6 @@ impl Board {
         for shape in &mut self.shapes {
             if shape.id == 0 || !used.insert(shape.id) {
                 shape.id = next;
-                used.insert(next);
-                next += 1;
-            }
-        }
-    }
-
-    /// Give every stroke a unique non-zero id, which is the stroke half of [`Self::ensure_shape_ids`].
-    pub fn ensure_stroke_ids(&mut self) {
-        let mut used = BTreeSet::new();
-        let mut next = self.next_stroke_id();
-        for stroke in &mut self.strokes {
-            if stroke.id == 0 || !used.insert(stroke.id) {
-                stroke.id = next;
                 used.insert(next);
                 next += 1;
             }
@@ -662,234 +577,26 @@ impl Board {
         best.map(|(attachment, point, _)| (attachment, point))
     }
 
-    /// Snap a selection made only of text to the nearest drawing within `tolerance` canvas pixels.
-    /// A closed shape takes the text just inside its border; an open line, arrow or pen stroke keeps
-    /// the text on the side it approached from, beside the ink. The whole selection moves by one
-    /// translation, so several boxes keep their arrangement.
-    ///
-    /// The distance measured against the tolerance is from the text box to the *ink*: the stroke's
-    /// half-width and [`SKETCH_SLACK`] are part of the drawing, not empty space.
-    pub fn snap_text(
-        &self,
-        items: &[ItemId],
-        transform: Transform,
-        tolerance: f32,
-    ) -> Option<TextSnap> {
-        let Transform::Translate { dx, dy } = transform else {
-            return None;
-        };
-        let mut box_: Option<Rect> = None;
-        for id in items {
-            let ItemId::Text(index) = *id else {
-                return None;
-            };
-            let bounds = self.texts.get(index)?.bounds();
-            let moved = Rect {
-                x: bounds.x + dx,
-                y: bounds.y + dy,
-                ..bounds
-            };
-            box_ = Some(box_.map_or(moved, |acc| acc.union(moved)));
-        }
-        let box_ = box_?;
-        let centre = box_.centre();
-        let mut best: Option<(f32, [f32; 2], TextTarget)> = None;
-        let mut consider = |gap: f32, desired: [f32; 2], target: TextTarget| {
-            if gap <= tolerance && best.is_none_or(|(nearest, _, _)| gap < nearest) {
-                best = Some((gap, desired, target));
-            }
-        };
-        for shape in &self.shapes {
-            if shape.id == 0 {
-                continue;
-            }
-            let ink = shape.width / 2.0 + SKETCH_SLACK;
-            if shape.kind.is_closed() {
-                let Some(point) = shape.nearest_boundary(centre) else {
-                    continue;
-                };
-                let outward = shape.outward_normal(point);
-                let support = support_along(box_, outward);
-                let distance = dist_squared(centre, point).sqrt();
-                let gap = (distance - support - ink).max(0.0);
-                let desired = [
-                    point[0] - outward[0] * (ink + TEXT_SNAP_GAP + support),
-                    point[1] - outward[1] * (ink + TEXT_SNAP_GAP + support),
-                ];
-                consider(gap, desired, TextTarget::Shape(shape.id));
-            } else {
-                let (point, along) = shape.nearest_on_ink(centre);
-                let outward = toward_text(centre, point, along);
-                let support = support_along(box_, outward);
-                let distance = dist_squared(centre, point).sqrt();
-                let gap = (distance - support - ink).max(0.0);
-                let desired = [
-                    point[0] + outward[0] * (ink + TEXT_SNAP_GAP + support),
-                    point[1] + outward[1] * (ink + TEXT_SNAP_GAP + support),
-                ];
-                consider(gap, desired, TextTarget::Shape(shape.id));
-            }
-        }
-        for stroke in &self.strokes {
-            if stroke.id == 0 {
-                continue;
-            }
-            let Some((point, along)) = stroke.nearest_point(centre) else {
-                continue;
-            };
-            let ink = stroke.width / 2.0 + SKETCH_SLACK;
-            let outward = toward_text(centre, point, along);
-            let support = support_along(box_, outward);
-            let distance = dist_squared(centre, point).sqrt();
-            let gap = (distance - support - ink).max(0.0);
-            let desired = [
-                point[0] + outward[0] * (ink + TEXT_SNAP_GAP + support),
-                point[1] + outward[1] * (ink + TEXT_SNAP_GAP + support),
-            ];
-            consider(gap, desired, TextTarget::Stroke(stroke.id));
-        }
-        best.map(|(_, desired, target)| TextSnap {
-            transform: Transform::Translate {
-                dx: dx + desired[0] - centre[0],
-                dy: dy + desired[1] - centre[1],
-            },
-            target,
-        })
-    }
-
-    /// The anchor a text attachment is measured from: a shape's centre, or a stroke's first sample.
-    pub fn text_anchor(&self, target: TextTarget) -> Option<[f32; 2]> {
-        match target {
-            TextTarget::Shape(id) => self
-                .shapes
-                .iter()
-                .find(|shape| shape.id == id)
-                .map(Shape::centre),
-            TextTarget::Stroke(id) => self
-                .strokes
-                .iter()
-                .find(|stroke| stroke.id == id)
-                .and_then(Stroke::anchor),
-        }
-    }
-
-    /// Put every attached text box back at `anchor + offset`, returning the box that changed, or
-    /// `None` when nothing moved. A dangling attachment is cleared rather than left pointing at an
-    /// index that may now name something else.
-    pub fn sync_attached_texts(&mut self) -> Option<Rect> {
-        let anchors: BTreeMap<TextTarget, [f32; 2]> = self
-            .shapes
-            .iter()
-            .filter(|shape| shape.id != 0)
-            .map(|shape| (TextTarget::Shape(shape.id), shape.centre()))
-            .chain(
-                self.strokes
-                    .iter()
-                    .filter(|stroke| stroke.id != 0)
-                    .filter_map(|stroke| {
-                        stroke.anchor().map(|a| (TextTarget::Stroke(stroke.id), a))
-                    }),
-            )
-            .collect();
-        let mut changed: Option<Rect> = None;
-        for text in &mut self.texts {
-            let Some(attachment) = text.attach else {
-                continue;
-            };
-            let Some(anchor) = anchors.get(&attachment.target) else {
-                text.attach = None;
-                continue;
-            };
-            let before = text.paint_bounds();
-            text.x = anchor[0] + attachment.offset[0];
-            text.y = anchor[1] + attachment.offset[1];
-            let after = text.paint_bounds();
-            if after != before {
-                changed = Some(
-                    changed.map_or(before.union(after), |box_| box_.union(before.union(after))),
-                );
-            }
-        }
-        changed
-    }
-
-    /// The live copies of attached texts while a selection drag moves their targets. A text that is
-    /// itself in the selection is already drawn by the selection's own live copies and is skipped.
-    pub fn attached_text_preview(&self, items: &[ItemId], transform: Transform) -> Vec<LiveText> {
-        let selected = |id: ItemId| items.contains(&id);
-        let mut live = Vec::new();
-        for (index, text) in self.texts.iter().enumerate() {
-            if selected(ItemId::Text(index)) {
-                continue;
-            }
-            let Some(attachment) = text.attach else {
-                continue;
-            };
-            let anchor = match attachment.target {
-                TextTarget::Shape(id) => self
-                    .shapes
-                    .iter()
-                    .position(|shape| shape.id == id)
-                    .filter(|index| selected(ItemId::Shape(*index)))
-                    .map(|index| transform.shape(&self.shapes[index]).centre()),
-                TextTarget::Stroke(id) => self
-                    .strokes
-                    .iter()
-                    .position(|stroke| stroke.id == id)
-                    .filter(|index| selected(ItemId::Stroke(*index)))
-                    .and_then(|index| transform.stroke(&self.strokes[index]).anchor()),
-            };
-            let Some(anchor) = anchor else {
-                continue;
-            };
-            let mut item = text.clone();
-            item.x = anchor[0] + attachment.offset[0];
-            item.y = anchor[1] + attachment.offset[1];
-            live.push(LiveText {
-                id: ItemId::Text(index),
-                item,
-            });
-        }
-        live
-    }
-
-    /// Clear attachments whose target is no longer on this board.
+    /// Clear attachments whose target shape is no longer on this board.
     pub fn drop_dangling_attachments(&mut self) {
-        let shape_ids: BTreeSet<u64> = self
+        let ids: BTreeSet<u64> = self
             .shapes
             .iter()
             .map(|shape| shape.id)
             .filter(|id| *id != 0)
             .collect();
-        let stroke_ids: BTreeSet<u64> = self
-            .strokes
-            .iter()
-            .map(|stroke| stroke.id)
-            .filter(|id| *id != 0)
-            .collect();
         for stroke in &mut self.strokes {
             for attachment in &mut stroke.attach {
-                if attachment.is_some_and(|attachment| !shape_ids.contains(&attachment.shape)) {
+                if attachment.is_some_and(|attachment| !ids.contains(&attachment.shape)) {
                     *attachment = None;
                 }
             }
         }
         for shape in &mut self.shapes {
             for attachment in &mut shape.attach {
-                if attachment.is_some_and(|attachment| !shape_ids.contains(&attachment.shape)) {
+                if attachment.is_some_and(|attachment| !ids.contains(&attachment.shape)) {
                     *attachment = None;
                 }
-            }
-        }
-        for text in &mut self.texts {
-            if text
-                .attach
-                .is_some_and(|attachment| match attachment.target {
-                    TextTarget::Shape(id) => !shape_ids.contains(&id),
-                    TextTarget::Stroke(id) => !stroke_ids.contains(&id),
-                })
-            {
-                text.attach = None;
             }
         }
     }
@@ -1185,7 +892,6 @@ impl Board {
             Some(ItemId::Stroke(i)) => {
                 let box_ = self.strokes[i].paint_bounds();
                 self.strokes.remove(i);
-                self.drop_dangling_attachments();
                 box_
             }
             Some(ItemId::Text(i)) => {
@@ -1218,8 +924,8 @@ impl Board {
     /// indices they had, so an element that is named elsewhere cannot be reached by a copy landing in the
     /// middle of the list.
     pub fn duplicate(&mut self, items: &[ItemId]) -> (Vec<ItemId>, Option<Rect>) {
-        // Every copied shape and stroke gets a fresh id, and connectors and texts copied with it are
-        // re-pointed to the copies rather than to the originals they were attached to.
+        // Every copied shape gets a fresh id, and connectors copied with it are re-pointed to the
+        // copies rather than to the originals they were attached to.
         let mut shape_ids = BTreeMap::new();
         let mut copy_ids = BTreeMap::new();
         let mut next = self.next_shape_id();
@@ -1234,27 +940,12 @@ impl Board {
                 next += 1;
             }
         }
-        let mut stroke_ids = BTreeMap::new();
-        let mut stroke_copy_ids = BTreeMap::new();
-        let mut next_stroke = self.next_stroke_id();
-        for id in items {
-            if let ItemId::Stroke(index) = *id
-                && let Some(stroke) = self.strokes.get(index)
-            {
-                stroke_copy_ids.insert(index, next_stroke);
-                if stroke.id != 0 {
-                    stroke_ids.insert(stroke.id, next_stroke);
-                }
-                next_stroke += 1;
-            }
-        }
         let mut copies = Vec::with_capacity(items.len());
         let mut box_: Option<Rect> = None;
         for id in items {
             match *id {
                 ItemId::Stroke(i) => {
                     if let Some(mut s) = self.strokes.get(i).cloned() {
-                        s.id = stroke_copy_ids.get(&i).copied().unwrap_or(0);
                         for attachment in &mut s.attach {
                             *attachment = attachment.and_then(|attachment| {
                                 shape_ids.get(&attachment.shape).map(|id| Attachment {
@@ -1269,8 +960,7 @@ impl Board {
                     }
                 }
                 ItemId::Text(i) => {
-                    if let Some(mut t) = self.texts.get(i).cloned() {
-                        t.attach = remap_text_attachment(t.attach, &shape_ids, &stroke_ids);
+                    if let Some(t) = self.texts.get(i).cloned() {
                         copies.push(ItemId::Text(self.texts.len()));
                         union_into(&mut box_, Some(t.paint_bounds()));
                         self.texts.push(t);
@@ -1340,9 +1030,9 @@ impl Board {
     pub fn append(&mut self, other: &Board) -> (Vec<ItemId>, Option<Rect>) {
         let mut ids = Vec::new();
         let mut box_: Option<Rect> = None;
-        // Ids are board-local: every appended shape and stroke gets a fresh one, and a connector or
-        // text copied with it is re-pointed. A target that stayed on the source board is cut loose
-        // rather than left naming an unrelated element here.
+        // Ids are board-local: every appended shape gets a fresh one, and a connector copied with
+        // it is re-pointed. A connector whose target stayed on the source board is cut loose rather
+        // than left naming an unrelated shape here.
         let mut shape_ids = BTreeMap::new();
         let mut shapes = Vec::new();
         let first_id = self.next_shape_id();
@@ -1354,13 +1044,8 @@ impl Board {
             copy.id = id;
             shapes.push(copy);
         }
-        let mut stroke_ids = BTreeMap::new();
-        for (id, s) in (self.next_stroke_id()..).zip(&other.strokes) {
+        for s in &other.strokes {
             let mut copy = s.clone();
-            if copy.id != 0 {
-                stroke_ids.insert(copy.id, id);
-            }
-            copy.id = id;
             for attachment in &mut copy.attach {
                 *attachment = attachment.and_then(|attachment| {
                     shape_ids.get(&attachment.shape).map(|id| Attachment {
@@ -1374,11 +1059,9 @@ impl Board {
             self.strokes.push(copy);
         }
         for t in &other.texts {
-            let mut copy = t.clone();
-            copy.attach = remap_text_attachment(copy.attach, &shape_ids, &stroke_ids);
             ids.push(ItemId::Text(self.texts.len()));
-            union_into(&mut box_, Some(copy.paint_bounds()));
-            self.texts.push(copy);
+            union_into(&mut box_, Some(t.paint_bounds()));
+            self.texts.push(t.clone());
         }
         for mut shape in shapes {
             for attachment in &mut shape.attach {
@@ -1535,26 +1218,6 @@ fn union_into(acc: &mut Option<Rect>, box_: Option<Rect>) {
     };
 }
 
-/// Re-point a text attachment at the copy of its target. A target that stayed behind is cut loose
-/// rather than left naming an unrelated element here.
-fn remap_text_attachment(
-    attachment: Option<TextAttachment>,
-    shape_ids: &BTreeMap<u64, u64>,
-    stroke_ids: &BTreeMap<u64, u64>,
-) -> Option<TextAttachment> {
-    let attachment = attachment?;
-    match attachment.target {
-        TextTarget::Shape(id) => shape_ids.get(&id).map(|id| TextAttachment {
-            target: TextTarget::Shape(*id),
-            offset: attachment.offset,
-        }),
-        TextTarget::Stroke(id) => stroke_ids.get(&id).map(|id| TextAttachment {
-            target: TextTarget::Stroke(*id),
-            offset: attachment.offset,
-        }),
-    }
-}
-
 /// Remove `indices` from `list`, highest first, skipping any that are past its end.
 fn remove_indices<T>(list: &mut Vec<T>, mut indices: Vec<usize>) {
     indices.sort_unstable();
@@ -1576,8 +1239,7 @@ impl Shape {
         )
     }
 
-    /// The centre of the box the shape spans, which is the anchor a text attachment is stored
-    /// against.
+    /// The centre of the box `from` and `to` span.
     pub fn centre(&self) -> [f32; 2] {
         self.box_geometry().0
     }
@@ -1600,80 +1262,6 @@ impl Shape {
     /// A world point in the shape's unrotated frame, which is where its box and attachments live.
     fn to_local(&self, p: [f32; 2]) -> [f32; 2] {
         rotate_about(p, self.centre(), -self.turn_angle())
-    }
-
-    /// The outward unit normal of a closed shape at a point on its border. A line or an arrow has no
-    /// interior, so its normal is taken away from the shape's centre.
-    pub fn outward_normal(&self, p: [f32; 2]) -> [f32; 2] {
-        let (centre, _) = self.box_geometry();
-        let box_ = rect_of(self.from, self.to);
-        let local = self.to_local(p);
-        let normal = match self.kind {
-            ShapeKind::Circle => {
-                unit(local[0] - centre[0], local[1] - centre[1]).unwrap_or([1.0, 0.0])
-            }
-            ShapeKind::Rect => {
-                let candidates = [
-                    (local[0] - box_.x, [-1.0, 0.0]),
-                    (box_.x + box_.w - local[0], [1.0, 0.0]),
-                    (local[1] - box_.y, [0.0, -1.0]),
-                    (box_.y + box_.h - local[1], [0.0, 1.0]),
-                ];
-                candidates
-                    .into_iter()
-                    .min_by(|(a, _), (b, _)| a.abs().total_cmp(&b.abs()))
-                    .map(|(_, normal)| normal)
-                    .unwrap_or([1.0, 0.0])
-            }
-            ShapeKind::Diamond => {
-                let x1 = box_.x + box_.w;
-                let y1 = box_.y + box_.h;
-                let corners = [
-                    [centre[0], box_.y],
-                    [x1, centre[1]],
-                    [centre[0], y1],
-                    [box_.x, centre[1]],
-                ];
-                let mut best = [1.0, 0.0];
-                let mut best_d = f32::INFINITY;
-                for index in 0..4 {
-                    let (a, b) = (corners[index], corners[(index + 1) % 4]);
-                    let point = nearest_on_segment(local, a, b);
-                    let d = dist_squared(point, local);
-                    if d < best_d {
-                        best_d = d;
-                        if let Some(mut normal) = unit(b[1] - a[1], a[0] - b[0]) {
-                            if (normal[0] * (local[0] - centre[0])
-                                + normal[1] * (local[1] - centre[1]))
-                                < 0.0
-                            {
-                                normal = [-normal[0], -normal[1]];
-                            }
-                            best = normal;
-                        }
-                    }
-                }
-                best
-            }
-            ShapeKind::Line | ShapeKind::Arrow => {
-                unit(local[0] - centre[0], local[1] - centre[1]).unwrap_or([1.0, 0.0])
-            }
-        };
-        if self.kind.is_closed() {
-            rotate_about(normal, [0.0, 0.0], self.turn_angle())
-        } else {
-            normal
-        }
-    }
-
-    /// The nearest point on a line or arrow's ink, with the direction of that ink. Closed shapes use
-    /// [`Self::nearest_boundary`] instead.
-    pub fn nearest_on_ink(&self, p: [f32; 2]) -> ([f32; 2], [f32; 2]) {
-        let point = nearest_on_segment(p, self.from, self.to);
-        (
-            point,
-            unit(self.to[0] - self.from[0], self.to[1] - self.from[1]).unwrap_or([1.0, 0.0]),
-        )
     }
 
     /// The point on this shape's outline nearest to `p`, for a closed shape. Lines and arrows have
@@ -1939,39 +1527,6 @@ impl Stroke {
         } else {
             bounds.grown(SKETCH_SLACK)
         })
-    }
-
-    /// The sample a text attachment is measured from: the first point, which every translation of
-    /// the stroke carries with it.
-    pub fn anchor(&self) -> Option<[f32; 2]> {
-        self.points.first().copied()
-    }
-
-    /// The nearest point on the polyline to `p`, with the direction of the segment it lies on. A
-    /// single sample has no direction of its own, so `[1, 0]` is returned and the caller picks a
-    /// side from where the text is.
-    pub fn nearest_point(&self, p: [f32; 2]) -> Option<([f32; 2], [f32; 2])> {
-        match self.points.as_slice() {
-            [] => None,
-            [only] => Some((*only, [1.0, 0.0])),
-            points => {
-                let mut best = points[0];
-                let mut best_d = f32::INFINITY;
-                let mut direction = [1.0, 0.0];
-                for pair in points.windows(2) {
-                    let point = nearest_on_segment(p, pair[0], pair[1]);
-                    let d = dist_squared(point, p);
-                    if d < best_d {
-                        best_d = d;
-                        best = point;
-                        if let Some(unit) = unit(pair[1][0] - pair[0][0], pair[1][1] - pair[0][1]) {
-                            direction = unit;
-                        }
-                    }
-                }
-                Some((best, direction))
-            }
-        }
     }
 
     /// The seed the hand-drawn style is drawn from: its colour and width and the sample it started
@@ -3162,24 +2717,6 @@ fn dist_squared(p: [f32; 2], q: [f32; 2]) -> f32 {
     dx * dx + dy * dy
 }
 
-/// The unit vector in `(dx, dy)`, or `None` when there is no direction to take.
-fn unit(dx: f32, dy: f32) -> Option<[f32; 2]> {
-    let len = (dx * dx + dy * dy).sqrt();
-    (len > f32::EPSILON).then(|| [dx / len, dy / len])
-}
-
-/// How far an axis-aligned box reaches from its centre in `direction`: the support function of a
-/// rectangle, which is what puts the box's own edge a fixed distance from a drawing's ink.
-fn support_along(box_: Rect, direction: [f32; 2]) -> f32 {
-    direction[0].abs() * box_.w / 2.0 + direction[1].abs() * box_.h / 2.0
-}
-
-/// The direction from a point on a drawing's ink toward the text: where the text is, or a side of
-/// the segment when the text's centre sits exactly on the ink.
-fn toward_text(centre: [f32; 2], point: [f32; 2], along: [f32; 2]) -> [f32; 2] {
-    unit(centre[0] - point[0], centre[1] - point[1]).unwrap_or([-along[1], along[0]])
-}
-
 fn segment_dist_squared(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
     dist_squared(p, nearest_on_segment(p, a, b))
 }
@@ -3371,9 +2908,6 @@ pub struct Overlay {
     /// Attached connectors redrawn while a selection gesture moves their shapes. The document
     /// raster still holds their old geometry, so the frame paints these and skips those ids.
     pub connectors: Vec<LiveConnector>,
-    /// Texts redrawn while a selection gesture moves the drawings they are attached to. Like
-    /// `connectors`, the raster holds the committed box and the frame paints these in its place.
-    pub attached_texts: Vec<LiveText>,
     /// The rectangle a selection drag is sweeping, before it becomes a selection.
     pub marquee: Option<Rect>,
 }
