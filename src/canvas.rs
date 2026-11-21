@@ -178,8 +178,13 @@ pub enum ToolbarAction {
     Board(usize),
     /// Create a board and pick it.
     NewBoard,
+    /// Put the board at this index of the panel's list into its delete confirmation: the row itself
+    /// becomes the question instead of the name.
+    AskDeleteBoard(usize),
     /// Delete the board at this index of the panel's list, from that board's own row.
     DeleteBoard(usize),
+    /// Leave the board delete confirmation without deleting anything.
+    CancelDeleteBoard,
     /// Rename the board at this index of the panel's list, from that board's own row. The one row
     /// press that leaves its list open: the row it edits is in the list.
     RenameBoard(usize),
@@ -2829,6 +2834,9 @@ pub struct Toolbar {
     pub target: Option<Target>,
     /// The board's name being edited in the list, which its row draws instead of the name.
     pub rename: Option<BoardEdit>,
+    /// The board whose row is asking whether to delete it. The row covers its name with the question
+    /// and its two buttons with `no`/`yes`; the list stays open while it is set.
+    pub delete_confirm: Option<String>,
     /// The boards the panel lists, in name order, with the one this output shows marked. Carried in the
     /// rail's own value because the panel's rows are document names: the layout, the hit test and the
     /// cache all read one value rather than three functions taking the list beside the rail.

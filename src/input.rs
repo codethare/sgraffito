@@ -95,9 +95,10 @@ pub fn edit_action(keysym: Keysym, ctrl: bool, preedit_active: bool) -> EditActi
 /// The index a row action names, when it names a row of the boards list.
 fn board_index(action: ToolbarAction) -> Option<usize> {
     match action {
-        ToolbarAction::Board(i) | ToolbarAction::DeleteBoard(i) | ToolbarAction::RenameBoard(i) => {
-            Some(i)
-        }
+        ToolbarAction::Board(i)
+        | ToolbarAction::AskDeleteBoard(i)
+        | ToolbarAction::DeleteBoard(i)
+        | ToolbarAction::RenameBoard(i) => Some(i),
         _ => None,
     }
 }
@@ -1148,6 +1149,7 @@ impl App {
             ToolbarAction::Board(index) => {
                 let picked = board.or_else(|| self.doc.names().nth(index).cloned());
                 let Some(name) = picked else { return };
+                self.delete_confirm = None;
                 if let Some(target) = self.target.take() {
                     self.apply_target(acting, target, &name);
                 } else {
@@ -1155,13 +1157,29 @@ impl App {
                 }
             }
             ToolbarAction::NewBoard => {
+                self.delete_confirm = None;
                 self.new_board(acting);
+            }
+            // The X asks first: the row itself becomes the question, and nothing is removed until the
+            // `yes` button that replaces the X is pressed.
+            ToolbarAction::AskDeleteBoard(index) => {
+                let name = board.or_else(|| self.doc.names().nth(index).cloned());
+                if let Some(name) = name {
+                    self.delete_confirm = Some(name);
+                    self.refresh_toolbar();
+                }
             }
             ToolbarAction::DeleteBoard(index) => {
                 // The row names its board by index, so a click needs no output to know what it means.
                 let name = board.or_else(|| self.doc.names().nth(index).cloned());
+                self.delete_confirm = None;
                 if let Some(name) = name {
                     self.delete_board_named(&name);
+                }
+            }
+            ToolbarAction::CancelDeleteBoard => {
+                if self.delete_confirm.take().is_some() {
+                    self.refresh_toolbar();
                 }
             }
             ToolbarAction::RenameBoard(index) => {

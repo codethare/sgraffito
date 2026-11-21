@@ -44,6 +44,7 @@ fn config_paints_the_palette_and_the_note_border() {
             clips: Vec::new(),
             target: None,
             rename: None,
+            delete_confirm: None,
             boards: Vec::new(),
             shared: false,
             backdrop: sgraffito::canvas::Backdrop::Black,

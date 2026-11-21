@@ -261,6 +261,7 @@ fn rail_state() -> Toolbar {
         clips: Vec::new(),
         target: None,
         rename: None,
+        delete_confirm: None,
         boards: Vec::new(),
         shared: false,
         backdrop: Backdrop::Black,

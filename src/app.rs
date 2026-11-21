@@ -376,6 +376,9 @@ pub struct App {
     /// The board's name being edited in the list, if any. A name is typed where it is read, so this is
     /// app-level state and not an output's.
     pub(crate) rename: Option<Rename>,
+    /// The board whose row is asking whether to delete it. The name survives a list re-sort; it is
+    /// cleared when the panel closes, a pick is made, or `no` is chosen.
+    pub(crate) delete_confirm: Option<String>,
     /// When the open panel opened, for its own transition: `None` when no panel is open. Panels close at
     /// once, so only the opening has a clock.
     panel_open_since: Option<Instant>,
@@ -481,6 +484,7 @@ impl App {
             target: None,
             clips: Vec::new(),
             rename: None,
+            delete_confirm: None,
             panel_open_since: None,
             text_input_manager: None,
             text_input: None,
@@ -734,6 +738,7 @@ impl App {
                         preedit: rename.preedit.clone(),
                         caret: caret_visible(rename.since.elapsed()),
                     }),
+                    delete_confirm: self.delete_confirm.clone(),
                     boards: self
                         .doc
                         .names()
@@ -927,6 +932,7 @@ impl App {
         self.size_open = false;
         self.clipboard_open = false;
         self.more = open;
+        self.delete_confirm = None;
         self.panel_open_since = open.then(Instant::now);
         self.toolbar_hover = None;
         self.toolbar_hover_since = None;
@@ -944,6 +950,7 @@ impl App {
         self.boards_open = open;
         if !open {
             self.target = None;
+            self.delete_confirm = None;
         }
         self.panel_open_since = open.then(Instant::now);
         self.toolbar_hover = None;
@@ -961,6 +968,7 @@ impl App {
         self.size_open = false;
         self.clipboard_open = open;
         self.target = None;
+        self.delete_confirm = None;
         self.panel_open_since = open.then(Instant::now);
         self.toolbar_hover = None;
         self.toolbar_hover_since = None;
@@ -970,11 +978,15 @@ impl App {
     /// Dismiss every panel: what a press outside one, a press on another rail block and a mode switch do.
     /// The setters are exclusive, so only the one that changes anything repaints the rail.
     pub(crate) fn close_panels(&mut self) {
+        let confirming = self.delete_confirm.take().is_some();
         self.set_more(false);
         self.set_boards(false);
         self.set_size(false);
         self.set_clipboard(false);
         self.target = None;
+        if confirming {
+            self.refresh_toolbar();
+        }
     }
 
     pub(crate) fn toggle_boards(&mut self) {
@@ -991,6 +1003,7 @@ impl App {
         self.clipboard_open = false;
         self.more = false;
         self.size_open = open;
+        self.delete_confirm = None;
         self.panel_open_since = open.then(Instant::now);
         self.refresh_toolbar();
     }
@@ -1162,6 +1175,7 @@ impl App {
             }
         }
         self.target = Some(target);
+        self.delete_confirm = None;
         if self.boards_open {
             self.refresh_toolbar();
         } else {
@@ -1320,6 +1334,7 @@ impl App {
     pub(crate) fn begin_rename(&mut self, index: usize, name: &str) {
         self.end_text_edit();
         self.commit_transient_drawing();
+        self.delete_confirm = None;
         self.rename = Some(Rename {
             index,
             since: Instant::now(),

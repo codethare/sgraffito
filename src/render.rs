@@ -242,8 +242,10 @@ fn key_of(action: ToolbarAction) -> Option<&'static str> {
         ToolbarAction::Boards
         | ToolbarAction::Board(_)
         | ToolbarAction::NewBoard
+        | ToolbarAction::AskDeleteBoard(_)
         | ToolbarAction::DeleteBoard(_)
         | ToolbarAction::RenameBoard(_) => "C",
+        ToolbarAction::CancelDeleteBoard => return None,
         ToolbarAction::Shared => "F",
         // No single letter: `Ctrl+Shift+V` opens the history, and the row says so in the drawer.
         ToolbarAction::Clipboard => "Ctrl+Shift+V",
@@ -560,7 +562,9 @@ pub fn picks_from_panel(action: ToolbarAction) -> bool {
             action,
             ToolbarAction::Board(_)
                 | ToolbarAction::NewBoard
+                | ToolbarAction::AskDeleteBoard(_)
                 | ToolbarAction::DeleteBoard(_)
+                | ToolbarAction::CancelDeleteBoard
                 | ToolbarAction::RenameBoard(_)
                 | ToolbarAction::SizeStep(_)
                 | ToolbarAction::Clip(_)
@@ -593,11 +597,13 @@ pub fn panel_stays_open(hover: Option<ToolbarAction>, owner: Option<ToolbarActio
 /// press on a row that must not be read as a press outside it.
 pub fn closes_panel_on_pick(action: ToolbarAction) -> bool {
     // A width step and a rename work on what the panel holds rather than choosing from it, so they
-    // leave it open.
+    // leave it open. The delete question and its `no` do too: both replace or restore the row itself.
     picks_from_panel(action)
         && !matches!(
             action,
             ToolbarAction::SizeStep(_)
+                | ToolbarAction::AskDeleteBoard(_)
+                | ToolbarAction::CancelDeleteBoard
                 | ToolbarAction::RenameBoard(_)
                 | ToolbarAction::Link
                 | ToolbarAction::Clipboard
@@ -689,9 +695,21 @@ fn row_label<'a>(toolbar: &'a Toolbar, row: &'a Block) -> &'a str {
     &row.label
 }
 
+/// Whether the row at `index` is currently asking whether to delete its board.
+fn board_confirms(toolbar: &Toolbar, index: usize) -> bool {
+    toolbar
+        .boards
+        .get(index)
+        .is_some_and(|board| toolbar.delete_confirm.as_deref() == Some(board.name.as_str()))
+}
+
 /// Whether a board's row shows its buttons, as `(delete, rename)`: the pointer is on the row or on one
-/// of them, the document has a board to delete, and the row is not the one being renamed.
+/// of them, the document has a board to delete, and the row is not the one being renamed. A row asking
+/// about a deletion always shows both slots, which hold `no` and `yes` instead of the icons.
 fn board_actions(toolbar: &Toolbar, index: usize) -> Option<(bool, bool)> {
+    if board_confirms(toolbar, index) {
+        return Some((true, true));
+    }
     if toolbar
         .rename
         .as_ref()
@@ -703,6 +721,7 @@ fn board_actions(toolbar: &Toolbar, index: usize) -> Option<(bool, bool)> {
         toolbar.hover,
         Some(
             ToolbarAction::Board(i)
+                | ToolbarAction::AskDeleteBoard(i)
                 | ToolbarAction::DeleteBoard(i)
                 | ToolbarAction::RenameBoard(i)
         ) if i == index
@@ -722,7 +741,9 @@ fn board_rows(toolbar: &Toolbar) -> Vec<Block> {
         .map(|(index, board)| Block {
             mark: Mark::None,
             column: 1,
-            label: if toolbar.target.is_some() {
+            label: if board_confirms(toolbar, index) {
+                format!("delete {}?", board.name)
+            } else if toolbar.target.is_some() {
                 format!("→ {}", board.name)
             } else {
                 board.name.clone()
@@ -1730,32 +1751,56 @@ impl Renderer {
                     Some(ToolbarAction::Board(index)) => index,
                     _ => 0,
                 };
-                let mut actions = Vec::new();
-                if delete {
-                    actions.push((Icon::Cross, ToolbarAction::DeleteBoard(index)));
-                }
-                actions.push((Icon::Pencil, ToolbarAction::RenameBoard(index)));
-                for (number, (icon, action)) in actions.iter().enumerate() {
-                    let slot = (actions.len() - number) as f32;
-                    let square = Rect {
-                        x: (ox + column_x + width - slot * TOOLBAR_BLOCK) * scale,
-                        y: (oy + control.y) * scale,
-                        w: TOOLBAR_BLOCK * scale,
-                        h: TOOLBAR_BLOCK * scale,
-                    };
-                    // The button under the pointer states its own shape: a wash inside a hairline,
-                    // inset far enough that the outline never meets the row's own rounded edge.
-                    if toolbar.hover == Some(*action) {
-                        let ring = square.grown(-TOOLBAR_HOVER_INSET * scale);
-                        round_rect(
+                if board_confirms(toolbar, index) {
+                    let actions = [
+                        ("no", ToolbarAction::CancelDeleteBoard),
+                        ("yes", ToolbarAction::DeleteBoard(index)),
+                    ];
+                    for (number, (label, action)) in actions.iter().enumerate() {
+                        let slot = (actions.len() - number) as f32;
+                        let square = Rect {
+                            x: (ox + column_x + width - slot * TOOLBAR_BLOCK) * scale,
+                            y: (oy + control.y) * scale,
+                            w: TOOLBAR_BLOCK * scale,
+                            h: TOOLBAR_BLOCK * scale,
+                        };
+                        self.draw_board_button(
                             pixmap,
-                            ring,
-                            (TOOLBAR_RADIUS - TOOLBAR_HOVER_INSET) * scale,
-                            parse_hex(TOOLBAR_HOVER_FILL),
-                            Some((parse_hex(TOOLBAR_FOREGROUND), TOOLBAR_HAIRLINE * scale)),
+                            *action,
+                            toolbar.hover == Some(*action),
+                            square,
+                            scale,
+                            label,
                         );
                     }
-                    draw_icon(pixmap, *icon, square, scale, TOOLBAR_LABEL_TEXT);
+                } else {
+                    let mut actions = Vec::new();
+                    if delete {
+                        actions.push((Icon::Cross, ToolbarAction::AskDeleteBoard(index)));
+                    }
+                    actions.push((Icon::Pencil, ToolbarAction::RenameBoard(index)));
+                    for (number, (icon, action)) in actions.iter().enumerate() {
+                        let slot = (actions.len() - number) as f32;
+                        let square = Rect {
+                            x: (ox + column_x + width - slot * TOOLBAR_BLOCK) * scale,
+                            y: (oy + control.y) * scale,
+                            w: TOOLBAR_BLOCK * scale,
+                            h: TOOLBAR_BLOCK * scale,
+                        };
+                        // The button under the pointer states its own shape: a wash inside a hairline,
+                        // inset far enough that the outline never meets the row's own rounded edge.
+                        if toolbar.hover == Some(*action) {
+                            let ring = square.grown(-TOOLBAR_HOVER_INSET * scale);
+                            round_rect(
+                                pixmap,
+                                ring,
+                                (TOOLBAR_RADIUS - TOOLBAR_HOVER_INSET) * scale,
+                                parse_hex(TOOLBAR_HOVER_FILL),
+                                Some((parse_hex(TOOLBAR_FOREGROUND), TOOLBAR_HAIRLINE * scale)),
+                            );
+                        }
+                        draw_icon(pixmap, *icon, square, scale, TOOLBAR_LABEL_TEXT);
+                    }
                 }
             }
             // The caret sits after the buffer's text, and the preedit after the caret: a name is
@@ -2062,10 +2107,15 @@ impl Renderer {
                 .find(|(_, action)| Some(*action) == control.block.action)
                 .map_or(TOOLBAR_BLOCK, |(rect, _)| rect.h);
             let mut actions = Vec::new();
-            if delete {
+            if board_confirms(toolbar, index) {
+                actions.push(ToolbarAction::CancelDeleteBoard);
                 actions.push(ToolbarAction::DeleteBoard(index));
+            } else {
+                if delete {
+                    actions.push(ToolbarAction::AskDeleteBoard(index));
+                }
+                actions.push(ToolbarAction::RenameBoard(index));
             }
-            actions.push(ToolbarAction::RenameBoard(index));
             for (number, action) in actions.iter().enumerate() {
                 let slot = (actions.len() - number) as f32;
                 hits.push((
@@ -2160,6 +2210,53 @@ impl Renderer {
         buffer.set_text(text, &Attrs::new(), Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut self.font_system, false);
         buffer.layout_runs().map(|r| r.line_w).fold(0.0, f32::max)
+    }
+
+    /// One word button in a board row: the confirmation's `no` and `yes`. It uses the same hover ring
+    /// and square as the icon buttons; the word is centred in the square instead of an icon.
+    fn draw_board_button(
+        &mut self,
+        pixmap: &mut PixmapMut,
+        action: ToolbarAction,
+        hover: bool,
+        square: Rect,
+        scale: f32,
+        label: &str,
+    ) {
+        if hover {
+            let ring = square.grown(-TOOLBAR_HOVER_INSET * scale);
+            round_rect(
+                pixmap,
+                ring,
+                (TOOLBAR_RADIUS - TOOLBAR_HOVER_INSET) * scale,
+                parse_hex(TOOLBAR_HOVER_FILL),
+                Some((parse_hex(TOOLBAR_FOREGROUND), TOOLBAR_HAIRLINE * scale)),
+            );
+        }
+        let width = self.text_width(label, TOOLBAR_TEXT_SIZE);
+        let item = toolbar_text(
+            square.x / scale + (TOOLBAR_BLOCK - width) / 2.0,
+            square.y / scale,
+            TOOLBAR_BLOCK,
+            TOOLBAR_TEXT_SIZE,
+            if matches!(action, ToolbarAction::DeleteBoard(_)) {
+                TOOLBAR_ACCENT
+            } else {
+                TOOLBAR_FOREGROUND
+            },
+            label,
+        );
+        self.draw_text(
+            pixmap,
+            &item,
+            Screen {
+                scale,
+                view: View::default(),
+            },
+            None,
+            None,
+            None,
+        );
     }
 
     /// Shapes `text` at the size the view puts on screen. The prepared box comes back in **canvas**
@@ -3930,6 +4027,7 @@ mod tests {
         let rail = Toolbar {
             size_open: true,
             rename: None,
+            delete_confirm: None,
             ..crate::render::tests::rail_for_legend()
         };
         let (w, h) = (900.0, 1000.0);
@@ -4391,7 +4489,7 @@ mod tests {
         let (x, y, w) = row(&on);
         assert_eq!(
             hit(&on, x + w - 2.0 * TOOLBAR_BLOCK + 8.0, y + 8.0),
-            Some(ToolbarAction::DeleteBoard(0))
+            Some(ToolbarAction::AskDeleteBoard(0))
         );
         assert_eq!(
             hit(&on, x + w - TOOLBAR_BLOCK + 8.0, y + 8.0),
@@ -4403,7 +4501,7 @@ mod tests {
             "the name's box did not stop before the buttons"
         );
         // On a button: both stay up, or the row would flicker as the pointer reached for them.
-        let held = rail(Some(ToolbarAction::DeleteBoard(0)));
+        let held = rail(Some(ToolbarAction::AskDeleteBoard(0)));
         let (x, y, w) = row(&held);
         assert_eq!(
             hit(&held, x + w - TOOLBAR_BLOCK + 8.0, y + 8.0),
@@ -4412,6 +4510,23 @@ mod tests {
         );
         assert!(board_actions(&held, 0).is_some());
         assert!(board_actions(&rail(None), 0).is_none());
+
+        // Once the X is pressed the row asks in place: its two slots become `no` and `yes`, and
+        // they answer even with the pointer nowhere near the row.
+        let asking = Toolbar {
+            delete_confirm: Some("laptop".into()),
+            ..rail(None)
+        };
+        let (x, y, w) = row(&asking);
+        assert_eq!(
+            hit(&asking, x + w - 2.0 * TOOLBAR_BLOCK + 8.0, y + 8.0),
+            Some(ToolbarAction::CancelDeleteBoard)
+        );
+        assert_eq!(
+            hit(&asking, x + w - TOOLBAR_BLOCK + 8.0, y + 8.0),
+            Some(ToolbarAction::DeleteBoard(0))
+        );
+        assert!(board_actions(&asking, 0).is_some());
     }
 
     /// A document's last board has nothing to delete: its row shows the rename alone.
@@ -4429,14 +4544,41 @@ mod tests {
         assert_eq!(board_actions(&toolbar, 0), Some((false, true)));
     }
 
+    /// The question replaces the name in the row itself, with the two button slots now meaning
+    /// `no` and `yes`.
+    #[test]
+    fn a_delete_question_uses_the_board_row_itself() {
+        let boards = vec![crate::canvas::BoardRow {
+            name: "laptop".into(),
+            current: true,
+        }];
+        let toolbar = Toolbar {
+            boards_open: true,
+            boards,
+            delete_confirm: Some("laptop".into()),
+            ..crate::render::tests::rail_for_legend()
+        };
+        let rows = board_rows(&toolbar);
+        assert_eq!(rows[0].label, "delete laptop?");
+        assert_eq!(rows[0].action, Some(ToolbarAction::Board(0)));
+        assert_eq!(board_actions(&toolbar, 0), Some((true, true)));
+    }
+
     /// Delete is a pick that closes the list; the rename is the one row press that leaves it open,
     /// because the row it edits is in the list.
     #[test]
     fn a_rename_press_keeps_its_list_and_a_delete_press_closes_it() {
         assert!(picks_from_panel(ToolbarAction::DeleteBoard(0)));
         assert!(picks_from_panel(ToolbarAction::RenameBoard(0)));
+        assert!(picks_from_panel(ToolbarAction::AskDeleteBoard(0)));
+        assert!(picks_from_panel(ToolbarAction::CancelDeleteBoard));
         assert!(closes_panel_on_pick(ToolbarAction::DeleteBoard(0)));
         assert!(!closes_panel_on_pick(ToolbarAction::RenameBoard(0)));
+        assert!(
+            !closes_panel_on_pick(ToolbarAction::AskDeleteBoard(0)),
+            "asking must leave the row in place"
+        );
+        assert!(!closes_panel_on_pick(ToolbarAction::CancelDeleteBoard));
         assert!(panel_stays_open(
             Some(ToolbarAction::RenameBoard(0)),
             Some(ToolbarAction::Boards)
@@ -4698,6 +4840,7 @@ mod tests {
             clips: Vec::new(),
             target: None,
             rename: None,
+            delete_confirm: None,
             boards: Vec::new(),
             shared: false,
             backdrop: Backdrop::Black,
@@ -4993,6 +5136,7 @@ mod tests {
                 clips: Vec::new(),
                 target: None,
                 rename: None,
+                delete_confirm: None,
                 boards: Vec::new(),
                 shared: false,
                 backdrop: Backdrop::Black,
@@ -5340,6 +5484,7 @@ mod tests {
             clips: Vec::new(),
             target: None,
             rename: None,
+            delete_confirm: None,
             boards: Vec::new(),
             shared: false,
             backdrop: Backdrop::Black,
@@ -5449,6 +5594,7 @@ mod tests {
         let toolbar = Toolbar {
             size_open: true,
             rename: None,
+            delete_confirm: None,
             ..crate::render::tests::rail_for_legend()
         };
         let rows = size_rows(&toolbar);
@@ -5564,7 +5710,11 @@ mod tests {
                 | ToolbarAction::RenameBoard(_) => keysym == Keysym::C || keysym == Keysym::c,
                 // These live in the drawer (closed here) or in the clipboard list, and name no
                 // single key: their block labels are never walked by this test.
-                ToolbarAction::Link | ToolbarAction::Clipboard | ToolbarAction::Clip(_) => false,
+                ToolbarAction::Link
+                | ToolbarAction::Clipboard
+                | ToolbarAction::Clip(_)
+                | ToolbarAction::AskDeleteBoard(_)
+                | ToolbarAction::CancelDeleteBoard => false,
                 ToolbarAction::Backdrop(_) => false,
                 ToolbarAction::Size => unreachable!("no key, filtered above"),
             };
