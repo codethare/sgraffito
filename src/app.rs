@@ -1742,6 +1742,7 @@ impl App {
         self.selection_grab = None;
         self.pending_duplicate = None;
         self.pending_links.clear();
+        self.pending_text_snap = None;
         self.note_origin = None;
         self.note_sized = false;
         self.delete_confirm = None;

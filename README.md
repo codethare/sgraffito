@@ -68,7 +68,7 @@ Every mark on the canvas is drawn as a **hand-drawn** one: a stroke is a pen tha
 | `P` | pen |
 | `E` | eraser (deletes whole strokes, shapes or text boxes; hit radius 8 logical pixels) |
 | `T` | text tool: click to place a text box with that point as its top-left corner |
-| `S` | selection tool: click an element, or drag a marquee on empty space, then drag to move, grab a handle to resize, grab the handle above the frame to rotate |
+| `S` | selection tool: click an element, or drag a marquee on empty space, then drag to move, grab a handle to resize, grab the handle above the frame to rotate — circles, rectangles and diamonds turn as a whole, while lines and arrows turn their endpoints |
 | `O` `R` `D` `L` `A` | circle, rectangle, diamond, line, arrow: drag to draw the shape between the press point and the pointer |
 | `H` | hand: drag to pan the canvas |
 | `N` | sticky note: drag out the square to create one and start typing; click an existing one to write in it |
@@ -80,6 +80,7 @@ Every mark on the canvas is drawn as a **hand-drawn** one: a stroke is a pen tha
 | `[` / `]` | shrink / grow the active tool's size — pen width, or text size while the text tool is armed — and, with a selection held, the width of its strokes and shapes and the size of its text boxes |
 | `Esc` | close the open drawer, else cancel the drag in progress, else finish the text edit, else clear the selection, else return to the locked mode |
 | `Delete` | remove everything the selection holds, as one change |
+| `Ctrl`+`Z` | undo the last document change; outside a text box, because the editor owns the keys while it is focused |
 | `Ctrl`+`X` | cut the selection: exactly what `Ctrl`+`C` copies enters the clipboard history, then the originals are removed as one change |
 | `Tab` / `Shift+Tab` | walk the selection to the next / previous element on this output, in document order and wrapping at both ends |
 | `←` `→` `↑` `↓` | with something selected, move it by 1 logical pixel, or 10 while `Shift` is held; with nothing selected, pan the view by 40 pixels, or 400 with `Shift` |
@@ -93,6 +94,8 @@ Every mark on the canvas is drawn as a **hand-drawn** one: a stroke is a pen tha
 | while a text box is focused: `Ctrl`+`V` | paste the clipboard at the caret |
 
 While a text box is focused, printable characters plus `Backspace` and `Enter` (newline) go into that box at the caret, the arrow keys move the caret, `Ctrl`+`V` pastes the clipboard there, and `P`/`E`/`T`/digits are content instead of shortcuts. Clicking inside a committed box re-enters it with the caret at the end, whatever the script, because the click is tested against the region the renderer measured; clicking anywhere else finishes the edit in progress and keeps what was typed, and starting a new box beside an old one stays possible. `Esc` finishes the text edit without leaving edit mode, so a tool or size change is one keypress away; it clears a selection next, and only then locks. Text boxes grow only when `Enter` inserts a newline or a pasted selection has one; a long logical line is clipped at the output edge instead of being wrapped automatically. Ordinary committed text edits reuse the measured text region when possible; preedit and lifecycle transitions deliberately use a full redraw.
+
+`Ctrl`+`Z` steps back through document changes made in this sitting: one drawing gesture, one drag or nudge, one text-edit session or one clipboard paste is one step. The history is in memory, capped at 64 steps, and there is no redo; switching boards, panning, zooming, tools and panels are not document changes, so they are not undone.
 
 Pen width and text size are brush settings, like the colour: they apply to content created afterwards, and with a selection held they also step what it holds — each selected stroke's and shape's width by the pen step inside 1–16, each selected text box's size by the text step inside 8–72, and a note never, because its type size is its own — as one change per press. `[` and `]` adjust the active tool's size, bounded to 1–16 logical pixels for the pen and 8–72 for text. The selection tool creates nothing, so with it armed the readout and both keys stay on the pen width, which is the size the next stroke will take; a selected text box grows or shrinks without the readout moving, because the readout is the brush's.
 
@@ -177,20 +180,28 @@ Errors and state changes go to stderr and to `$XDG_STATE_HOME/sgraffito/sgraffit
 - With `select`, dragging a connected shape stretches every attached connector live, even when the connector is not selected. Both ends stay on their shapes, so a line between two shapes follows whichever end moved.
 - Attachments are saved with stable shape ids; deleting a shape clears the ends that pointed at it, and copying or moving shapes remaps their connectors to the copies.
 
+## Text attachment
+
+- Dragging a selection made only of `text` near a `circle`, `rectangle` or `diamond` border snaps the box just inside that border, between the drawn lines. Near a `line`, `arrow` or `pen`, it stays on the side it approached from, beside the ink.
+- The snap radius is 12 logical pixels. The gap is 4 logical pixels from the drawn ink, after the stroke's own half-width and the hand-drawn wander are accounted for.
+- Releasing the drag records the attachment. Moving the attached shape or stroke — by selection drag or arrow-key nudge — moves the text with it, live during the drag and on the final write.
+- Attachments name a stable shape id or stroke id. Deleting the target clears the text's attachment; copying remaps it to the copy.
+
 ## Data
 
 `$XDG_DATA_HOME/sgraffito/annotations.json` (default `~/.local/share/sgraffito/`):
 
 ```json
-{"version":6,
- "boards":{"office":{"strokes":[{"color":"#e01b24","width":3,"points":[[12,40],[14,44]],"attach":[null,null]}],
-  "texts":[{"x":100,"y":200,"color":"#ffffff","size":18,"text":"buy milk","link":"desk"}],
-  "shapes":[{"kind":"rect","color":"#3584e4","width":3,"from":[30,400],"to":[180,260],"id":1,"attach":[null,null]},
-            {"kind":"arrow","color":"#3584e4","width":3,"from":[180,430],"to":[400,430],"id":2,"attach":[{"shape":1,"at":[1.0,0.0]},null]}]}},
+{"version":7,
+ "boards":{"office":{"strokes":[{"color":"#e01b24","width":3,"points":[[12,40],[14,44]],"id":1,"attach":[null,null]}],
+  "texts":[{"x":100,"y":200,"color":"#ffffff","size":18,"text":"buy milk","link":"desk",
+            "attach":{"target":{"stroke":1},"offset":[88,160]}}],
+  "shapes":[{"kind":"rect","color":"#3584e4","width":3,"from":[30,400],"to":[180,260],"rotate":0.4,"id":2,"attach":[null,null]},
+            {"kind":"arrow","color":"#3584e4","width":3,"from":[180,430],"to":[400,430],"id":3,"attach":[{"shape":2,"at":[1.0,0.0]},null]}]}},
  "active":"office"}
 ```
 
-A shape is a `kind` (`circle`, `rect`, `diamond`, `line` or `arrow`), its colour, its width and its two points — never its outline, and never a box. Closed shapes also carry a stable `id`; a line, arrow or pen's `attach` names the shapes its two ends stick to, with `at` the point on that shape (the centre is `(0, 0)` and its half-extents are `1`). A text's optional `link` is the board it jumps to; it is absent from files written before version 5. Versions 1 to 5 load as well: old shapes get fresh ids and no attachments, and a version 1–3 `outputs` map, keyed by output name, becomes boards of the same name. `active` is the board picked last — what a screen connected after a restart shows. An unknown version is still backed up rather than guessed at.
+A shape is a `kind` (`circle`, `rect`, `diamond`, `line` or `arrow`), its colour, its width and its two points — never its outline, and never a box. A closed shape may also carry `rotate`, in radians about its centre; upright shapes omit it. Shapes and pen strokes carry stable board-local `id`s. A line, arrow or pen's `attach` names the shapes its two ends stick to, with `at` the point on that shape (the centre is `(0, 0)` and its half-extents are `1`). A text's optional `link` is the board it jumps to; `attach` is the drawing it follows, as `{"shape": id}` or `{"stroke": id}` plus the text origin's offset from that drawing's anchor. `link` is absent from files written before version 5, attachments before version 7. Versions 1 to 6 load as well: old shapes and strokes get fresh ids, old texts have no attachment, and a version 1–3 `outputs` map, keyed by output name, becomes boards of the same name. `active` is the board picked last — what a screen connected after a restart shows. An unknown version is still backed up rather than guessed at.
 
 - Coordinates are **canvas coordinates** — the canvas is unbounded and a board is one canvas — and annotations are bucketed by **board name**, not by output.
 - Changes land on disk within 1 second at most, written through a temp file in the same directory plus `rename`; `clear` and shutdown flush immediately. If a write fails, the change stays pending and the daemon retries without dropping the in-memory annotations.

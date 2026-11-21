@@ -320,3 +320,29 @@ fn tmpdir(tag: &str) -> PathBuf {
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
+
+#[test]
+fn text_snaps_inside_a_rotated_border() {
+    let mut turned = shape(ShapeKind::Rect, [0.0, 0.0], [200.0, 100.0], 7);
+    turned.rotate = std::f32::consts::FRAC_PI_2;
+    let mut board = board(vec![], vec![text(158.0, 40.0, "hi")], vec![turned]);
+    let snap = board
+        .snap_text(
+            &[ItemId::Text(0)],
+            Transform::Translate { dx: 0.0, dy: 0.0 },
+            12.0,
+        )
+        .expect("the turned border did not attract the text");
+    assert_eq!(snap.target, TextTarget::Shape(7));
+    board.texts[0] = snap.transform.text(&board.texts[0]);
+    let bounds = board.texts[0].bounds();
+    // The rectangle's local 200x100 box, turned a quarter turn about (100, 50), occupies
+    // x 50..150 and y -50..150. The snapped box must be wholly inside that.
+    assert!(
+        bounds.x >= 50.0
+            && bounds.x + bounds.w <= 150.0
+            && bounds.y >= -50.0
+            && bounds.y + bounds.h <= 150.0,
+        "the snapped text crossed the turned border: {bounds:?}"
+    );
+}
