@@ -46,8 +46,8 @@ use crate::canvas::{
     PEN_WIDTH_MIN, PEN_WIDTH_STEP, Press, Rect, SNAP_RADIUS, Selection, Shape, ShapeKind,
     TEXT_SIZE_MAX, TEXT_SIZE_MIN, TEXT_SIZE_STEP, Target, TextBuffer, TextItem, TextOverlay,
     Toolbar, Transform, View, ZOOM_STEP, Zoom, date_stamp, link_source, marquee_select, note_drag,
-    nudge_delta, selection_bounds, selection_frame, selection_frame_with, selection_press_with,
-    snap_square, stepped_size, toggle_selection,
+    nudge_delta, record_clip, selection_bounds, selection_frame, selection_frame_with,
+    selection_press_with, snap_square, stepped_size, toggle_selection,
 };
 
 pub use crate::canvas::{Tool, ToolbarAction};
@@ -1227,32 +1227,42 @@ impl App {
     }
 
     /// Copy the held elements into the app's own clipboard history. The newest copy is the one
-    /// `Ctrl+V` pastes; the panel lists the rest. An over-cap copy is refused whole.
-    pub(crate) fn copy_selection(&mut self) {
+    /// `Ctrl+V` pastes; the panel lists the rest. An over-cap copy is refused whole. Returns
+    /// whether an entry was recorded, which is what tells a cut it may remove the originals.
+    pub(crate) fn copy_selection(&mut self) -> bool {
         let Some(key) = self.keyboard_focus else {
-            return;
+            return false;
         };
         let Some((board_name, items)) = self.held(key) else {
             log("copy needs a selection");
-            return;
+            return false;
         };
         let Some(ann) = self.doc.boards.get(&board_name) else {
-            return;
+            return false;
         };
-        let copy = ann.copied(&items);
-        let Some(entry) = ClipEntry::new(copy) else {
+        let Some(count) = record_clip(&mut self.clips, ann, &items) else {
             log("copy refused: too large for the clipboard");
-            return;
+            return false;
         };
-        // A repeat copy of the same shape is not a second history entry: it moves to the front.
-        if let Some(index) = self.clips.iter().position(|clip| clip.board == entry.board) {
-            self.clips.remove(index);
-        }
-        let count = entry.items;
-        self.clips.insert(0, entry);
-        crate::canvas::trim_clipboard(&mut self.clips);
         self.refresh_toolbar();
         log(&format!("copied {count} elements"));
+        true
+    }
+
+    /// Cut the held elements: exactly what `Ctrl+C` copies enters the clipboard history, and the
+    /// same selection is then removed as one document change. With nothing held this does nothing,
+    /// and a copy the clipboard refuses removes nothing either, so a cut never loses content the
+    /// clipboard did not take.
+    pub(crate) fn cut_selection(&mut self) {
+        let Some(key) = self.keyboard_focus else {
+            return;
+        };
+        if self.held(key).is_none() {
+            return;
+        }
+        if self.copy_selection() {
+            self.delete_selection();
+        }
     }
 
     /// Paste clipboard entry `index`, newest first, onto the board this screen shows, a little offset.

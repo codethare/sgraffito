@@ -193,6 +193,12 @@ pub fn deletes_selection(keysym: Keysym) -> bool {
     matches!(keysym, Keysym::Delete | Keysym::KP_Delete)
 }
 
+/// Whether this key cuts the selection: `Ctrl+X`, which copies exactly what `Ctrl+C` would and
+/// then removes the originals. Nothing else cuts, and without `Ctrl` `X` is no shortcut at all.
+pub fn cuts_selection(ctrl: bool, keysym: Keysym) -> bool {
+    ctrl && matches!(keysym, Keysym::x | Keysym::X)
+}
+
 /// Key mapping while no text box is edited: `P`/`E`/`T`/`S` switch tools, and the five shape tools
 /// take the initials of what they draw.
 pub fn tool_for_keysym(keysym: Keysym) -> Option<Tool> {
@@ -423,6 +429,11 @@ impl KeyboardHandler for App {
             } else {
                 self.paste_newest();
             }
+        } else if cuts_selection(self.ctrl, event.keysym) {
+            // A cut is `Ctrl+C` plus the removal `Delete` makes, so the copy must land first:
+            // `cut_selection` removes nothing when the clipboard refuses it. A text box or a
+            // board name takes this key earlier, before it can reach the canvas.
+            self.cut_selection();
         } else if deletes_selection(event.keysym) {
             // The only key that removes content. It acts on the selection, so with nothing selected
             // it does nothing.

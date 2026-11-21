@@ -2352,6 +2352,26 @@ pub fn trim_clipboard(clips: &mut Vec<ClipEntry>) {
     }
 }
 
+/// Record a copy of `items` from `board` as the newest clipboard entry, and return how many
+/// elements it holds. `None` when there is nothing to copy or the copy is too large for the
+/// clipboard, in which case the history is left exactly as it was — the caller decides what that
+/// means for the document. This is the one place a copy is encoded, so `Ctrl+C` and a cut cannot
+/// disagree about what the clipboard holds.
+pub fn record_clip(clips: &mut Vec<ClipEntry>, board: &Board, items: &[ItemId]) -> Option<usize> {
+    if items.is_empty() {
+        return None;
+    }
+    let entry = ClipEntry::new(board.copied(items))?;
+    // A repeat copy of the same shape is not a second history entry: it moves to the front.
+    if let Some(index) = clips.iter().position(|clip| clip.board == entry.board) {
+        clips.remove(index);
+    }
+    let count = entry.items;
+    clips.insert(0, entry);
+    trim_clipboard(clips);
+    Some(count)
+}
+
 /// One entry in the clipboard history, with the measurements its cap was decided from.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClipEntry {

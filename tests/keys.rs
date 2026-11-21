@@ -108,6 +108,23 @@ fn control_v_pastes_and_other_control_keys_do_not() {
 }
 
 #[test]
+fn control_x_cuts_and_nothing_else_does() {
+    use sgraffito::input::cuts_selection;
+    assert!(cuts_selection(true, Keysym::x));
+    assert!(cuts_selection(true, Keysym::X));
+    assert!(!cuts_selection(false, Keysym::x), "plain x is not a cut");
+    assert!(!cuts_selection(false, Keysym::X));
+    assert!(!cuts_selection(true, Keysym::c));
+
+    // Inside a text box the key stays local: the buffer has a caret but no selected range to cut,
+    // so the text box never reaches the canvas cut.
+    assert_eq!(edit_action(Keysym::x, true, false), EditAction::Local);
+    // A board name ignores it, so cut cannot fire while the name has the keyboard.
+    assert_eq!(rename_key(Keysym::x, false), RenameKey::Ignore);
+    assert_eq!(rename_key(Keysym::X, false), RenameKey::Ignore);
+}
+
+#[test]
 fn the_clipboard_mime_preference_is_utf8_first() {
     let offered = |mimes: &[&str]| mimes.iter().map(|m| (*m).to_string()).collect::<Vec<_>>();
     assert_eq!(

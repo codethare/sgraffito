@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use sgraffito::canvas::{
     Board, ClipEntry, Doc, ItemId, MAX_CLIP_BYTES, MAX_CLIP_ENTRIES, MAX_CLIP_ITEMS, Note,
     PEN_WIDTH_MAX, Shape, ShapeKind, Stroke, TEXT_SIZE_MAX, TextItem, View, clip_size, link_source,
-    stepped_size, trim_clipboard,
+    record_clip, stepped_size, trim_clipboard,
 };
 use sgraffito::store::{self, Store};
 
@@ -703,6 +703,65 @@ fn moving_elements_leaves_the_source_board_without_them() {
     assert_eq!(doc.boards["b"].texts.len(), 1);
     assert_eq!(doc.boards["b"].texts[0].link, Some("b".into()));
     assert_eq!(doc.move_items("a", "a", &[ItemId::Stroke(0)]), None);
+}
+
+/// The two halves of a cut, on the data model: the clipboard gets exactly what `Ctrl+C` records —
+/// one entry holding the selected elements — and only then are those elements removed. This is the
+/// order `App::cut_selection` runs, and the selection's ids name nothing once `remove` has run.
+#[test]
+fn a_cut_records_one_copy_then_removes_the_originals() {
+    let mut board = Board {
+        strokes: vec![Stroke {
+            color: "#fff".into(),
+            width: 3.0,
+            points: vec![[0.0, 0.0], [4.0, 4.0]],
+            attach: [None, None],
+        }],
+        texts: vec![TextItem {
+            x: 1.0,
+            y: 2.0,
+            color: "#fff".into(),
+            size: 18.0,
+            text: "cut".into(),
+            link: None,
+        }],
+        ..Board::default()
+    };
+    let items = [ItemId::Stroke(0), ItemId::Text(0)];
+    let mut clips = Vec::new();
+
+    assert_eq!(record_clip(&mut clips, &board, &items), Some(2));
+    assert_eq!(clips.len(), 1, "a cut recorded more than one entry");
+    assert_eq!(clips[0].board.strokes.len(), 1);
+    assert_eq!(clips[0].board.texts.len(), 1);
+
+    assert!(board.remove(&items).is_some(), "the cut removed nothing");
+    assert!(board.strokes.is_empty(), "the cut left its stroke");
+    assert!(board.texts.is_empty(), "the cut left its text");
+}
+
+/// Nothing selected is a no-op, and a copy the clipboard refuses leaves both the history and the
+/// board alone: a cut never loses what the clipboard did not take.
+#[test]
+fn an_empty_or_refused_cut_changes_nothing() {
+    let mut clips = Vec::new();
+    assert_eq!(record_clip(&mut clips, &Board::default(), &[]), None);
+    assert!(clips.is_empty(), "an empty cut recorded an entry");
+
+    let board = Board {
+        strokes: (0..=MAX_CLIP_ITEMS)
+            .map(|i| Stroke {
+                color: "#fff".into(),
+                width: 3.0,
+                points: vec![[i as f32, 0.0]],
+                attach: [None, None],
+            })
+            .collect(),
+        ..Board::default()
+    };
+    let items: Vec<ItemId> = (0..=MAX_CLIP_ITEMS).map(ItemId::Stroke).collect();
+    assert_eq!(record_clip(&mut clips, &board, &items), None);
+    assert!(clips.is_empty(), "a refused cut recorded an entry");
 }
 
 /// The clipboard caps are both enforced, and a copy over either is refused whole rather than
