@@ -19,6 +19,10 @@ use crate::canvas::{Board, Doc};
 pub const VERSION: u32 = 6;
 /// The oldest version whose files still load.
 pub const MIN_VERSION: u32 = 1;
+/// The newest schema this build can still read. Version 7 was the text-attachment build: its extra
+/// fields are ignored here, so a rollback must not turn a board file into a `.bak` and an empty
+/// document. Writes stay at [`VERSION`]; the unknown fields are dropped on the next save.
+pub const READABLE_VERSION: u32 = 7;
 pub const DEBOUNCE: Duration = Duration::from_secs(1);
 pub const RETRY_DELAY: Duration = Duration::from_secs(1);
 
@@ -60,47 +64,84 @@ pub fn path() -> Option<PathBuf> {
 }
 
 /// Load annotations. Missing means empty; corrupt or unsupported versions are backed up as `.bak` and treated as empty.
-/// A version older than [`MIN_VERSION`] or newer than [`VERSION`] is unsupported and is backed up.
+/// A version older than [`MIN_VERSION`] or newer than [`READABLE_VERSION`] is unsupported and is backed up.
+/// A newer-but-readable file is loaded and written back at [`VERSION`] on the next save.
 pub fn load(path: &Path) -> Doc {
     let raw = match fs::read(path) {
         Ok(raw) => raw,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Doc::default(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return recover_backup(path),
         Err(e) => {
             crate::log::write(&format!("failed to read {}: {e}", path.display()));
             return Doc::default();
         }
     };
-    let parsed = serde_json::from_slice::<File>(&raw).map_err(|e| e.to_string());
-    match parsed {
-        // A supported older version loads; its missing fields already default. It is written back
-        // in the current version the next time the daemon saves.
-        Ok(file) if (MIN_VERSION..=VERSION).contains(&file.version) => {
-            let mut doc = Doc {
-                // A file from before boards existed keys its annotations by output name; those keys become
-                // board names of their own, which is what lets an output that appears afterwards find the
-                // board named after it and show what it used to show.
-                boards: if file.boards.is_empty() {
-                    file.outputs
-                } else {
-                    file.boards
-                },
-                active: file.active,
-            };
-            for board in doc.boards.values_mut() {
-                board.ensure_shape_ids();
-                board.drop_dangling_attachments();
-            }
-            doc
-        }
-        Ok(file) => {
-            backup(path, &format!("unsupported file version {}", file.version));
-            Doc::default()
-        }
-        Err(e) => {
-            backup(path, &e);
+    match decode(&raw) {
+        // A supported older or newer-readable version loads; missing fields default and unknown
+        // fields, such as a version 7 text attachment, are ignored. It is written back in the
+        // current version the next time the daemon saves.
+        Ok(doc) => doc,
+        Err(reason) => {
+            backup(path, &reason);
             Doc::default()
         }
     }
+}
+
+/// Decode and normalise one annotation file, without touching the filesystem.
+fn decode(raw: &[u8]) -> Result<Doc, String> {
+    let file = serde_json::from_slice::<File>(raw).map_err(|e| e.to_string())?;
+    if !(MIN_VERSION..=READABLE_VERSION).contains(&file.version) {
+        return Err(format!("unsupported file version {}", file.version));
+    }
+    if file.version > VERSION {
+        crate::log::write(&format!(
+            "annotation file version {} is newer than this build's {}; loading it and saving as {}",
+            file.version, VERSION, VERSION
+        ));
+    }
+    let mut doc = Doc {
+        // A file from before boards existed keys its annotations by output name; those keys become
+        // board names of their own, which is what lets an output that appears afterwards find the
+        // board named after it and show what it used to show.
+        boards: if file.boards.is_empty() {
+            file.outputs
+        } else {
+            file.boards
+        },
+        active: file.active,
+    };
+    for board in doc.boards.values_mut() {
+        board.ensure_shape_ids();
+        board.drop_dangling_attachments();
+    }
+    Ok(doc)
+}
+
+/// The previous failed load of this file, if any. A newer-but-readable version is the common case:
+/// the old build renamed the good file to `.bak` and started empty, so a missing main file with a
+/// readable backup is the same document, not a fresh start. Recovery copies the backup back into
+/// place instead of renaming it, so the evidence survives a second failure.
+fn recover_backup(path: &Path) -> Doc {
+    let bak = path.with_extension("json.bak");
+    let Ok(raw) = fs::read(&bak) else {
+        return Doc::default();
+    };
+    let Ok(doc) = decode(&raw) else {
+        return Doc::default();
+    };
+    match fs::copy(&bak, path) {
+        Ok(_) => crate::log::write(&format!(
+            "recovered {} from {}",
+            path.display(),
+            bak.display()
+        )),
+        Err(e) => crate::log::write(&format!(
+            "read {} but failed to restore it to {}: {e}",
+            bak.display(),
+            path.display()
+        )),
+    }
+    doc
 }
 
 fn backup(path: &Path, reason: &str) {

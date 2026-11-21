@@ -41,7 +41,7 @@ fn sample() -> Doc {
                 from: [30.0, 400.0],
                 to: [180.0, 260.0],
                 rotate: 0.0,
-                id: 0,
+                id: 1,
                 attach: [None, None],
             }],
             notes: vec![],
@@ -94,8 +94,8 @@ fn saved_file_has_version_boards_and_the_picked_one() {
     assert_eq!(shape["to"], serde_json::json!([180.0, 260.0]));
     assert_eq!(
         shape.as_object().unwrap().len(),
-        5,
-        "kind, color, width, from, to"
+        7,
+        "kind, color, width, from, to, id, attach"
     );
 }
 
@@ -935,4 +935,62 @@ fn connector_attachments_survive_the_round_trip() {
         Some(target)
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_version_seven_file_loads_and_is_saved_back_as_six() {
+    let dir = tmpdir("version-seven");
+    let p = dir.join("annotations.json");
+    std::fs::write(
+        &p,
+        r##"{"version":7,"boards":{"kept":{"strokes":[{"color":"#e01b24","width":3,"points":[[0,0]],"id":9,"attach":[null,null]}],"texts":[{"x":5,"y":6,"color":"#ffffff","size":18,"text":"kept","attach":{"target":{"stroke":9},"offset":[1,2]}}],"shapes":[]}},"active":"kept"}"##,
+    )
+    .unwrap();
+    let doc = store::load(&p);
+    assert_eq!(doc.active, "kept");
+    assert_eq!(doc.boards["kept"].texts[0].text, "kept");
+    assert!(
+        !dir.join("annotations.json.bak").exists(),
+        "a readable newer file was treated as unusable"
+    );
+
+    store::save(&p, &doc).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+    assert_eq!(v["version"], 6);
+    assert!(
+        v["boards"]["kept"]["strokes"][0].get("id").is_none(),
+        "the removed stroke id survived the downgrade"
+    );
+    assert!(
+        v["boards"]["kept"]["texts"][0].get("attach").is_none(),
+        "the removed text attachment survived the downgrade"
+    );
+    assert_eq!(v["boards"]["kept"]["texts"][0]["text"], "kept");
+}
+
+#[test]
+fn a_missing_main_file_recovers_a_readable_backup() {
+    let dir = tmpdir("recover-backup");
+    let p = dir.join("annotations.json");
+    let bak = p.with_extension("json.bak");
+    std::fs::write(
+        &bak,
+        r##"{"version":7,"boards":{"kept":{"strokes":[],"texts":[{"x":5,"y":6,"color":"#ffffff","size":18,"text":"recovered"}],"shapes":[]}},"active":"kept"}"##,
+    )
+    .unwrap();
+    let doc = store::load(&p);
+    assert_eq!(doc.boards["kept"].texts[0].text, "recovered");
+    assert!(p.exists(), "the recovered document was not put back");
+    assert!(bak.exists(), "recovery consumed the backup");
+}
+
+#[test]
+fn a_corrupt_backup_is_left_alone_when_the_main_file_is_missing() {
+    let dir = tmpdir("bad-backup");
+    let p = dir.join("annotations.json");
+    let bak = p.with_extension("json.bak");
+    std::fs::write(&bak, "{ not json").unwrap();
+    assert_eq!(store::load(&p), Doc::default());
+    assert!(!p.exists());
+    assert!(bak.exists());
 }
