@@ -283,7 +283,7 @@ impl Tool {
             Tool::Pen => "P",
             Tool::Eraser => "E",
             Tool::Text => "T",
-            Tool::Selection => "S",
+            Tool::Selection => "V",
             Tool::Circle => "O",
             Tool::Rect => "R",
             Tool::Diamond => "D",

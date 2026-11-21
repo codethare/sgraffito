@@ -199,14 +199,15 @@ pub fn cuts_selection(ctrl: bool, keysym: Keysym) -> bool {
     ctrl && matches!(keysym, Keysym::x | Keysym::X)
 }
 
-/// Key mapping while no text box is edited: `P`/`E`/`T`/`S` switch tools, and the five shape tools
-/// take the initials of what they draw.
+/// Key mapping while no text box is edited: `P`/`E`/`T`/`V` switch tools, and the shape tools take
+/// the initials of what they draw. `V` arms select as it does in the usual drawing applications;
+/// the compositor's `Ctrl+V` paste is handled before this map is reached.
 pub fn tool_for_keysym(keysym: Keysym) -> Option<Tool> {
     match keysym {
         Keysym::p | Keysym::P => Some(Tool::Pen),
         Keysym::e | Keysym::E => Some(Tool::Eraser),
         Keysym::t | Keysym::T => Some(Tool::Text),
-        Keysym::s | Keysym::S => Some(Tool::Selection),
+        Keysym::v | Keysym::V => Some(Tool::Selection),
         Keysym::o | Keysym::O => Some(Tool::Circle),
         Keysym::r | Keysym::R => Some(Tool::Rect),
         Keysym::d | Keysym::D => Some(Tool::Diamond),

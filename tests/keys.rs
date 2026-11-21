@@ -12,8 +12,10 @@ fn maps_letters_to_tools_both_cases() {
     assert_eq!(tool_for_keysym(Keysym::P), Some(Tool::Pen));
     assert_eq!(tool_for_keysym(Keysym::e), Some(Tool::Eraser));
     assert_eq!(tool_for_keysym(Keysym::t), Some(Tool::Text));
-    assert_eq!(tool_for_keysym(Keysym::s), Some(Tool::Selection));
-    assert_eq!(tool_for_keysym(Keysym::S), Some(Tool::Selection));
+    assert_eq!(tool_for_keysym(Keysym::v), Some(Tool::Selection));
+    assert_eq!(tool_for_keysym(Keysym::V), Some(Tool::Selection));
+    assert_eq!(tool_for_keysym(Keysym::s), None);
+    assert_eq!(tool_for_keysym(Keysym::S), None);
     assert_eq!(tool_for_keysym(Keysym::o), Some(Tool::Circle));
     assert_eq!(tool_for_keysym(Keysym::r), Some(Tool::Rect));
     assert_eq!(tool_for_keysym(Keysym::d), Some(Tool::Diamond));
@@ -21,6 +23,20 @@ fn maps_letters_to_tools_both_cases() {
     assert_eq!(tool_for_keysym(Keysym::a), Some(Tool::Arrow));
     assert_eq!(tool_for_keysym(Keysym::A), Some(Tool::Arrow));
     assert_eq!(tool_for_keysym(Keysym::x), None);
+}
+
+#[test]
+fn v_selects_and_s_no_longer_does() {
+    // Select moved to `V`; `S` is no longer another way in, and no tool names it.
+    assert_eq!(tool_for_keysym(Keysym::v), Some(Tool::Selection));
+    assert_eq!(tool_for_keysym(Keysym::V), Some(Tool::Selection));
+    assert_eq!(tool_for_keysym(Keysym::s), None);
+    assert_eq!(tool_for_keysym(Keysym::S), None);
+    assert_eq!(Tool::Selection.key(), "V");
+    // `Ctrl+V` remains the text paste: the paste is decided before the tool map is reached, and
+    // the edit action knows the chord too.
+    assert_eq!(edit_action(Keysym::v, true, false), EditAction::Paste);
+    assert_eq!(edit_action(Keysym::V, true, false), EditAction::Paste);
 }
 
 #[test]

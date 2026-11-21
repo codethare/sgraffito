@@ -14,7 +14,8 @@ use wayland_client::protocol::wl_shm::Format;
 use crate::canvas::{
     Backdrop, Board, Handle, ItemId, LiveConnector, NOTE_DATE_SIZE, NOTE_RADIUS, Note, Overlay,
     Rect, SELECT_HANDLE, SELECT_ROTATE_GAP, Shape, ShapeKind, Stroke, TextItem, TextOverlay, Tool,
-    Toolbar, ToolbarAction, View, parse_hex, rect_of, rotate_handle, selection_frame_with,
+    Toolbar, ToolbarAction, View, note_ink, parse_hex, rect_of, rotate_handle,
+    selection_frame_with,
 };
 use crate::config;
 use crate::sketch::{self, Seg};
@@ -46,6 +47,17 @@ const MOVE_BUTTON_H: f32 = 30.0;
 /// the HIG's 13 pt macOS control size, so they share a size and a baseline instead of being matched
 /// by eye. An icon is geometry rather than text and is not sized by this.
 const TOOLBAR_TEXT_SIZE: f32 = 13.0;
+/// The key a block carries on its face: 7 pt is the smallest size that still reads at scale 1, and
+/// the badge is inset into the corner the icon leaves free rather than centred over the picture.
+const BADGE_TEXT_SIZE: f32 = 7.0;
+/// How far the badge is inset from the square's left and bottom edges, so the glyph sits inside the
+/// rounded corner instead of touching the hairline.
+const BADGE_INSET: f32 = 3.0;
+/// The box a badged block draws its icon in: smaller than an unbadged icon's, and moved up and to
+/// the right, because the badge owns the bottom-left corner. The two boxes never touch, so a badge
+/// cannot be mistaken for part of the icon.
+const BADGE_ICON_SIDE: f32 = 13.0;
+const BADGE_ICON_TOP: f32 = 3.0;
 /// How far the block and the meaning of a stretched block are kept apart.
 const TOOLBAR_LABEL_GAP: f32 = 6.0;
 /// Padding after a label, so text never touches the capsule's edge.
@@ -275,6 +287,25 @@ fn labelled(action: ToolbarAction, what: &str) -> String {
         Some(key) => format!("{what} ({key})"),
         None => what.to_string(),
     }
+}
+
+/// The key a block shows on its face: its **primary** shortcut, and only when that shortcut is a
+/// single key. A board row names the key that opened its list rather than a key of its own, and a
+/// chord such as `Ctrl+Shift+V` or an alternate binding is no face mark — the stretched capsule
+/// still states it in full, which is where every key, primary or alternate, is taught.
+fn badge_of(action: ToolbarAction) -> Option<&'static str> {
+    if matches!(
+        action,
+        ToolbarAction::Board(_)
+            | ToolbarAction::NewBoard
+            | ToolbarAction::AskDeleteBoard(_)
+            | ToolbarAction::DeleteBoard(_)
+            | ToolbarAction::RenameBoard(_)
+    ) {
+        return None;
+    }
+    let key = key_of(action)?;
+    (!key.contains('+')).then_some(key)
 }
 
 /// Where a block's text starts, relative to the rail's origin: after that block's own square and the gap, and
@@ -1634,6 +1665,9 @@ impl Renderer {
                 w: TOOLBAR_BLOCK * scale,
                 h: TOOLBAR_BLOCK * scale,
             };
+            // The key on the block's face. It is the primary shortcut only; the capsule the block
+            // opens into states the full key, an alternate or a chord included.
+            let badge = control.block.action.and_then(badge_of);
             match &control.block.mark {
                 Mark::Swatch(index) => {
                     // The colour chip keeps its place; the capsule unfurls around it.
@@ -1664,6 +1698,12 @@ impl Renderer {
                             } * scale,
                         )),
                     );
+                    // The chip is the colour itself, so the badge takes the ink a note on that
+                    // colour would: no single foreground reads on all five palette entries.
+                    if let Some(key) = badge {
+                        let ink = note_ink(&config::current().colors[*index]);
+                        self.draw_badge(pixmap, square, scale, key, ink);
+                    }
                 }
                 mark => {
                     let (fill, edge) = if control.block.active {
@@ -1683,7 +1723,17 @@ impl Renderer {
                     // number is centred in the square, never in the stretched rectangle.
                     match mark {
                         Mark::Icon(icon) => {
-                            draw_icon(pixmap, *icon, square, scale, TOOLBAR_FOREGROUND)
+                            draw_icon(
+                                pixmap,
+                                *icon,
+                                square,
+                                scale,
+                                TOOLBAR_FOREGROUND,
+                                badge.is_some(),
+                            );
+                            if let Some(key) = badge {
+                                self.draw_badge(pixmap, square, scale, key, TOOLBAR_FOREGROUND);
+                            }
                         }
                         Mark::Value(value) => {
                             let width = self.text_width(value, TOOLBAR_TEXT_SIZE);
@@ -1801,7 +1851,7 @@ impl Renderer {
                                 Some((parse_hex(TOOLBAR_FOREGROUND), TOOLBAR_HAIRLINE * scale)),
                             );
                         }
-                        draw_icon(pixmap, *icon, square, scale, TOOLBAR_LABEL_TEXT);
+                        draw_icon(pixmap, *icon, square, scale, TOOLBAR_LABEL_TEXT, false);
                     }
                 }
             }
@@ -2212,6 +2262,40 @@ impl Renderer {
         buffer.set_text(text, &Attrs::new(), Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut self.font_system, false);
         buffer.layout_runs().map(|r| r.line_w).fold(0.0, f32::max)
+    }
+
+    /// The key a block carries on its face: the primary shortcut, in the bottom-left corner of its
+    /// square. It stays inside the square while the capsule opens, so it never collides with the
+    /// label the capsule uncovers.
+    fn draw_badge(
+        &mut self,
+        pixmap: &mut PixmapMut,
+        square: Rect,
+        scale: f32,
+        key: &str,
+        color: &str,
+    ) {
+        let width = self.text_width(key, BADGE_TEXT_SIZE);
+        let box_ = badge_box(square, scale, width);
+        let item = toolbar_text(
+            box_.x / scale,
+            box_.y / scale,
+            box_.h / scale,
+            BADGE_TEXT_SIZE,
+            color,
+            key,
+        );
+        self.draw_text(
+            pixmap,
+            &item,
+            Screen {
+                scale,
+                view: View::default(),
+            },
+            None,
+            None,
+            None,
+        );
     }
 
     /// One word button in a board row: the confirmation's `no` and `yes`. It uses the same hover ring
@@ -3107,15 +3191,79 @@ fn rounded_rect_path(box_: Rect, radius: f32) -> Option<tiny_skia::Path> {
     pb.finish()
 }
 
+/// The box an icon is drawn in. Without a badge it is the square inset by [`ICON_INSET`], as the
+/// whole set was drawn before the keys had a face. With one, the icon gives the bottom-left corner
+/// to the badge: it is a little smaller and sits at the square's top right, clear of the glyph.
+fn icon_box(square: Rect, badged: bool, scale: f32) -> Rect {
+    if badged {
+        let side = BADGE_ICON_SIDE * scale;
+        Rect {
+            x: square.x + square.w - ICON_INSET * scale - side,
+            y: square.y + BADGE_ICON_TOP * scale,
+            w: side,
+            h: side,
+        }
+    } else {
+        square.grown(-ICON_INSET * scale)
+    }
+}
+
+/// Where a key badge sits: the bottom-left inside of its square. `width` is the shaped width of the
+/// glyph, in logical pixels, so the box is the text's own size rather than a guess from its length.
+fn badge_box(square: Rect, scale: f32, width: f32) -> Rect {
+    let height = BADGE_TEXT_SIZE * LINE_HEIGHT_SCALE * scale;
+    Rect {
+        x: square.x + BADGE_INSET * scale,
+        y: square.y + square.h - BADGE_INSET * scale - height,
+        w: width * scale,
+        h: height,
+    }
+}
+
+/// The eraser's outline and band, in the box an icon is drawn in: a block lying at about 30° up
+/// from the horizontal, with the band across the end its sleeve grips. The four corners and the
+/// band's two ends are returned so the drawing and the test that checks it read the same figure.
+fn eraser_icon(box_: Rect) -> ([[f32; 2]; 4], [[f32; 2]; 2]) {
+    let (cx, cy) = (box_.x + box_.w / 2.0, box_.y + box_.h / 2.0);
+    // Half the block's length and half its thickness. The angle is 30°: enough slant to read as
+    // an object lying on the block rather than as another square tool.
+    let (a, b) = (box_.w * 0.46, box_.h * 0.20);
+    let (sin, cos) = (0.5, 0.866_025_4);
+    let along = [cos * a, -sin * a];
+    let across = [sin * b, cos * b];
+    let corners = [
+        [cx + along[0] + across[0], cy + along[1] + across[1]],
+        [cx + along[0] - across[0], cy + along[1] - across[1]],
+        [cx - along[0] + across[0], cy - along[1] + across[1]],
+        [cx - along[0] - across[0], cy - along[1] - across[1]],
+    ];
+    // The band is a third of the way along the block from its upper end, where a sleeve would
+    // meet the rubber.
+    let (band_x, band_y) = (cx + along[0] * 0.35, cy + along[1] * 0.35);
+    let band = [
+        [band_x + across[0], band_y + across[1]],
+        [band_x - across[0], band_y - across[1]],
+    ];
+    (corners, band)
+}
+
 /// An icon, drawn inside the square of its block: geometry, in the block's foreground colour, in the
 /// interface's own stroke language. The shape tools' icons call the code their shapes are drawn by,
-/// from the same two points, so an icon cannot drift from what its tool draws.
-fn draw_icon(pixmap: &mut PixmapMut, icon: Icon, square: Rect, scale: f32, color: &str) {
+/// from the same two points, so an icon cannot drift from what its tool draws. A badged block draws
+/// its icon in the top-right of the square and leaves the bottom-left to its key.
+fn draw_icon(
+    pixmap: &mut PixmapMut,
+    icon: Icon,
+    square: Rect,
+    scale: f32,
+    color: &str,
+    badged: bool,
+) {
     let c = parse_hex(color);
     let mut paint = Paint::default();
     paint.set_color_rgba8(c[0], c[1], c[2], c[3]);
     paint.anti_alias = true;
-    let box_ = square.grown(-ICON_INSET * scale);
+    let box_ = icon_box(square, badged, scale);
     if box_.w <= 0.0 || box_.h <= 0.0 {
         return;
     }
@@ -3312,9 +3460,14 @@ fn draw_icon(pixmap: &mut PixmapMut, icon: Icon, square: Rect, scale: f32, color
     let mut filled: Vec<tiny_skia::Path> = Vec::new();
     match icon {
         Icon::Eraser => {
-            if let Some(rounded) = rounded_rect_path(box_, 4.0 * scale) {
-                path.push_path(&rounded);
+            let (corners, band) = eraser_icon(box_);
+            path.move_to(corners[0][0], corners[0][1]);
+            for corner in &corners[1..] {
+                path.line_to(corner[0], corner[1]);
             }
+            path.close();
+            path.move_to(band[0][0], band[0][1]);
+            path.line_to(band[1][0], band[1][1]);
         }
         Icon::Text => {
             path.move_to(x, y + h * 0.15);
@@ -5594,7 +5747,14 @@ mod tests {
             },
         );
         let mut icon = Pixmap::new(60, 60).unwrap();
-        draw_icon(&mut icon.as_mut(), Icon::Pen, square, scale, "#ffffffee");
+        draw_icon(
+            &mut icon.as_mut(),
+            Icon::Pen,
+            square,
+            scale,
+            "#ffffffee",
+            false,
+        );
         let l = square.grown(-ICON_INSET * scale);
         let mut exact = Pixmap::new(60, 60).unwrap();
         draw_stroke(
@@ -5659,8 +5819,8 @@ mod tests {
 
     #[test]
     fn every_block_states_the_key_that_applies_it() {
-        // A block's face carries no key letter any more, so the key is what its stretched text
-        // ends with — and that key has to be one this daemon actually handles.
+        // A block's face carries its primary key, and its stretched text ends with the full key —
+        // and that key has to be one this daemon actually handles.
         use crate::input::{
             color_for_keysym, panel_action_for_keysym, size_step_for_keysym, tool_for_keysym,
         };
@@ -5677,7 +5837,7 @@ mod tests {
             "P" => Some(Keysym::P),
             "E" => Some(Keysym::E),
             "T" => Some(Keysym::T),
-            "S" => Some(Keysym::S),
+            "V" => Some(Keysym::V),
             "O" => Some(Keysym::O),
             "R" => Some(Keysym::R),
             "D" => Some(Keysym::D),
@@ -5758,5 +5918,119 @@ mod tests {
         // lock. Both panel switches are in the drawer, which is closed in this rail, and the width readout
         // applies nothing of its own.
         assert_eq!(stated, 19);
+    }
+
+    /// A face mark is a lone key. The capsule names the full key, a chord and any alternate included.
+    #[test]
+    fn a_block_badge_names_its_primary_key_only() {
+        assert_eq!(badge_of(ToolbarAction::Tool(Tool::Pen)), Some("P"));
+        assert_eq!(badge_of(ToolbarAction::Tool(Tool::Selection)), Some("V"));
+        assert_eq!(badge_of(ToolbarAction::Tool(Tool::Text)), Some("T"));
+        assert_eq!(badge_of(ToolbarAction::Color(0)), Some("1"));
+        assert_eq!(badge_of(ToolbarAction::SizeStep(-1.0)), Some("["));
+        assert_eq!(badge_of(ToolbarAction::SizeStep(1.0)), Some("]"));
+        assert_eq!(badge_of(ToolbarAction::Lock), Some("Esc"));
+        assert_eq!(badge_of(ToolbarAction::More), Some("M"));
+        assert_eq!(badge_of(ToolbarAction::Shared), Some("F"));
+        // A chord has no letter of its own to wear, and a pick out of a panel names the key that
+        // opened the list rather than one of its own.
+        assert_eq!(badge_of(ToolbarAction::Clipboard), None);
+        assert_eq!(badge_of(ToolbarAction::Link), None);
+        assert_eq!(badge_of(ToolbarAction::Size), None);
+        assert_eq!(badge_of(ToolbarAction::Board(0)), None);
+        assert_eq!(badge_of(ToolbarAction::Backdrop(Backdrop::Grid)), None);
+        // Whatever the face shows is exactly what the stretched text ends with.
+        for action in [
+            ToolbarAction::Tool(Tool::Selection),
+            ToolbarAction::Color(2),
+            ToolbarAction::Lock,
+        ] {
+            let key = badge_of(action).expect("a badged action");
+            assert!(labelled(action, "does it").ends_with(&format!("({key})")));
+        }
+        // The capsule still teaches a key the square cannot abbreviate.
+        assert_eq!(
+            labelled(ToolbarAction::Clipboard, "clipboard history"),
+            "clipboard history (Ctrl+Shift+V)"
+        );
+    }
+
+    /// The badge and the icon are drawn in the same 30 pt square, so their boxes must stay apart.
+    #[test]
+    fn a_key_badge_does_not_reach_its_icon() {
+        let mut renderer = Renderer::new();
+        for key in ["P", "1", "Esc", "[", "]"] {
+            for scale in [1.0, 2.0] {
+                let square = Rect {
+                    x: 10.0 * scale,
+                    y: 10.0 * scale,
+                    w: TOOLBAR_BLOCK * scale,
+                    h: TOOLBAR_BLOCK * scale,
+                };
+                let width = renderer.text_width(key, BADGE_TEXT_SIZE);
+                let badge = badge_box(square, scale, width);
+                let icon = icon_box(square, true, scale);
+                // The icon is stroked about its box; even that reach must stop short of the glyph.
+                let stroke = icon.grown(ICON_STROKE * scale / 2.0);
+                assert!(
+                    !badge.intersects(stroke),
+                    "'{key}' badge {badge:?} meets its icon {stroke:?} at scale {scale}"
+                );
+                assert!(square.contains(badge.x, badge.y));
+                assert!(square.contains(badge.x + badge.w, badge.y + badge.h));
+            }
+        }
+    }
+
+    /// The eraser is a slanted block with a band, not the empty rounded square that read as a
+    /// second rectangle tool.
+    #[test]
+    fn the_eraser_icon_is_a_slanted_block_with_a_band() {
+        let square = Rect {
+            x: 10.0,
+            y: 10.0,
+            w: TOOLBAR_BLOCK,
+            h: TOOLBAR_BLOCK,
+        };
+        let box_ = icon_box(square, false, 1.0);
+        let (corners, band) = eraser_icon(box_);
+        // The figure lies at an angle: its highest corner is on the right of the box and its
+        // lowest on the left.
+        let top = corners
+            .iter()
+            .min_by(|a, b| a[1].partial_cmp(&b[1]).unwrap())
+            .unwrap();
+        let bottom = corners
+            .iter()
+            .max_by(|a, b| a[1].partial_cmp(&b[1]).unwrap())
+            .unwrap();
+        let middle = box_.x + box_.w / 2.0;
+        assert!(top[0] > middle, "the block does not slant up to the right");
+        assert!(
+            bottom[0] < middle,
+            "the block does not slant up to the right"
+        );
+        for corner in corners {
+            assert!(box_.contains(corner[0], corner[1]));
+        }
+        // The band is drawn across the block, so the block's middle carries ink the old hollow
+        // square left blank.
+        let mut icon = Pixmap::new(60, 60).unwrap();
+        draw_icon(
+            &mut icon.as_mut(),
+            Icon::Eraser,
+            square,
+            1.0,
+            "#ffffffff",
+            false,
+        );
+        let mid = [
+            (band[0][0] + band[1][0]) / 2.0,
+            (band[0][1] + band[1][1]) / 2.0,
+        ];
+        assert!(
+            near_white(icon.data(), 60, mid[0] as u32, mid[1] as u32),
+            "the band is missing"
+        );
     }
 }
