@@ -421,6 +421,10 @@ impl KeyboardHandler for App {
         }
         if event.keysym == Keysym::Escape {
             self.escape();
+        } else if self.ctrl && matches!(event.keysym, Keysym::z | Keysym::Z) {
+            // Document undo, outside a text box: typing keeps its own keys, and the edit is the
+            // unit undo works in once it has landed.
+            self.undo();
         } else if self.ctrl && matches!(event.keysym, Keysym::c | Keysym::C) {
             self.copy_selection();
         } else if self.ctrl && matches!(event.keysym, Keysym::v | Keysym::V) {
@@ -799,6 +803,7 @@ impl App {
             }
         }
         if abandoned {
+            self.undo.abandon_gesture();
             self.dirty = true;
             return;
         }
@@ -1272,6 +1277,25 @@ impl App {
         // What this gesture changed, so the frame that reports it can damage just that box: a
         // committed stroke, the element the eraser removed, or both.
         let mut changed: Option<Rect> = None;
+        // The snapshot precedes the stroke, shape or erase reaching the document; it is recorded
+        // below only if something was actually committed, so a click that drew nothing leaves no
+        // undo step.
+        let before = self
+            .outputs
+            .get(key)
+            .is_some_and(|out| {
+                out.overlay
+                    .stroke
+                    .as_ref()
+                    .is_some_and(|stroke| !stroke.points.is_empty())
+                    || out
+                        .overlay
+                        .shape
+                        .as_ref()
+                        .is_some_and(|shape| !shape.is_empty())
+                    || (tool == Tool::Eraser && out.overlay.eraser.is_some())
+            })
+            .then(|| self.doc.clone());
         if let Some(board_name) = board_name {
             let transient = self.outputs.get_mut(key).map(|out| {
                 (
@@ -1320,7 +1344,12 @@ impl App {
             }
         }
         match changed {
-            Some(box_) => self.doc_changed_at(*key, box_),
+            Some(box_) => {
+                if let Some(before) = before {
+                    self.undo.record(before, &self.doc);
+                }
+                self.doc_changed_at(*key, box_)
+            }
             // The eraser marker was showing and is gone, with nothing erased.
             None => self.dirty = true,
         }

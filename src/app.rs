@@ -1,6 +1,6 @@
 //! Wayland glue: layer surface lifecycle, mode switching, frame submission.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -281,6 +281,9 @@ pub struct App {
 
     pub(crate) renderer: Renderer,
     pub(crate) doc: Doc,
+    /// Document snapshots taken before each user-visible change, newest last. In memory only: a
+    /// restart begins without a history, and there is no redo.
+    pub(crate) undo: UndoHistory,
     pub(crate) store: Store,
     path: PathBuf,
 
@@ -432,6 +435,101 @@ struct Duplicate {
     originals: Vec<ItemId>,
 }
 
+/// Most document snapshots the in-memory undo history keeps. An older one is dropped when a new
+/// change arrives, so a long session costs a bounded amount of memory.
+pub const UNDO_LIMIT: usize = 64;
+
+/// The document's undo history: snapshots taken before user-visible changes to [`Doc`].
+///
+/// The snapshot is always taken *before* the mutation. A gesture and a text edit keep their
+/// snapshot aside until they land, so one drag or one typing session is one undo step. Undo only
+/// takes a snapshot out; it never puts one in, which is what keeps undo itself out of the history.
+#[derive(Debug, Default)]
+pub struct UndoHistory {
+    snapshots: VecDeque<Doc>,
+    /// Taken when a pointer gesture began: recorded once, when the gesture lands.
+    gesture: Option<Doc>,
+    /// Taken when a text edit began: recorded once, when the edit ends.
+    edit: Option<Doc>,
+}
+
+impl UndoHistory {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Number of changes that can still be undone.
+    pub fn len(&self) -> usize {
+        self.snapshots.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.snapshots.is_empty()
+    }
+
+    fn push(&mut self, snapshot: Doc) {
+        self.snapshots.push_back(snapshot);
+        while self.snapshots.len() > UNDO_LIMIT {
+            self.snapshots.pop_front();
+        }
+    }
+
+    /// Keep the document as it is before a change that is known to happen.
+    pub fn checkpoint(&mut self, doc: &Doc) {
+        self.push(doc.clone());
+    }
+
+    /// Keep `before` only if the document actually changed: a shift-click or a recolour of
+    /// nothing must not leave an undo step behind.
+    pub fn record(&mut self, before: Doc, after: &Doc) {
+        if before != *after {
+            self.push(before);
+        }
+    }
+
+    /// Remember the document as a pointer gesture starts. The first snapshot wins, because one
+    /// press is one gesture even when it makes several document changes (an `Alt`-drag copy and the
+    /// move that follows it).
+    pub fn begin_gesture(&mut self, doc: &Doc) {
+        self.gesture.get_or_insert_with(|| doc.clone());
+    }
+
+    /// Record the gesture's starting document if it changed anything. A gesture that was abandoned
+    /// with `Esc` never lands, so its snapshot is discarded instead.
+    pub fn commit_gesture(&mut self, doc: &Doc) {
+        if let Some(before) = self.gesture.take() {
+            self.record(before, doc);
+        }
+    }
+
+    /// Forget a gesture's snapshot without recording it: the gesture was taken back.
+    pub fn abandon_gesture(&mut self) {
+        self.gesture = None;
+    }
+
+    /// Remember the document as a text box or note is opened for writing.
+    pub fn begin_edit(&mut self, doc: &Doc) {
+        self.edit.get_or_insert_with(|| doc.clone());
+    }
+
+    /// Record the state before typing if the edit changed the document. Ending an edit without
+    /// typing is not a change and leaves no step.
+    pub fn commit_edit(&mut self, doc: &Doc) {
+        if let Some(before) = self.edit.take() {
+            self.record(before, doc);
+        }
+    }
+
+    /// Take out the newest snapshot, for restoring. This adds nothing: undo is not itself a change
+    /// to the document. Any pending gesture or edit snapshot is dropped, because the document they
+    /// described no longer exists.
+    pub fn undo(&mut self) -> Option<Doc> {
+        self.gesture = None;
+        self.edit = None;
+        self.snapshots.pop_back()
+    }
+}
+
 impl App {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -466,6 +564,7 @@ impl App {
             pool,
             renderer: Renderer::new(),
             doc,
+            undo: UndoHistory::new(),
             store: Store::new(path.clone()),
             path,
             mode: Mode::Locked,
@@ -854,6 +953,9 @@ impl App {
             return;
         }
         let delta = nudge_delta(dx, dy, far, zoom);
+        // A keyboard step is a gesture of its own: its snapshot is taken before the move, and the
+        // write below records it once.
+        self.undo.begin_gesture(&self.doc);
         if let Some(out) = self.outputs.get_mut(&key)
             && let Some(selection) = out.overlay.selection.as_mut()
         {
@@ -1067,6 +1169,7 @@ impl App {
         // the board being left: kept, the next `Esc` would remove an element of the board switched to.
         self.gesture = None;
         self.pending_duplicate = None;
+        self.undo.abandon_gesture();
         for key in keys {
             self.cancel_transient(key);
             let Some(out) = self.outputs.get_mut(&key) else {
@@ -1091,6 +1194,7 @@ impl App {
     /// Create a board and show it. This *is* a document change — the board is content, and one that is
     /// not written is gone tomorrow — so unlike a switch it schedules the write.
     pub(crate) fn new_board(&mut self, acting: Option<u32>) -> String {
+        self.undo.checkpoint(&self.doc);
         let name = self.doc.new_board();
         self.store.mark_dirty(Instant::now());
         self.switch_board(acting, &name);
@@ -1198,6 +1302,7 @@ impl App {
         let Some((source, items)) = self.held(key) else {
             return;
         };
+        let before = self.doc.clone();
         let Some(ann) = self.doc.boards.get_mut(&source) else {
             return;
         };
@@ -1205,6 +1310,7 @@ impl App {
             return;
         };
         ann.texts[index].link = Some(board.to_string());
+        self.undo.record(before, &self.doc);
         self.doc_changed();
         log(&format!("text linked to {board}"));
     }
@@ -1218,9 +1324,11 @@ impl App {
         let Some((source, items)) = self.held(key) else {
             return;
         };
+        let before = self.doc.clone();
         if self.doc.move_items(&source, board, &items).is_none() {
             return;
         }
+        self.undo.record(before, &self.doc);
         self.drop_selection();
         self.doc_changed();
         log(&format!("moved {} elements to {board}", items.len()));
@@ -1280,6 +1388,7 @@ impl App {
         let board_name = out.board.clone();
         let copy = clip.shifted(COPY_OFFSET, COPY_OFFSET);
         let count = copy.strokes.len() + copy.texts.len() + copy.shapes.len() + copy.notes.len();
+        let before = self.doc.clone();
         let Some(ann) = self.doc.boards.get_mut(&board_name) else {
             return;
         };
@@ -1287,6 +1396,7 @@ impl App {
         if ids.is_empty() {
             return;
         }
+        self.undo.record(before, &self.doc);
         self.set_selection(key, ids, None);
         self.doc_changed();
         log(&format!("pasted {count} elements"));
@@ -1320,6 +1430,12 @@ impl App {
     pub(crate) fn delete_board_named(&mut self, name: &str) {
         self.end_text_edit();
         self.commit_transient_drawing();
+        // A delete that the document refuses — the last board, or a name that is gone — must not
+        // leave an undo step behind, so it is checked before the snapshot is taken.
+        if self.doc.boards.len() <= 1 || !self.doc.boards.contains_key(name) {
+            return;
+        }
+        self.undo.checkpoint(&self.doc);
         let Some(successor) = self.doc.delete_board(name) else {
             return;
         };
@@ -1385,9 +1501,11 @@ impl App {
     /// Rename a board and keep every screen that shows it on it. Unlike a pick, a name is document
     /// content, so it goes to the file.
     pub(crate) fn rename_board(&mut self, old: &str, new: &str) -> bool {
+        let before = self.doc.clone();
         if !self.doc.rename_board(old, new) {
             return false;
         }
+        self.undo.record(before, &self.doc);
         for out in self.outputs.values_mut() {
             if out.board == old {
                 out.board = new.to_string();
@@ -1603,6 +1721,64 @@ impl App {
         }
     }
 
+    /// Restore the newest undo snapshot. Returns `false` when there is nothing to undo, which
+    /// changes nothing — not even a dirty flag or a repaint.
+    ///
+    /// Every transient that names document indices (a selection, a live gesture, a text box) is
+    /// dropped before the restore, and every output whose board is gone is moved to a board the
+    /// restored document holds. The raster is invalidated, and the write is scheduled, because the
+    /// file and the screen have to agree with the document again. No snapshot is taken: undo is not
+    /// itself a change in the history, and there is no redo.
+    pub(crate) fn undo(&mut self) -> bool {
+        let Some(previous) = self.undo.undo() else {
+            return false;
+        };
+        self.gesture = None;
+        self.selection_grab = None;
+        self.pending_duplicate = None;
+        self.pending_links.clear();
+        self.note_origin = None;
+        self.note_sized = false;
+        self.delete_confirm = None;
+        self.rename = None;
+        self.im_preedit = None;
+        self.im_commit.clear();
+        self.im_delete = None;
+        self.doc = previous;
+        // A document with no boards is nowhere to draw, and every output must name a board the
+        // restored document holds: an undo of "create the only board" or "delete this board" would
+        // otherwise leave the screen pointing at a name that is gone.
+        if self.doc.boards.is_empty() {
+            self.doc.new_board();
+        }
+        if !self.doc.boards.contains_key(&self.doc.active) {
+            self.doc.active = self.doc.boards.keys().next().cloned().unwrap_or_default();
+        }
+        let fallback = self.doc.active.clone();
+        let known: Vec<String> = self.doc.boards.keys().cloned().collect();
+        for out in self.outputs.values_mut() {
+            // The selection and the edit name indices into the document that was replaced, and the
+            // toolbar is rebuilt below from the restored document.
+            out.overlay = Overlay::default();
+            out.text_dirty = false;
+            out.last_text_bounds = None;
+            out.last_transient = None;
+            out.pending = None;
+            out.cache.invalidate();
+            out.dirty = true;
+            if !known.contains(&out.board) {
+                out.board = fallback.clone();
+                // The fallback is where undo put this screen; a late output name must not move it.
+                out.board_picked = true;
+            }
+        }
+        self.doc_changed();
+        self.refresh_toolbar();
+        self.sync_text_input();
+        log("undo");
+        true
+    }
+
     /// Commit any in-progress stroke or shape before a tool change or a new pointer gesture.
     pub(crate) fn commit_transient_drawing(&mut self) {
         let mut pending = Vec::new();
@@ -1632,6 +1808,9 @@ impl App {
             .map(|(key, _, _)| *key)
             .or_else(|| shapes.first().map(|(key, _, _)| *key))
             .unwrap_or_default();
+        // The snapshot is taken before the strokes reach the document, and one commit is one undo
+        // step however many outputs drew during the gesture.
+        let before = (!pending.is_empty() || !shapes.is_empty()).then(|| self.doc.clone());
         let mut committed_box: Option<Rect> = None;
         let committed = !pending.is_empty() || !shapes.is_empty();
         for (_, board_name, stroke) in pending {
@@ -1660,6 +1839,9 @@ impl App {
             }
         }
         if committed {
+            if let Some(before) = before {
+                self.undo.record(before, &self.doc);
+            }
             self.doc_changed_at(key, committed_box.unwrap_or_default());
         }
         // A committed stroke is repainted from its own box; anything else here only lost a
@@ -1740,6 +1922,7 @@ impl App {
             // A gesture works in the document's own coordinates, because that is what the transform it
             // produces is applied to.
             Press::Handle(grab) => {
+                self.undo.begin_gesture(&self.doc);
                 self.gesture = Some(Gesture::start(
                     Some(grab),
                     frame.unwrap_or_default(),
@@ -1750,6 +1933,7 @@ impl App {
                 self.sync_cursor();
             }
             Press::Move => {
+                self.undo.begin_gesture(&self.doc);
                 self.gesture = Some(Gesture::start(
                     None,
                     frame.unwrap_or_default(),
@@ -1759,6 +1943,7 @@ impl App {
                 ));
             }
             Press::Element(id) => {
+                self.undo.begin_gesture(&self.doc);
                 self.set_selection(key, vec![id], None);
                 self.gesture = Some(Gesture::start(None, Rect::default(), at[0], at[1], alt));
             }
@@ -1927,6 +2112,9 @@ impl App {
     /// drags the copy while the original stays where it was. The copy is recorded until the gesture is
     /// over, because `Esc` has to be able to take it back.
     fn duplicate_selection(&mut self, key: u32) {
+        // The copy is part of the move gesture whose press took the snapshot; this only covers a
+        // path that reaches here without one.
+        self.undo.begin_gesture(&self.doc);
         let Some(out) = self.outputs.get(&key) else {
             return;
         };
@@ -1994,6 +2182,7 @@ impl App {
         }
         // The drag is over, so the pointer stops saying it is holding something. The next motion
         // settles it on whatever is under it now.
+        self.undo.abandon_gesture();
         self.selection_grab = None;
         self.sync_cursor();
     }
@@ -2181,6 +2370,7 @@ impl App {
         // taken back: keeping it would let a later `Esc` remove whatever the indices point at then.
         self.pending_duplicate = None;
         self.pending_links.clear();
+        self.undo.abandon_gesture();
         let mut dropped = false;
         for out in self.outputs.values_mut() {
             let had = out.overlay.selection.take().is_some() | out.overlay.marquee.take().is_some();
@@ -2214,6 +2404,7 @@ impl App {
             })
             .collect();
         let mut removed = Vec::new();
+        let before = self.doc.clone();
         for (key, board_name, items) in held {
             if let Some(box_) = self
                 .doc
@@ -2225,6 +2416,9 @@ impl App {
             }
         }
         let deleted = !removed.is_empty();
+        if deleted {
+            self.undo.record(before, &self.doc);
+        }
         // The gesture goes with the selection, whether or not anything was removed: its elements are
         // gone, and a drag nothing showed must not reach the file.
         self.drop_selection();
@@ -2253,6 +2447,7 @@ impl App {
             self.write_gesture(key);
         }
         self.gesture = None;
+        self.undo.abandon_gesture();
     }
 
     /// Hold `items` on one output and let go everywhere else: at most one selection exists at a
@@ -2431,6 +2626,9 @@ impl App {
                 }
             }
         }
+        // Everything this gesture did — including the Alt-drag copy and the re-wrap above — is one
+        // change, so its starting snapshot is recorded once, here.
+        self.undo.commit_gesture(&self.doc);
     }
 
     fn cancel_transients(&mut self) {
@@ -2463,6 +2661,7 @@ impl App {
             })
             .collect();
         let mut changed = Vec::new();
+        let before = self.doc.clone();
         for (key, board_name, items) in held {
             if let Some(box_) = self
                 .doc
@@ -2472,6 +2671,9 @@ impl App {
             {
                 changed.push((key, box_));
             }
+        }
+        if !changed.is_empty() {
+            self.undo.record(before, &self.doc);
         }
         for (key, box_) in changed {
             self.doc_changed_at(key, box_);
@@ -2494,6 +2696,7 @@ impl App {
             })
             .collect();
         let mut changed = Vec::new();
+        let before = self.doc.clone();
         for (key, board_name, items) in held {
             if let Some(box_) = self
                 .doc
@@ -2503,6 +2706,9 @@ impl App {
             {
                 changed.push((key, box_));
             }
+        }
+        if !changed.is_empty() {
+            self.undo.record(before, &self.doc);
         }
         for (key, box_) in changed {
             self.doc_changed_at(key, box_);
@@ -2589,6 +2795,8 @@ impl App {
         if changed {
             self.doc_changed();
         }
+        // The edit's starting document is recorded here, and only if typing changed anything.
+        self.undo.commit_edit(&self.doc);
         self.im_preedit = None;
         self.im_commit.clear();
         self.im_delete = None;
@@ -2652,6 +2860,9 @@ impl App {
                 "a new box"
             }
         ));
+        // Typed content is one undo step: the document as it stands before the edit is what undo
+        // brings back, however many keystrokes land.
+        self.undo.begin_edit(&self.doc);
         if let Some(out) = self.outputs.get_mut(key) {
             out.overlay.text = Some(TextOverlay {
                 buffer: TextBuffer::new(item.text.clone()),
@@ -2824,11 +3035,14 @@ impl App {
         out.transient_dirty = true;
         let board_name = out.board().to_string();
         let box_ = note.bounds();
+        // The note becomes content here, and that is the change undo brings the board back from.
+        let before = self.doc.clone();
         let index = {
             let ann = self.doc.boards.entry(board_name).or_default();
             ann.notes.push(note);
             ann.notes.len() - 1
         };
+        self.undo.record(before, &self.doc);
         // A note's own creation is a document change like any other, and it is the change the debounced save
         // hangs off: without this the note was on the screen and in memory but not in the store's dirty flag,
         // so a session that ended before the edit did — a crash, a `SIGKILL` — lost a note that had just been
@@ -2853,6 +3067,7 @@ impl App {
         else {
             return;
         };
+        self.undo.begin_edit(&self.doc);
         if let Some(out) = self.outputs.get_mut(key) {
             out.overlay.text = Some(TextOverlay {
                 buffer: TextBuffer::new(note.text.clone()),
@@ -2926,6 +3141,7 @@ impl App {
                 }
                 // A named board is content like an auto-named one: the file has to hold it or it is gone
                 // the next time the daemon starts.
+                self.undo.checkpoint(&self.doc);
                 self.doc.boards.insert(name.clone(), Board::default());
                 self.store.mark_dirty(Instant::now());
                 self.switch_board(None, &name);
@@ -2944,6 +3160,16 @@ impl App {
                 // Every board keeps its name and is emptied: a board is where a drawing lives, and `clear`
                 // erases what is drawn, not the list of places to draw on. The rail goes on listing the
                 // same boards, which is also what makes the command safe to run from a key binding.
+                // An already-empty document has nothing to undo, so only a clear that removes
+                // something is a step.
+                if self
+                    .doc
+                    .boards
+                    .values()
+                    .any(|board| board != &Board::default())
+                {
+                    self.undo.checkpoint(&self.doc);
+                }
                 for board in self.doc.boards.values_mut() {
                     *board = Board::default();
                 }
