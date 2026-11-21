@@ -48,6 +48,9 @@ fn config_paints_the_palette_and_the_note_border() {
             boards: Vec::new(),
             shared: false,
             backdrop: sgraffito::canvas::Backdrop::Black,
+            zoom: 1.0,
+            can_undo: false,
+            can_redo: false,
         }),
         ..Default::default()
     };

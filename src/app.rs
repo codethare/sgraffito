@@ -62,7 +62,7 @@ use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::ZwpTextIn
 
 use crate::input::{Nav, PinchData};
 use crate::render::{
-    DamageRegion, FrameCache, Renderer, Screen, buffer_format, move_button_bounds,
+    DamageRegion, FrameCache, Renderer, Screen, buffer_format, cards_bounds, move_button_bounds,
     snap_hint_bounds, toolbar_bounds, transient_bounds, transient_damage,
 };
 use crate::store::{self, Store};
@@ -888,6 +888,9 @@ impl App {
                         .collect(),
                     shared: self.shared,
                     backdrop: self.backdrop,
+                    zoom: self.outputs.get(&key).map_or(1.0, |out| out.view.zoom),
+                    can_undo: self.undo.can_undo(),
+                    can_redo: self.undo.can_redo(),
                 })
             }
         }
@@ -1760,6 +1763,23 @@ impl App {
         self.store.mark_dirty(Instant::now());
         self.invalidate_text_caches();
         self.dirty = true;
+        self.refresh_history_cards();
+    }
+
+    /// Flip the history cards' enabled state without rebuilding the rail's board list and panels on
+    /// every stroke. The rail's shape does not change with the undo stacks; only these two flags do.
+    fn refresh_history_cards(&mut self) {
+        let (can_undo, can_redo) = (self.undo.can_undo(), self.undo.can_redo());
+        for out in self.outputs.values_mut() {
+            let Some(toolbar) = out.overlay.toolbar.as_mut() else {
+                continue;
+            };
+            if toolbar.can_undo != can_undo || toolbar.can_redo != can_redo {
+                toolbar.can_undo = can_undo;
+                toolbar.can_redo = can_redo;
+                out.toolbar_dirty = true;
+            }
+        }
     }
 
     /// A document change whose box is known: the frame that follows damages that box instead of
@@ -2416,10 +2436,14 @@ impl App {
     /// pixel of it: the cache is dropped, the boxes the previous frame cached describe a view that no
     /// longer exists, and the frame that follows repaints the whole surface.
     pub(crate) fn view_changed(&mut self, key: u32, f: impl FnOnce(&mut View)) {
+        let before = self.outputs.get(&key).map(|out| out.view.zoom);
         if let Some(out) = self.outputs.get_mut(&key) {
             f(&mut out.view);
         }
         self.view_moved(key);
+        if self.outputs.get(&key).map(|out| out.view.zoom) != before {
+            self.refresh_toolbar();
+        }
     }
 
     /// Note that an output's view has already changed: the boxes the previous frame cached describe a
@@ -3327,6 +3351,7 @@ impl App {
             };
             if stepped {
                 self.view_moved(key);
+                self.refresh_toolbar();
             }
         }
     }
@@ -3607,7 +3632,9 @@ impl App {
             if out.toolbar_dirty
                 && let Some(toolbar) = out.overlay.toolbar.as_ref()
             {
-                box_ = box_.union(toolbar_bounds(toolbar, w as f32, h as f32));
+                let surface = (w as f32, h as f32);
+                box_ = box_.union(toolbar_bounds(toolbar, surface.0, surface.1));
+                box_ = box_.union(cards_bounds(surface, crate::config::current().toolbar));
             }
             Some(box_)
         } else if let Some(text_damage) = text_damage {
@@ -3615,13 +3642,23 @@ impl App {
         } else if out.transient_dirty || out.toolbar_dirty {
             // The rail's box is fixed while editing, so the previous and the current frame agree
             // on it and there is nothing to remember between frames.
+            let surface = (w as f32, h as f32);
             let rail = out.toolbar_dirty.then_some(()).and(
                 out.overlay
                     .toolbar
                     .as_ref()
-                    .map(|toolbar| toolbar_bounds(toolbar, w as f32, h as f32)),
+                    .map(|toolbar| toolbar_bounds(toolbar, surface.0, surface.1)),
             );
-            Some(transient_damage(out.last_transient, transient, rail))
+            let mut box_ = transient_damage(out.last_transient, transient, rail);
+            if let Some(toolbar) = out
+                .toolbar_dirty
+                .then_some(())
+                .and(out.overlay.toolbar.as_ref())
+            {
+                let _ = toolbar;
+                box_ = box_.union(cards_bounds(surface, crate::config::current().toolbar));
+            }
+            Some(box_)
         } else {
             // Nothing changed for this output; another output is why the daemon redrew.
             return;

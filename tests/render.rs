@@ -4,8 +4,8 @@ use sgraffito::canvas::{
     ToolbarAction, Transform, View, selection_frame, selection_frame_with,
 };
 use sgraffito::render::{
-    DAMAGE_SLACK, DamageRegion, FrameCache, Renderer, Screen, buffer_format, move_button_bounds,
-    rail_column, toolbar_bounds, transient_bounds, transient_damage,
+    DAMAGE_SLACK, DamageRegion, FrameCache, Renderer, Screen, buffer_format, cards_bounds,
+    move_button_bounds, rail_column, toolbar_bounds, transient_bounds, transient_damage,
 };
 use wayland_client::protocol::wl_shm::Format;
 
@@ -392,6 +392,9 @@ fn toolbar(tool: Tool, color: &'static str, size: f32, hover: Option<ToolbarActi
         boards: Vec::new(),
         shared: false,
         backdrop: Backdrop::Black,
+        zoom: 1.0,
+        can_undo: false,
+        can_redo: false,
     }
 }
 
@@ -625,6 +628,7 @@ fn a_hovered_block_stretches_to_say_what_it_does() {
     let rail = rail();
     let mut renderer = Renderer::new();
     let band = toolbar_bounds(&rail, fw, fh);
+    let painted = band.union(cards_bounds((fw, fh), sgraffito::config::current().toolbar));
     // The top block is the first colour. `inside` is on the square, `beyond` in the room the
     // capsule it unfurls would take, both on that block's own row.
     let row = band.y + 20.0;
@@ -711,7 +715,7 @@ fn a_hovered_block_stretches_to_say_what_it_does() {
             .filter(|(_, pixel)| pixel[3] > SCRIM)
             .filter(|(index, _)| {
                 let (x, y) = ((*index as u32) % w, (*index as u32) / w);
-                x as f32 > band.x + band.w || y as f32 > band.y + band.h
+                x as f32 > painted.x + painted.w || y as f32 > painted.y + painted.h
             })
             .count()
     };
@@ -2474,6 +2478,9 @@ fn a_row_of_the_panel_can_be_clicked_with_the_pointer_on_the_block_that_opened_i
         boards: Vec::new(),
         shared: false,
         backdrop: Backdrop::Black,
+        zoom: 1.0,
+        can_undo: false,
+        can_redo: false,
     };
     let mut renderer = Renderer::new();
     let band = toolbar_bounds(&rail(), w as f32, h as f32);

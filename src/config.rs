@@ -44,6 +44,16 @@ impl ToolbarPosition {
     pub const fn horizontal(self) -> bool {
         matches!(self, ToolbarPosition::Top | ToolbarPosition::Bottom)
     }
+
+    /// The edge across the screen from this one, where the zoom and history cards live.
+    pub const fn opposite(self) -> Self {
+        match self {
+            ToolbarPosition::Left => ToolbarPosition::Right,
+            ToolbarPosition::Right => ToolbarPosition::Left,
+            ToolbarPosition::Top => ToolbarPosition::Bottom,
+            ToolbarPosition::Bottom => ToolbarPosition::Top,
+        }
+    }
 }
 
 /// Parse a toolbar edge. The file's value is matched case-insensitively and without surrounding

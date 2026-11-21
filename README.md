@@ -81,6 +81,7 @@ Every mark on the canvas is drawn as a **hand-drawn** one: a stroke is a pen tha
 | `Esc` | close the open drawer, else cancel the drag in progress, else finish the text edit, else clear the selection, else return to the locked mode |
 | `Delete` | remove everything the selection holds, as one change |
 | `Ctrl`+`Z` | undo the last document change; outside a text box, because the editor owns the keys while it is focused |
+| `Ctrl`+`Shift`+`Z` | redo the change last undone |
 | `Ctrl`+`X` | cut the selection: exactly what `Ctrl`+`C` copies enters the clipboard history, then the originals are removed as one change |
 | `Tab` / `Shift+Tab` | walk the selection to the next / previous element on this output, in document order and wrapping at both ends |
 | `←` `→` `↑` `↓` | with something selected, move it by 1 logical pixel, or 10 while `Shift` is held; with nothing selected, pan the view by 40 pixels, or 400 with `Shift` |
@@ -93,11 +94,13 @@ Every mark on the canvas is drawn as a **hand-drawn** one: a stroke is a pen tha
 | while a text box is focused: `←` `→` `↑` `↓` | move the caret by one character or one line |
 | while a text box is focused: `Ctrl`+`V` | paste the clipboard at the caret |
 
+Every rail button with a one-key shortcut shows that letter in the bottom-left of its square; full chords and alternate bindings stay in the hover expansion. The zoom percentage and the undo/redo cards sit on the edge opposite the rail, with the history buttons next to the percentage; the history buttons are dimmed when their action has nothing to do.
+
 Pen, circle, rectangle, diamond, line and arrow are one-shot drawing tools: once a stroke or shape is committed, the pointer returns to `select`, so the next gesture picks or moves instead of drawing again. The text tool does the same when a non-empty text box is committed. A click that draws nothing, the eraser and the note tool keep their tool.
 
 While a text box is focused, printable characters plus `Backspace` and `Enter` (newline) go into that box at the caret, the arrow keys move the caret, `Ctrl`+`V` pastes the clipboard there, and `P`/`E`/`T`/digits are content instead of shortcuts. Clicking inside a committed box re-enters it with the caret at the end, whatever the script, because the click is tested against the region the renderer measured; clicking anywhere else finishes the edit in progress and keeps what was typed, and starting a new box beside an old one stays possible. `Esc` finishes the text edit without leaving edit mode, so a tool or size change is one keypress away; it clears a selection next, and only then locks. Text boxes grow only when `Enter` inserts a newline or a pasted selection has one; a long logical line is clipped at the output edge instead of being wrapped automatically. Ordinary committed text edits reuse the measured text region when possible; preedit and lifecycle transitions deliberately use a full redraw.
 
-`Ctrl`+`Z` steps back through document changes made in this sitting: one drawing gesture, one drag or nudge, one text-edit session or one clipboard paste is one step. The history is in memory, capped at 64 steps, and there is no redo; switching boards, panning, zooming, tools and panels are not document changes, so they are not undone.
+`Ctrl`+`Z` steps back through document changes made in this sitting, and `Ctrl`+`Shift`+`Z` moves forward again: one drawing gesture, one drag or nudge, one text-edit session or one clipboard paste is one step. Any new change clears the redo path. The history and redo path are in memory, capped at 64 steps each; switching boards, panning, zooming, tools and panels are not document changes, so they are not undone.
 
 Pen width and text size are brush settings, like the colour: they apply to content created afterwards, and with a selection held they also step what it holds — each selected stroke's and shape's width by the pen step inside 1–16, each selected text box's size by the text step inside 8–72, and a note never, because its type size is its own — as one change per press. `[` and `]` adjust the active tool's size, bounded to 1–16 logical pixels for the pen and 8–72 for text. The selection tool creates nothing, so with it armed the readout and both keys stay on the pen width, which is the size the next stroke will take; a selected text box grows or shrinks without the readout moving, because the readout is the brush's.
 
@@ -216,6 +219,7 @@ border = 1.0
 # "top" or "bottom". The value is matched case-insensitively; an invalid value keeps
 # the built-in left edge and says so in the log. A left or right rail is a column, a
 # top or bottom rail a row, and its panels always open toward the middle of the screen.
+# The zoom percentage and undo/redo cards use the opposite edge.
 toolbar = "left"
 
 # Exactly five palette colours, used by the rail's 1-5 chips and by new strokes, shapes,
@@ -234,7 +238,7 @@ The file is read once when the daemon starts.
 
 ## Known limitations
 
-- v1 has no undo/redo — a gesture cannot be undone once the pointer is released, and the eraser is the only way back — no z-order, no layers, no PNG export and no pressure or touch support. A link points at a board and the linked text's position, not at a particular element inside that board; the clipboard history is session state, so it is lost when the daemon restarts. A cut joins the clipboard history and the document in one action, but it cannot be undone: `Ctrl+V` pastes the copy back, slightly offset and selected.
+- Undo and redo are in memory only, so both are empty after a restart; there is no persisted history. There is no z-order, no layers, no PNG export and no pressure or touch support. A link points at a board and the linked text's position, not at a particular element inside that board; the clipboard history is session state, so it is lost when the daemon restarts. A cut is an ordinary undoable document change, but the clipboard side of it is not restored by undo.
 - The toolbar is part of the full-screen edit overlay, not a surface of its own, so it cannot respect another layer surface's exclusive zone: a compositor bar or dock that occupies the edge the rail is docked to, or the optical-centre band, is covered by it while editing. Its edge comes from `toolbar` in the configuration file; it cannot be dragged.
 - A block shows an icon of what it does and says what it does only while the pointer is on it, so a first-time user learns the rail by hovering, or from this README's key table. Each block's text ends with its key, and that is the only place a key appears: when a block's text does not fit the room reserved for the rail, the block stays a square showing its icon and no text, and its key is then only in this README. The longest text is `text: click to place (T)`, about 177 logical pixels of capsule, which fits the 320-pixel reserve on any output at least 336 pixels wide.
 - A drawer shows the rows that fit the output. A very short screen folds almost the whole rail into it, and a panel taller than the screen would be rows nobody could click or read, so the rows nearest the `more` block are kept and the rest stay on their keys — a folded control never loses its key.

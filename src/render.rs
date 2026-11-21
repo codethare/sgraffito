@@ -170,6 +170,9 @@ enum Icon {
     Link,
     /// A clipboard entry.
     Clipboard,
+    /// Undo and redo arrows for the history cards.
+    Undo,
+    Redo,
     /// No backdrop: an empty square.
     Clear,
     /// A square grid.
@@ -1543,6 +1546,16 @@ impl Renderer {
             if damage.is_none_or(|d| box_.intersects(d)) {
                 self.draw_toolbar(&mut pixmap, toolbar, scale);
             }
+            let cards = cards_bounds((w, h), config::current().toolbar);
+            if damage.is_none_or(|d| cards.intersects(d)) {
+                self.draw_cards(
+                    &mut pixmap,
+                    toolbar,
+                    (w, h),
+                    scale,
+                    config::current().toolbar,
+                );
+            }
         }
         // Interface on the canvas: only while something is held, so a press on it can be told from
         // a press on the drawing by the same rule that says the button is there.
@@ -2201,6 +2214,154 @@ impl Renderer {
         }
     }
 
+    /// The zoom percentage and the two history cards, on the edge opposite the rail. They are
+    /// separate from the rail's cached layout: no block owns them and they never widen a capsule.
+    fn draw_cards(
+        &mut self,
+        pixmap: &mut PixmapMut,
+        toolbar: &Toolbar,
+        surface: (f32, f32),
+        scale: f32,
+        rail: ToolbarPosition,
+    ) {
+        let cards = cards_layout(surface, rail);
+        let edge = rail.opposite();
+        let square = |r: Rect| Rect {
+            x: r.x * scale,
+            y: r.y * scale,
+            w: r.w * scale,
+            h: r.h * scale,
+        };
+        let zoom = square(cards.zoom);
+        round_rect(
+            pixmap,
+            zoom,
+            TOOLBAR_RADIUS * scale,
+            parse_hex(TOOLBAR_BLOCK_FILL),
+            Some((parse_hex(TOOLBAR_BLOCK_EDGE), TOOLBAR_HAIRLINE * scale)),
+        );
+        let percent = format!("{}%", (toolbar.zoom * 100.0).round() as i32);
+        let text_w = self.text_width(&percent, TOOLBAR_TEXT_SIZE);
+        let text = toolbar_text(
+            zoom.x / scale + (cards.zoom.w - text_w) / 2.0,
+            zoom.y / scale,
+            cards.zoom.h,
+            TOOLBAR_TEXT_SIZE,
+            TOOLBAR_FOREGROUND,
+            &percent,
+        );
+        self.draw_text(
+            pixmap,
+            &text,
+            Screen {
+                scale,
+                view: View::default(),
+            },
+            None,
+            None,
+            None,
+        );
+        let mut buttons = [
+            (
+                cards.undo,
+                ToolbarAction::Undo,
+                toolbar.can_undo,
+                Icon::Undo,
+                "Z",
+            ),
+            (
+                cards.redo,
+                ToolbarAction::Redo,
+                toolbar.can_redo,
+                Icon::Redo,
+                "⇧Z",
+            ),
+        ];
+        for (rect, action, enabled, icon, badge) in &mut buttons {
+            let box_ = square(*rect);
+            let hover = toolbar.hover == Some(*action);
+            if hover && *enabled {
+                let ring = box_.grown(-TOOLBAR_HOVER_INSET * scale);
+                round_rect(
+                    pixmap,
+                    ring,
+                    (TOOLBAR_RADIUS - TOOLBAR_HOVER_INSET) * scale,
+                    parse_hex(TOOLBAR_HOVER_FILL),
+                    Some((parse_hex(TOOLBAR_FOREGROUND), TOOLBAR_HAIRLINE * scale)),
+                );
+            }
+            let ink = if *enabled {
+                TOOLBAR_FOREGROUND
+            } else {
+                TOOLBAR_LABEL_TEXT
+            };
+            let icon_box = Rect {
+                x: box_.x + (box_.w - 18.0 * scale) / 2.0,
+                y: box_.y + 3.0 * scale,
+                w: 18.0 * scale,
+                h: 18.0 * scale,
+            };
+            draw_icon(pixmap, *icon, icon_box, scale, ink, false);
+            self.draw_badge(pixmap, box_, scale, badge, ink);
+        }
+        let hint = match toolbar.hover {
+            Some(ToolbarAction::Undo) if toolbar.can_undo => Some((cards.undo, "undo (Ctrl+Z)")),
+            Some(ToolbarAction::Redo) if toolbar.can_redo => {
+                Some((cards.redo, "redo (Ctrl+Shift+Z)"))
+            }
+            _ => None,
+        };
+        if let Some((rect, label)) = hint {
+            let width = self.text_width(label, TOOLBAR_TEXT_SIZE) + 2.0 * TOOLBAR_LABEL_PAD;
+            let (x, y) = match edge {
+                ToolbarPosition::Right => (rect.x - TOOLBAR_GAP - width, rect.y),
+                ToolbarPosition::Left => (rect.x + rect.w + TOOLBAR_GAP, rect.y),
+                ToolbarPosition::Bottom => (
+                    (rect.x + rect.w / 2.0 - width / 2.0)
+                        .clamp(TOOLBAR_MARGIN, surface.0 - width - TOOLBAR_MARGIN),
+                    rect.y - TOOLBAR_GAP - TOOLBAR_BLOCK,
+                ),
+                ToolbarPosition::Top => (
+                    (rect.x + rect.w / 2.0 - width / 2.0)
+                        .clamp(TOOLBAR_MARGIN, surface.0 - width - TOOLBAR_MARGIN),
+                    rect.y + rect.h + TOOLBAR_GAP,
+                ),
+            };
+            let capsule = Rect {
+                x: x * scale,
+                y: y * scale,
+                w: width * scale,
+                h: TOOLBAR_BLOCK * scale,
+            };
+            round_rect(
+                pixmap,
+                capsule,
+                TOOLBAR_RADIUS * scale,
+                parse_hex(TOOLBAR_BLOCK_FILL),
+                Some((parse_hex(TOOLBAR_BLOCK_EDGE), TOOLBAR_HAIRLINE * scale)),
+            );
+            let text = toolbar_text(
+                x + TOOLBAR_LABEL_PAD,
+                y,
+                TOOLBAR_BLOCK,
+                TOOLBAR_TEXT_SIZE,
+                TOOLBAR_LABEL_TEXT,
+                label,
+            );
+            self.draw_text(
+                pixmap,
+                &text,
+                Screen {
+                    scale,
+                    view: View::default(),
+                },
+                None,
+                None,
+                None,
+            );
+        }
+    }
+
     /// The toolbar block under a pointer position, in logical pixels, or `None` outside the rail.
     /// The layout is the one the frame drew, so a block's rectangle is the rectangle it paints --
     /// including the capsule a stretched block has become.
@@ -2226,6 +2387,19 @@ impl Renderer {
         x: f32,
         y: f32,
     ) -> Option<ToolbarAction> {
+        let cards = cards_layout((width, height), position);
+        if let Some(action) = [
+            (cards.undo, ToolbarAction::Undo, toolbar.can_undo),
+            (cards.redo, ToolbarAction::Redo, toolbar.can_redo),
+        ]
+        .into_iter()
+        .find(|(rect, _, enabled)| {
+            *enabled && x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h
+        })
+        .map(|(_, action, _)| action)
+        {
+            return Some(action);
+        }
         let pill = self.cached_toolbar_pill(toolbar, (width, height), position)?;
         let origin = position.origin((width, height), pill.column);
         let (along, across) = position.to_local(origin, x, y);
@@ -2244,10 +2418,15 @@ impl Renderer {
         {
             return Some(owner);
         }
-        pill.hits
+        if let Some(action) = pill
+            .hits
             .iter()
             .find(|(hit, _)| inside(hit))
             .map(|(_, action)| *action)
+        {
+            return Some(action);
+        }
+        None
     }
 
     fn cached_toolbar_pill(
@@ -3412,6 +3591,111 @@ fn toolbar_ceiling(surface: f32) -> f32 {
     (surface - 2.0 * TOOLBAR_MARGIN).min(TOOLBAR_RESERVE)
 }
 
+/// One zoom readout and its two history cards. All three are the same width so the column on a
+/// side edge and the row on a top/bottom edge stay flush.
+#[derive(Clone, Copy)]
+struct CardsLayout {
+    zoom: Rect,
+    undo: Rect,
+    redo: Rect,
+    edge: ToolbarPosition,
+}
+
+const CARD_W: f32 = 64.0;
+const CARD_H: f32 = TOOLBAR_BLOCK;
+
+fn cards_layout(surface: (f32, f32), rail: ToolbarPosition) -> CardsLayout {
+    let edge = rail.opposite();
+    let gap = TOOLBAR_GAP;
+    if edge.horizontal() {
+        let total = 3.0 * CARD_W + 2.0 * gap;
+        // Right-aligned: the bottom-centre move-to-board button owns the middle of a top/bottom
+        // screen, and the cards must not sit under it.
+        let x = (surface.0 - TOOLBAR_MARGIN - total).max(TOOLBAR_MARGIN);
+        let y = if edge == ToolbarPosition::Bottom {
+            (surface.1 - TOOLBAR_MARGIN - CARD_H).max(0.0)
+        } else {
+            TOOLBAR_MARGIN
+        };
+        CardsLayout {
+            zoom: Rect {
+                x,
+                y,
+                w: CARD_W,
+                h: CARD_H,
+            },
+            undo: Rect {
+                x: x + CARD_W + gap,
+                y,
+                w: CARD_W,
+                h: CARD_H,
+            },
+            redo: Rect {
+                x: x + 2.0 * (CARD_W + gap),
+                y,
+                w: CARD_W,
+                h: CARD_H,
+            },
+            edge,
+        }
+    } else {
+        let total = 3.0 * CARD_H + 2.0 * gap;
+        let y = ((surface.1 - total) / 2.0).max(TOOLBAR_MARGIN);
+        let x = if edge == ToolbarPosition::Right {
+            (surface.0 - TOOLBAR_MARGIN - CARD_W).max(0.0)
+        } else {
+            TOOLBAR_MARGIN
+        };
+        CardsLayout {
+            zoom: Rect {
+                x,
+                y,
+                w: CARD_W,
+                h: CARD_H,
+            },
+            undo: Rect {
+                x,
+                y: y + CARD_H + gap,
+                w: CARD_W,
+                h: CARD_H,
+            },
+            redo: Rect {
+                x,
+                y: y + 2.0 * (CARD_H + gap),
+                w: CARD_W,
+                h: CARD_H,
+            },
+            edge,
+        }
+    }
+}
+
+/// The area the cards and a hover hint can paint. The hint opens toward the screen interior.
+pub fn cards_bounds(surface: (f32, f32), rail: ToolbarPosition) -> Rect {
+    let cards = cards_layout(surface, rail);
+    let cards_box = cards.zoom.union(cards.undo).union(cards.redo);
+    match cards.edge {
+        ToolbarPosition::Right => Rect {
+            x: cards_box.x - 190.0,
+            w: cards_box.w + 190.0,
+            ..cards_box
+        },
+        ToolbarPosition::Left => Rect {
+            w: cards_box.w + 190.0,
+            ..cards_box
+        },
+        ToolbarPosition::Top => Rect {
+            h: cards_box.h + TOOLBAR_BLOCK + TOOLBAR_GAP,
+            ..cards_box
+        },
+        ToolbarPosition::Bottom => Rect {
+            y: cards_box.y - TOOLBAR_BLOCK - TOOLBAR_GAP,
+            h: cards_box.h + TOOLBAR_BLOCK + TOOLBAR_GAP,
+            ..cards_box
+        },
+    }
+}
+
 /// Everything the rail paints. A stretched block's width depends on the font, so the damage
 /// accounting reserves the widest block `toolbar_pill` will build, as a strip on the output's edge
 /// the rail is docked to; the strip only joins a damage box that reaches it.
@@ -3898,6 +4182,24 @@ fn draw_icon(
             path.close();
             path.move_to(band[0][0], band[0][1]);
             path.line_to(band[1][0], band[1][1]);
+        }
+        Icon::Undo | Icon::Redo => {
+            let (start, end, tip) = if icon == Icon::Undo {
+                (x + w * 0.78, x + w * 0.28, x + w * 0.28)
+            } else {
+                (x + w * 0.22, x + w * 0.72, x + w * 0.72)
+            };
+            path.move_to(start, y + h * 0.5);
+            path.line_to(end, y + h * 0.5);
+            let (dx, dy) = if icon == Icon::Undo {
+                (w * 0.18, h * 0.2)
+            } else {
+                (-w * 0.18, h * 0.2)
+            };
+            path.move_to(tip, y + h * 0.5);
+            path.line_to(tip + dx, y + h * 0.5 - dy);
+            path.move_to(tip, y + h * 0.5);
+            path.line_to(tip + dx, y + h * 0.5 + dy);
         }
         Icon::Text => {
             path.move_to(x, y + h * 0.15);
@@ -5813,6 +6115,9 @@ mod tests {
             boards: Vec::new(),
             shared: false,
             backdrop: Backdrop::Black,
+            zoom: 1.0,
+            can_undo: false,
+            can_redo: false,
         }
     }
 
@@ -6109,6 +6414,9 @@ mod tests {
                 boards: Vec::new(),
                 shared: false,
                 backdrop: Backdrop::Black,
+                zoom: 1.0,
+                can_undo: false,
+                can_redo: false,
             }),
             ..Default::default()
         };
@@ -6458,6 +6766,9 @@ mod tests {
             boards: Vec::new(),
             shared: false,
             backdrop: Backdrop::Black,
+            zoom: 1.0,
+            can_undo: false,
+            can_redo: false,
         }
     }
 
@@ -6820,5 +7131,65 @@ mod tests {
             near_white(icon.data(), 60, mid[0] as u32, mid[1] as u32),
             "the band is missing"
         );
+    }
+
+    #[test]
+    fn cards_sit_on_the_edge_opposite_the_rail_and_stay_on_screen() {
+        let surface = (900.0, 1000.0);
+        for rail in [
+            ToolbarPosition::Left,
+            ToolbarPosition::Right,
+            ToolbarPosition::Top,
+            ToolbarPosition::Bottom,
+        ] {
+            let cards = cards_layout(surface, rail);
+            assert_eq!(cards.edge, rail.opposite());
+            for rect in [cards.zoom, cards.undo, cards.redo] {
+                assert!(rect.x >= 0.0 && rect.y >= 0.0);
+                assert!(rect.x + rect.w <= surface.0);
+                assert!(rect.y + rect.h <= surface.1);
+            }
+            let gap = if cards.edge.horizontal() {
+                cards.undo.x - (cards.zoom.x + cards.zoom.w)
+            } else {
+                cards.undo.y - (cards.zoom.y + cards.zoom.h)
+            };
+            assert_eq!(gap, TOOLBAR_GAP);
+        }
+    }
+
+    #[test]
+    fn the_history_cards_hit_only_when_their_action_is_available() {
+        let mut renderer = Renderer::new();
+        let mut toolbar = crate::render::tests::rail_for_legend();
+        toolbar.can_undo = true;
+        toolbar.can_redo = true;
+        let surface = (900.0, 1000.0);
+        for rail in [
+            ToolbarPosition::Left,
+            ToolbarPosition::Right,
+            ToolbarPosition::Top,
+            ToolbarPosition::Bottom,
+        ] {
+            let cards = cards_layout(surface, rail);
+            let centre = |r: Rect| (r.x + r.w / 2.0, r.y + r.h / 2.0);
+            let (x, y) = centre(cards.undo);
+            assert_eq!(
+                renderer.toolbar_hit_at(rail, &toolbar, surface.0, surface.1, x, y),
+                Some(ToolbarAction::Undo)
+            );
+            let (x, y) = centre(cards.redo);
+            assert_eq!(
+                renderer.toolbar_hit_at(rail, &toolbar, surface.0, surface.1, x, y),
+                Some(ToolbarAction::Redo)
+            );
+            toolbar.can_undo = false;
+            let (x, y) = centre(cards.undo);
+            assert_eq!(
+                renderer.toolbar_hit_at(rail, &toolbar, surface.0, surface.1, x, y),
+                None
+            );
+            toolbar.can_undo = true;
+        }
     }
 }

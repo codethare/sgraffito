@@ -2994,6 +2994,11 @@ pub struct Toolbar {
     pub shared: bool,
     /// What edit mode paints behind the document.
     pub backdrop: Backdrop,
+    /// The zoom of the output this rail belongs to, as the cards show it.
+    pub zoom: f32,
+    /// Whether a document change can be undone and whether an undone one can be redone.
+    pub can_undo: bool,
+    pub can_redo: bool,
 }
 
 #[derive(Debug, Clone)]
