@@ -46,8 +46,8 @@ use crate::canvas::{
     PEN_WIDTH_MIN, PEN_WIDTH_STEP, Press, Rect, SNAP_RADIUS, Selection, Shape, ShapeKind,
     TEXT_SIZE_MAX, TEXT_SIZE_MIN, TEXT_SIZE_STEP, Target, TextBuffer, TextItem, TextOverlay,
     Toolbar, Transform, View, ZOOM_STEP, Zoom, date_stamp, link_source, marquee_select, note_drag,
-    nudge_delta, selection_bounds, selection_frame, selection_press, snap_square, stepped_size,
-    toggle_selection,
+    nudge_delta, selection_bounds, selection_frame, selection_frame_with, selection_press_with,
+    snap_square, stepped_size, toggle_selection,
 };
 
 pub use crate::canvas::{Tool, ToolbarAction};
@@ -239,6 +239,15 @@ impl Output {
     pub(crate) fn board(&self) -> &str {
         &self.board
     }
+
+    /// How this output draws: its scale and the view its document is read through. The interface
+    /// measures text through it, so a frame and the handles on it agree about the glyphs.
+    pub(crate) fn screen(&self) -> Screen {
+        Screen {
+            scale: self.scale,
+            view: self.view,
+        }
+    }
 }
 
 /// Whether the caret is on at `elapsed` since the edit began: on for one blink, off for the next.
@@ -270,7 +279,7 @@ pub struct App {
     shm: Shm,
     pool: SlotPool,
 
-    renderer: Renderer,
+    pub(crate) renderer: Renderer,
     pub(crate) doc: Doc,
     pub(crate) store: Store,
     path: PathBuf,
@@ -1679,15 +1688,26 @@ impl App {
                 .as_ref()
                 .map(|s| s.items.clone())
                 .unwrap_or_default();
-            let press = selection_press(
+            // The handles are drawn on the measured text, so a press has to grab them there: the
+            // estimate would leave them off the words it is meant to frame.
+            let boxes = self.renderer.text_boxes(
+                ann,
+                &held,
+                Screen {
+                    scale: out.scale,
+                    view,
+                },
+            );
+            let press = selection_press_with(
                 ann,
                 &held,
                 view,
                 [x, y],
                 view.canvas_len(ERASER_THRESHOLD),
                 self.shift,
+                &boxes,
             );
-            let frame = selection_frame(ann, &held, None);
+            let frame = selection_frame_with(ann, &held, None, &boxes);
             (press, frame, view.to_canvas([x, y]))
         };
         let alt = self.alt;

@@ -33,7 +33,7 @@ use crate::app::{
 };
 use crate::canvas::{
     Board, Caret, ERASER_THRESHOLD, Rect, SELECT_HANDLE_HIT, ShapeKind, Stroke, Target, TextBuffer,
-    ZOOM_STEP, constrained_drag, grab_at, selection_frame,
+    ZOOM_STEP, constrained_drag, grab_at, selection_frame_with,
 };
 use crate::render::{
     closes_panel_on_pick, move_button_bounds, panel_stays_open, press_dismisses_panel,
@@ -810,10 +810,17 @@ impl App {
             let board_name = out.board().to_string();
             let empty = Board::default();
             let ann = self.doc.boards.get(&board_name).unwrap_or(&empty);
-            out.overlay
+            let Some(items) = out
+                .overlay
                 .selection
                 .as_ref()
-                .and_then(|s| selection_frame(ann, &s.items, None))
+                .map(|selection| selection.items.clone())
+            else {
+                return;
+            };
+            // The handles are drawn on the measured text, so the cursor agrees with them.
+            let boxes = self.renderer.text_boxes(ann, &items, out.screen());
+            selection_frame_with(ann, &items, None, &boxes)
                 // The handles are interface lengths, so the frame is grabbed in screen space.
                 .map(|frame| out.view.screen_rect(frame))
                 .and_then(|frame| grab_at(frame, x, y, SELECT_HANDLE_HIT))

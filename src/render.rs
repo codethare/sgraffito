@@ -14,7 +14,7 @@ use wayland_client::protocol::wl_shm::Format;
 use crate::canvas::{
     Backdrop, Board, Handle, ItemId, LiveConnector, NOTE_DATE_SIZE, NOTE_RADIUS, Note, Overlay,
     Rect, SELECT_HANDLE, SELECT_ROTATE_GAP, Shape, ShapeKind, Stroke, TextItem, TextOverlay, Tool,
-    Toolbar, ToolbarAction, View, parse_hex, rect_of, rotate_handle, selection_frame,
+    Toolbar, ToolbarAction, View, parse_hex, rect_of, rotate_handle, selection_frame_with,
 };
 use crate::config;
 use crate::sketch::{self, Seg};
@@ -1278,10 +1278,20 @@ impl Renderer {
             }
         }
         draw_snap_hints(&mut pixmap, ann, overlay, screen);
-        if let Some(frame) = overlay
-            .selection
+        // The frame is drawn on the measured text, not on the damage estimate, so its trailing edge
+        // sits on the last glyph instead of past it.
+        let selection_boxes = overlay.selection.as_ref().map(|s| {
+            (
+                s.items.clone(),
+                s.transform,
+                self.text_boxes(ann, &s.items, screen),
+            )
+        });
+        if let Some(frame) = selection_boxes
             .as_ref()
-            .and_then(|s| selection_frame(ann, &s.items, s.transform))
+            .and_then(|(items, transform, boxes)| {
+                selection_frame_with(ann, items, *transform, boxes)
+            })
         {
             draw_selection(&mut pixmap, view.screen_rect(frame), screen);
         }
@@ -2214,6 +2224,28 @@ impl Renderer {
 
     /// The region a text box's content occupies, which is what a click that re-enters it is
     /// tested against.
+    /// The measured box of every text in `items`, in canvas coordinates: the selection frame, its
+    /// handles and the press that grabs them use these, so a frame sits on the words rather than on
+    /// the damage estimate, which is deliberately wider.
+    pub fn text_boxes(
+        &mut self,
+        ann: &Board,
+        items: &[ItemId],
+        screen: Screen,
+    ) -> Vec<(usize, Rect)> {
+        items
+            .iter()
+            .filter_map(|id| match id {
+                ItemId::Text(i) => Some(*i),
+                _ => None,
+            })
+            .filter_map(|i| {
+                let text = ann.texts.get(i)?;
+                Some((i, self.text_edit_bounds(&text.text, text, screen)))
+            })
+            .collect()
+    }
+
     pub fn text_edit_bounds(&mut self, text: &str, item: &TextItem, screen: Screen) -> Rect {
         self.prepare_text(text, item, screen, None)
             .paint_bounds

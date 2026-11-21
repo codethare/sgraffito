@@ -1,7 +1,7 @@
 use sgraffito::canvas::{
     Backdrop, Board, BoardRow, Doc, ERASER_THRESHOLD, ItemId, Note, Overlay, PALETTE, Rect,
     Selection, Shape, ShapeKind, Stroke, TextBuffer, TextItem, TextOverlay, Tool, Toolbar,
-    ToolbarAction, Transform, View,
+    ToolbarAction, Transform, View, selection_frame, selection_frame_with,
 };
 use sgraffito::render::{
     DAMAGE_SLACK, DamageRegion, FrameCache, Renderer, Screen, buffer_format, move_button_bounds,
@@ -3917,4 +3917,41 @@ fn the_caret_moves_between_explicit_lines() {
     let first = edit_frame(w, h, "ab\ncd", 2, "");
     let second = edit_frame(w, h, "ab\ncd", 5, "");
     assert_ne!(first, second, "the caret did not move to another line");
+}
+
+/// A selected text's frame sits on the words: the box the interface frames it with is the measured one,
+/// not the damage estimate, which is deliberately wider and leaves the frame's trailing edge in empty
+/// space.
+#[test]
+fn a_selected_texts_frame_is_measured_not_estimated() {
+    let mut renderer = Renderer::new();
+    let ann = Board {
+        texts: vec![TextItem {
+            x: 0.0,
+            y: 0.0,
+            color: "#fff".into(),
+            size: 18.0,
+            text: "iii".into(),
+            link: None,
+        }],
+        ..Board::default()
+    };
+    let view = View::default();
+    let screen = Screen { scale: 1.0, view };
+    let items = [ItemId::Text(0)];
+    let boxes = renderer.text_boxes(&ann, &items, screen);
+    let measured = selection_frame_with(&ann, &items, None, &boxes).expect("no frame");
+    let estimated = selection_frame(&ann, &items, None).expect("no frame");
+    assert!(
+        measured.w < estimated.w,
+        "the frame still uses the damage estimate: {} vs {}",
+        measured.w,
+        estimated.w
+    );
+    // Three narrow glyphs at 18 pt are far less than three ems wide.
+    assert!(
+        measured.w < 3.0 * 18.0,
+        "the frame is wider than the glyphs: {}",
+        measured.w
+    );
 }

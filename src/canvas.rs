@@ -1657,8 +1657,22 @@ pub fn selection_press(
     tolerance: f32,
     shift: bool,
 ) -> Press {
+    selection_press_with(ann, held, view, screen, tolerance, shift, &[])
+}
+
+/// The press, with the texts measured: the handles are drawn on the measured frame, so they have to be
+/// grabbed on it too.
+pub fn selection_press_with(
+    ann: &Board,
+    held: &[ItemId],
+    view: View,
+    screen: [f32; 2],
+    tolerance: f32,
+    shift: bool,
+    texts: &[(usize, Rect)],
+) -> Press {
     let canvas = view.to_canvas(screen);
-    let frame = selection_frame(ann, held, None);
+    let frame = selection_frame_with(ann, held, None, texts);
     if let Some(frame) = frame
         && let Some(grab) = grab_at(
             view.screen_rect(frame),
@@ -2266,12 +2280,27 @@ pub fn note_drag(origin: [f32; 2], at: [f32; 2]) -> Option<Rect> {
 /// contributes its conservative estimate rather than its ink, so a frame errs outside the drawn
 /// glyphs instead of cutting through them.
 pub fn item_bounds(ann: &Board, id: ItemId) -> Option<Rect> {
+    item_bounds_with(ann, id, &[])
+}
+
+/// Measured boxes of some of a board's texts, by index. A text's real width is a font question, so
+/// only a caller with a renderer can say it; an index that is not here falls back to the damage
+/// estimate, which is deliberately wider than the words.
+pub fn item_bounds_with(ann: &Board, id: ItemId, texts: &[(usize, Rect)]) -> Option<Rect> {
     match id {
         ItemId::Stroke(i) => ann.strokes.get(i)?.bounds(),
-        ItemId::Text(i) => ann.texts.get(i).map(TextItem::paint_bounds),
+        ItemId::Text(i) => ann.texts.get(i).map(|text| text_box(text, i, texts)),
         ItemId::Shape(i) => ann.shapes.get(i).map(Shape::bounds),
         ItemId::Note(i) => ann.notes.get(i).map(Note::bounds),
     }
+}
+
+/// A text's box: the measured one when the caller has it, else the damage estimate.
+fn text_box(text: &TextItem, index: usize, texts: &[(usize, Rect)]) -> Rect {
+    texts
+        .iter()
+        .find(|(i, _)| *i == index)
+        .map_or_else(|| text.paint_bounds(), |(_, box_)| *box_)
 }
 
 /// Most elements one clipboard entry may hold, and most bytes of JSON it may be. A clip is memory,
@@ -2406,6 +2435,17 @@ pub fn selection_frame(
     items: &[ItemId],
     transform: Option<Transform>,
 ) -> Option<Rect> {
+    selection_frame_with(ann, items, transform, &[])
+}
+
+/// The frame with the texts measured: the drawn box, the handles and the press that grabs them all use
+/// these, so the frame sits on the words instead of on the damage estimate.
+pub fn selection_frame_with(
+    ann: &Board,
+    items: &[ItemId],
+    transform: Option<Transform>,
+    texts: &[(usize, Rect)],
+) -> Option<Rect> {
     items
         .iter()
         .filter_map(|id| match transform {
@@ -2415,11 +2455,14 @@ pub fn selection_frame(
                     .get(*i)
                     .map(|s| t.stroke(s).bounds())
                     .unwrap_or(None),
-                ItemId::Text(i) => ann.texts.get(*i).map(|x| t.text(x).paint_bounds()),
+                ItemId::Text(i) => ann
+                    .texts
+                    .get(*i)
+                    .map(|text| text_box(&t.text(text), *i, texts)),
                 ItemId::Shape(i) => ann.shapes.get(*i).map(|s| t.shape(s).bounds()),
                 ItemId::Note(i) => ann.notes.get(*i).map(|n| t.note(n).bounds()),
             },
-            None => item_bounds(ann, *id),
+            None => item_bounds_with(ann, *id, texts),
         })
         .reduce(Rect::union)
 }
