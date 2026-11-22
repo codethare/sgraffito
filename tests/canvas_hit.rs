@@ -2190,3 +2190,81 @@ fn one_shot_drawing_tools_hand_the_pointer_back_to_select() {
         assert!(!tool.hands_to_select(), "{tool:?} should keep its tool");
     }
 }
+
+// --- a closed shape takes what it encloses ------------------------------------------------
+
+use sgraffito::canvas::{selection_with_contents, toggle_selection_with_contents};
+
+fn enclosed_board(outer_rotate: f32) -> Board {
+    let mut board = Board::default();
+    let mut outer = shape(ShapeKind::Rect, [0.0, 0.0], [300.0, 300.0]);
+    outer.rotate = outer_rotate;
+    board.add_shape(outer);
+    board.add_shape(shape(ShapeKind::Circle, [100.0, 100.0], [200.0, 200.0]));
+    board.add_shape(shape(ShapeKind::Line, [110.0, 120.0], [180.0, 180.0]));
+    board.texts = vec![text(120.0, 120.0, "in"), text(350.0, 350.0, "out")];
+    board.strokes = vec![
+        line(130.0, 110.0, 180.0),
+        Stroke {
+            color: "#e01b24".into(),
+            width: 3.0,
+            points: vec![[250.0, 250.0], [350.0, 350.0]],
+            attach: [None, None],
+        },
+    ];
+    board.notes = vec![Note::new(60.0, 60.0, "#f6d32d", "2026/11/22".into())];
+    board
+}
+
+#[test]
+fn selecting_a_closed_shape_takes_everything_it_encloses() {
+    let board = enclosed_board(0.0);
+    let selected = selection_with_contents(&board, &[ItemId::Shape(0)]);
+    assert!(selected.contains(&ItemId::Shape(1)), "inner shape missing");
+    assert!(selected.contains(&ItemId::Shape(2)), "inner line missing");
+    assert!(selected.contains(&ItemId::Text(0)), "inner text missing");
+    assert!(selected.contains(&ItemId::Note(0)), "inner note missing");
+    assert!(
+        selected.contains(&ItemId::Stroke(0)),
+        "inner stroke missing"
+    );
+    assert!(!selected.contains(&ItemId::Text(1)), "outside text taken");
+    assert!(
+        !selected.contains(&ItemId::Stroke(1)),
+        "crossing stroke taken"
+    );
+}
+
+#[test]
+fn a_rotated_container_uses_the_shape_it_draws() {
+    let board = enclosed_board(std::f32::consts::FRAC_PI_4);
+    let selected = selection_with_contents(&board, &[ItemId::Shape(0)]);
+    assert!(selected.contains(&ItemId::Text(0)));
+}
+
+#[test]
+fn shift_removing_a_container_removes_its_contents() {
+    let board = enclosed_board(0.0);
+    let held = toggle_selection_with_contents(&board, &[], ItemId::Shape(0));
+    assert!(held.len() > 1);
+    let removed = toggle_selection_with_contents(&board, &held, ItemId::Shape(0));
+    assert!(
+        removed.is_empty(),
+        "contents stayed after the container went"
+    );
+}
+
+#[test]
+fn an_empty_press_inside_a_closed_shape_picks_that_shape() {
+    let mut board = Board::default();
+    board.add_shape(shape(ShapeKind::Rect, [0.0, 0.0], [200.0, 200.0]));
+    let press = selection_press(
+        &board,
+        &[],
+        View::default(),
+        [100.0, 100.0],
+        ERASER_THRESHOLD,
+        false,
+    );
+    assert_eq!(press, Press::Element(ItemId::Shape(0)));
+}

@@ -1512,6 +1512,52 @@ impl Shape {
                 .fold(f32::INFINITY, f32::min),
         }
     }
+
+    /// Whether a world point lies inside this closed shape. The point is mapped back into the
+    /// shape's unrotated frame first, so a turned rectangle or diamond contains what it looks like it
+    /// contains.
+    pub fn contains_point(&self, p: [f32; 2]) -> bool {
+        if !self.kind.is_closed() {
+            return false;
+        }
+        let (centre, half) = self.box_geometry();
+        if half[0] <= f32::EPSILON || half[1] <= f32::EPSILON {
+            return false;
+        }
+        let p = self.to_local(p);
+        let box_ = rect_of(self.from, self.to);
+        match self.kind {
+            ShapeKind::Circle => {
+                let u = (p[0] - centre[0]) / half[0];
+                let v = (p[1] - centre[1]) / half[1];
+                u * u + v * v <= 1.0 + 1e-4
+            }
+            ShapeKind::Diamond => {
+                let u = ((p[0] - centre[0]) / half[0]).abs();
+                let v = ((p[1] - centre[1]) / half[1]).abs();
+                u + v <= 1.0 + 1e-4
+            }
+            ShapeKind::Rect => {
+                p[0] >= box_.x - 0.01
+                    && p[0] <= box_.x + box_.w + 0.01
+                    && p[1] >= box_.y - 0.01
+                    && p[1] <= box_.y + box_.h + 0.01
+            }
+            ShapeKind::Line | ShapeKind::Arrow => false,
+        }
+    }
+
+    /// Whether every corner of `rect` is inside this closed shape.
+    pub fn contains_rect(&self, rect: Rect) -> bool {
+        [
+            [rect.x, rect.y],
+            [rect.x + rect.w, rect.y],
+            [rect.x + rect.w, rect.y + rect.h],
+            [rect.x, rect.y + rect.h],
+        ]
+        .into_iter()
+        .all(|p| self.contains_point(p))
+    }
 }
 
 impl Stroke {
@@ -1789,9 +1835,97 @@ pub fn selection_press_with(
         // the marquee decides the selection on release.
         None => match frame.filter(|f| view.screen_rect(*f).contains(screen[0], screen[1])) {
             Some(_) => Press::Move,
-            None => Press::Marquee { canvas },
+            // A closed shape is an object, not a hole: a press inside it picks it and the group it
+            // encloses. The topmost shape wins, so an inner shape remains reachable without having
+            // to hit its outline exactly.
+            None => match ann
+                .shapes
+                .iter()
+                .rposition(|shape| shape.kind.is_closed() && shape.contains_point(canvas))
+                .filter(|index| !held.contains(&ItemId::Shape(*index)))
+            {
+                Some(index) => Press::Element(ItemId::Shape(index)),
+                None => Press::Marquee { canvas },
+            },
         },
     }
+}
+
+/// The selection `items` implies once a closed shape takes what it encloses. A circle, rectangle or
+/// diamond holds every stroke, text box, note and shape whose whole geometry lies inside it, and a
+/// selected child shape carries its own contents in turn. An element picked directly stays on its
+/// own; the container is what pulls a group together.
+pub fn selection_with_contents(ann: &Board, items: &[ItemId]) -> Vec<ItemId> {
+    let mut selected = items.to_vec();
+    let mut containers: Vec<usize> = items
+        .iter()
+        .filter_map(|item| match *item {
+            ItemId::Shape(index)
+                if ann
+                    .shapes
+                    .get(index)
+                    .is_some_and(|shape| shape.kind.is_closed()) =>
+            {
+                Some(index)
+            }
+            _ => None,
+        })
+        .collect();
+    let mut scanned = vec![false; ann.shapes.len()];
+    for &index in &containers {
+        if let Some(slot) = scanned.get_mut(index) {
+            *slot = true;
+        }
+    }
+    let mut at = 0;
+    while at < containers.len() {
+        let container_index = containers[at];
+        at += 1;
+        let Some(container) = ann.shapes.get(container_index) else {
+            continue;
+        };
+        let mut add = |id: ItemId| {
+            if !selected.contains(&id) {
+                selected.push(id);
+                true
+            } else {
+                false
+            }
+        };
+        for (index, stroke) in ann.strokes.iter().enumerate() {
+            if !stroke.points.is_empty()
+                && stroke.points.iter().all(|p| container.contains_point(*p))
+            {
+                add(ItemId::Stroke(index));
+            }
+        }
+        for (index, text) in ann.texts.iter().enumerate() {
+            if container.contains_rect(text.bounds()) {
+                add(ItemId::Text(index));
+            }
+        }
+        for (index, note) in ann.notes.iter().enumerate() {
+            if container.contains_rect(note.bounds()) {
+                add(ItemId::Note(index));
+            }
+        }
+        for (index, shape) in ann.shapes.iter().enumerate() {
+            if index == container_index {
+                continue;
+            }
+            let outline = shape.outline();
+            if !outline.is_empty()
+                && outline.iter().all(|p| container.contains_point(*p))
+                && add(ItemId::Shape(index))
+                && shape.kind.is_closed()
+                && !scanned[index]
+            {
+                scanned[index] = true;
+                containers.push(index);
+            }
+        }
+    }
+    selected
 }
 
 /// The selection a `Shift` press on `id` produces: the element appended when it was not held, removed
@@ -1803,6 +1937,23 @@ pub fn toggle_selection(held: &[ItemId], id: ItemId) -> Vec<ItemId> {
             items.remove(index);
         }
         None => items.push(id),
+    }
+    items
+}
+
+/// `Shift` toggling a closed shape toggles the contents it encloses with it: adding the shape adds
+/// them, and removing it removes the group that came in with it.
+pub fn toggle_selection_with_contents(ann: &Board, held: &[ItemId], id: ItemId) -> Vec<ItemId> {
+    let target = selection_with_contents(ann, &[id]);
+    let mut items = held.to_vec();
+    if items.contains(&id) {
+        items.retain(|item| !target.contains(item));
+    } else {
+        for item in target {
+            if !items.contains(&item) {
+                items.push(item);
+            }
+        }
     }
     items
 }

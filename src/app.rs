@@ -47,7 +47,8 @@ use crate::canvas::{
     TEXT_SIZE_MAX, TEXT_SIZE_MIN, TEXT_SIZE_STEP, Target, TextBuffer, TextItem, TextOverlay,
     Toolbar, Transform, View, ZOOM_STEP, Zoom, date_stamp, link_source, marquee_select, note_drag,
     nudge_delta, record_clip, selection_bounds, selection_frame, selection_frame_with,
-    selection_press_with, snap_square, stepped_size, toggle_selection,
+    selection_press_with, selection_with_contents, snap_square, stepped_size,
+    toggle_selection_with_contents,
 };
 
 pub use crate::canvas::{Tool, ToolbarAction};
@@ -968,6 +969,7 @@ impl App {
         let empty = Board::default();
         let ann = self.doc.boards.get(&board_name).unwrap_or(&empty);
         let items = crate::canvas::cycle_selection(ann, &held, forward);
+        let items = self.expand_selection(&key, items);
         self.set_selection(key, items, None);
     }
 
@@ -2036,7 +2038,8 @@ impl App {
             }
             Press::Element(id) => {
                 self.undo.begin_gesture(&self.doc);
-                self.set_selection(key, vec![id], None);
+                let items = self.expand_selection(&key, vec![id]);
+                self.set_selection(key, items, None);
                 self.gesture = Some(Gesture::start(None, Rect::default(), at[0], at[1], alt));
             }
             Press::Marquee { canvas } => {
@@ -2053,7 +2056,14 @@ impl App {
                     .and_then(|out| out.overlay.selection.as_ref())
                     .map(|s| s.items.clone())
                     .unwrap_or_default();
-                self.set_selection(key, toggle_selection(&held, id), None);
+                let empty = Board::default();
+                let ann = self
+                    .outputs
+                    .get(&key)
+                    .and_then(|out| self.doc.boards.get(out.board()))
+                    .unwrap_or(&empty);
+                let items = toggle_selection_with_contents(ann, &held, id);
+                self.set_selection(key, items, None);
             }
             Press::Inert => {}
         }
@@ -2546,6 +2556,17 @@ impl App {
         self.undo.abandon_gesture();
     }
 
+    /// Add what a picked closed shape encloses. A container is the thing the pointer aimed at; its
+    /// inside strokes, texts, notes and shapes ride with it rather than needing a second pass.
+    fn expand_selection(&self, key: &u32, items: Vec<ItemId>) -> Vec<ItemId> {
+        let Some(out) = self.outputs.get(key) else {
+            return items;
+        };
+        let empty = Board::default();
+        let ann = self.doc.boards.get(out.board()).unwrap_or(&empty);
+        selection_with_contents(ann, &items)
+    }
+
     /// Hold `items` on one output and let go everywhere else: at most one selection exists at a
     /// time, the way at most one text box is under edit.
     fn set_selection(&mut self, key: u32, items: Vec<ItemId>, transform: Option<Transform>) {
@@ -2584,6 +2605,7 @@ impl App {
             }
             None => Vec::new(),
         };
+        let items = self.expand_selection(&key, items);
         self.set_selection(key, items, None);
     }
 
