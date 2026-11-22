@@ -1667,6 +1667,19 @@ impl App {
         self.renderer.toolbar_hit(&toolbar, width, height, x, y)
     }
 
+    /// Whether a pointer position sits on the open colour card, gaps included.
+    pub(crate) fn toolbar_over_colors(&mut self, key: &u32, x: f32, y: f32) -> bool {
+        let Some(out) = self.outputs.get(key) else {
+            return false;
+        };
+        let Some(toolbar) = out.overlay.toolbar.clone() else {
+            return false;
+        };
+        let (width, height) = (out.width as f32, out.height as f32);
+        self.renderer
+            .toolbar_over_colors(&toolbar, width, height, x, y)
+    }
+
     /// The shape the pointer should have now: the active tool's, or the compositor's own
     /// default while the pointer is on the toolbar or the daemon is locked.
     fn desired_cursor(&self) -> CursorShape {

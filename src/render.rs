@@ -2619,6 +2619,36 @@ impl Renderer {
         self.toolbar_hit_at(config::current().toolbar, toolbar, width, height, x, y)
     }
 
+    /// Whether the pointer is anywhere on the open colour card, including the gaps between its
+    /// chips. The strip keeps itself open across this whole surface, so the pointer can sweep from
+    /// one colour to the next without the row folding away underneath it.
+    pub fn toolbar_over_colors(
+        &mut self,
+        toolbar: &Toolbar,
+        width: f32,
+        height: f32,
+        x: f32,
+        y: f32,
+    ) -> bool {
+        let position = config::current().toolbar;
+        let Some(pill) = self.cached_toolbar_pill(toolbar, (width, height), position) else {
+            return false;
+        };
+        let origin = position.origin((width, height), pill.column);
+        color_strip(&pill, toolbar, origin, position).is_some_and(|strip| {
+            // Include the short corridor from the active swatch into the card, so crossing it
+            // does not fold the strip before the pointer reaches the first colour.
+            let reach = TOOLBAR_PAD + TOOLBAR_GAP;
+            let plate = Rect {
+                x: strip.plate.x - reach,
+                y: strip.plate.y - reach,
+                w: strip.plate.w + 2.0 * reach,
+                h: strip.plate.h + 2.0 * reach,
+            };
+            plate.contains(x, y)
+        })
+    }
+
     /// The toolbar block under a pointer position for a rail docked to `position`. The public
     /// [`toolbar_hit`] uses the configured edge; this is the one the edge tests drive directly.
     fn toolbar_hit_at(
@@ -7656,5 +7686,24 @@ mod tests {
                 Some(ToolbarAction::Color(*index))
             );
         }
+        // The gaps and padding are part of the open card too: only the card edge folds it.
+        let gap = strip.chips[0].1.x + TOOLBAR_BLOCK + TOOLBAR_GAP / 2.0;
+        let gap_y = strip.chips[0].1.y + TOOLBAR_BLOCK / 2.0;
+        assert!(
+            !strip
+                .chips
+                .iter()
+                .any(|(_, rect)| rect.contains(gap, gap_y))
+        );
+        assert!(renderer.toolbar_over_colors(&toolbar, surface.0, surface.1, gap, gap_y));
+        let corridor = origin.0 + TOOLBAR_BLOCK + TOOLBAR_PAD / 2.0;
+        assert!(renderer.toolbar_over_colors(&toolbar, surface.0, surface.1, corridor, gap_y));
+        assert!(!renderer.toolbar_over_colors(
+            &toolbar,
+            surface.0,
+            surface.1,
+            strip.plate.x - TOOLBAR_BLOCK,
+            gap_y
+        ));
     }
 }

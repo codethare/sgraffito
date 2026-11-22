@@ -612,6 +612,7 @@ impl PointerHandler for App {
                     if self.toolbar_hover.take().is_some() {
                         self.refresh_toolbar_hover();
                     }
+                    self.hover_colors(false);
                     self.pointer_over_toolbar = false;
                     // The tool shape must not follow the pointer onto another client's surface,
                     // and the request still needs the serial of the last enter to be honoured.
@@ -1163,6 +1164,10 @@ impl App {
         // The hit test uses the layout the frame drew, so a block that has already stretched
         // keeps the pointer on itself out to the end of its capsule.
         let hover = self.toolbar_hit(key, x, y);
+        // The open colour card is one hover target: its plate, not just the chips, holds it open,
+        // so sweeping across a gap does not fold the row before the next colour is reached.
+        let over_colors =
+            matches!(hover, Some(ToolbarAction::Color(_))) || self.toolbar_over_colors(key, x, y);
         // The drawer is a menu: it closes as soon as the pointer is off the `more` block and off its own
         // controls, so it never sits open beside the rail while the pointer is somewhere else. The hover is
         // worked out against the layout the frame drew, which is the open one, so the rail's own blocks are
@@ -1172,14 +1177,14 @@ impl App {
         {
             self.close_panels();
         }
+        self.hover_colors(over_colors);
         if hover != self.toolbar_hover {
             self.toolbar_hover = hover;
             // A fresh block opens from nothing; leaving the rail closes immediately.
             self.toolbar_hover_since = hover.map(|_| Instant::now());
-            self.hover_colors(matches!(hover, Some(ToolbarAction::Color(_))));
             self.refresh_toolbar_hover();
         }
-        let over = hover.is_some();
+        let over = hover.is_some() || over_colors;
         if over != self.pointer_over_toolbar {
             self.pointer_over_toolbar = over;
             self.sync_cursor();
