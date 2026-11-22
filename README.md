@@ -94,7 +94,7 @@ Every mark on the canvas is drawn as a **hand-drawn** one: a stroke is a pen tha
 | while a text box is focused: `←` `→` `↑` `↓` | move the caret by one character or one line |
 | while a text box is focused: `Ctrl`+`V` | paste the clipboard at the caret |
 
-Every rail button with a one-key shortcut shows that letter in the bottom-left of its square; full chords and alternate bindings stay in the hover expansion. The zoom percentage and the undo/redo cards sit on the edge opposite the rail, with the history buttons next to the percentage; the history buttons are dimmed when their action has nothing to do.
+Every rail button with a one-key shortcut shows that letter in the bottom-left of its square; full chords and alternate bindings stay in the hover expansion. The zoom percentage card and one undo/redo card sit on the edge opposite the rail, next to each other; the two history halves share the card background and are dimmed when their action has nothing to do.
 
 Pen, circle, rectangle, diamond, line and arrow are one-shot drawing tools: once a stroke or shape is committed, the pointer returns to `select`, so the next gesture picks or moves instead of drawing again. The text tool does the same when a non-empty text box is committed. A click that draws nothing, the eraser and the note tool keep their tool.
 
@@ -219,7 +219,7 @@ border = 1.0
 # "top" or "bottom". The value is matched case-insensitively; an invalid value keeps
 # the built-in left edge and says so in the log. A left or right rail is a column, a
 # top or bottom rail a row, and its panels always open toward the middle of the screen.
-# The zoom percentage and undo/redo cards use the opposite edge.
+# The zoom percentage and the shared undo/redo card use the opposite edge.
 toolbar = "left"
 
 # Exactly five palette colours, used by the rail's 1-5 chips and by new strokes, shapes,

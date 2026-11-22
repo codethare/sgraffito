@@ -1863,296 +1863,213 @@ impl Renderer {
         // How far the block under the pointer has opened. The layout is settled, so a frame of the
         // transition only moves the capsule's trailing edge and the text that edge uncovers.
         let grow = toolbar.grow.clamp(0.0, 1.0);
-        for control in &pill.controls {
-            // A rail block's capsule opens under the pointer; a panel's rows open once, when the panel
-            // does. Both grow from the block square, and neither moves while it opens.
-            let opening = if control.block.column == 0 {
-                grow
-            } else {
-                toolbar.panel_grow.clamp(0.0, 1.0)
-            };
-            let full = if position.horizontal() {
-                control.along_extent
-            } else {
-                control.across_extent
-            };
-            let extent = if control.stretched {
-                TOOLBAR_BLOCK + (full - TOOLBAR_BLOCK) * opening
-            } else {
-                full
-            };
-            // A block of the drawer is offset a column inward from the rail's.
-            let block_local = RailRect {
-                along: control.along,
-                across: control.across,
-                along_extent: if position.horizontal() {
-                    extent
+        // Two passes: settled squares first, then every pop-out — a hovered capsule and a panel's
+        // rows — so a pop-out covers the buttons it grows across instead of being cut by whichever
+        // control happens to come later in the layout.
+        for layer in [false, true] {
+            for control in &pill.controls {
+                let on_top = control.stretched || control.block.column == 1;
+                if on_top != layer {
+                    continue;
+                }
+                // A rail block's capsule opens under the pointer; a panel's rows open once, when the panel
+                // does. Both grow from the block square, and neither moves while it opens.
+                let opening = if control.block.column == 0 {
+                    grow
                 } else {
-                    TOOLBAR_BLOCK
-                },
-                across_extent: if position.horizontal() {
-                    TOOLBAR_BLOCK
+                    toolbar.panel_grow.clamp(0.0, 1.0)
+                };
+                let full = if position.horizontal() {
+                    control.along_extent
                 } else {
-                    extent
-                },
-            };
-            let block = device(block_local);
-            let capsule = local(block_local);
-            // A stretched block is a capsule; a square block is a rounded square.
-            let radius = if control.stretched {
-                TOOLBAR_BLOCK / 2.0
-            } else {
-                TOOLBAR_RADIUS
-            } * scale;
-            let square_local = position.place(
-                origin,
-                RailRect {
+                    control.across_extent
+                };
+                let extent = if control.stretched {
+                    TOOLBAR_BLOCK + (full - TOOLBAR_BLOCK) * opening
+                } else {
+                    full
+                };
+                // A block of the drawer is offset a column inward from the rail's.
+                let block_local = RailRect {
                     along: control.along,
                     across: control.across,
-                    along_extent: TOOLBAR_BLOCK,
-                    across_extent: TOOLBAR_BLOCK,
-                },
-            );
-            let square = Rect {
-                x: square_local.x * scale,
-                y: square_local.y * scale,
-                w: TOOLBAR_BLOCK * scale,
-                h: TOOLBAR_BLOCK * scale,
-            };
-            // The key on the block's face. It is the primary shortcut only; the capsule the block
-            // opens into states the full key, an alternate or a chord included.
-            let badge = control.block.action.and_then(badge_of);
-            match &control.block.mark {
-                Mark::Swatch(index) => {
-                    // The colour chip keeps its place; the capsule unfurls around it.
-                    if control.stretched {
+                    along_extent: if position.horizontal() {
+                        extent
+                    } else {
+                        TOOLBAR_BLOCK
+                    },
+                    across_extent: if position.horizontal() {
+                        TOOLBAR_BLOCK
+                    } else {
+                        extent
+                    },
+                };
+                let block = device(block_local);
+                let capsule = local(block_local);
+                // A stretched block is a capsule; a square block is a rounded square.
+                let radius = if control.stretched {
+                    TOOLBAR_BLOCK / 2.0
+                } else {
+                    TOOLBAR_RADIUS
+                } * scale;
+                let square_local = position.place(
+                    origin,
+                    RailRect {
+                        along: control.along,
+                        across: control.across,
+                        along_extent: TOOLBAR_BLOCK,
+                        across_extent: TOOLBAR_BLOCK,
+                    },
+                );
+                let square = Rect {
+                    x: square_local.x * scale,
+                    y: square_local.y * scale,
+                    w: TOOLBAR_BLOCK * scale,
+                    h: TOOLBAR_BLOCK * scale,
+                };
+                // The key on the block's face. It is the primary shortcut only; the capsule the block
+                // opens into states the full key, an alternate or a chord included.
+                let badge = control.block.action.and_then(badge_of);
+                match &control.block.mark {
+                    Mark::Swatch(index) => {
+                        // The colour chip keeps its place; the capsule unfurls around it.
+                        if control.stretched {
+                            round_rect(
+                                pixmap,
+                                block,
+                                radius,
+                                parse_hex(TOOLBAR_BLOCK_FILL),
+                                Some((parse_hex(TOOLBAR_BLOCK_EDGE), TOOLBAR_HAIRLINE * scale)),
+                            );
+                        }
+                        round_rect(
+                            pixmap,
+                            square,
+                            TOOLBAR_RADIUS * scale,
+                            parse_hex(&config::current().colors[*index]),
+                            Some((
+                                parse_hex(if control.block.active {
+                                    TOOLBAR_ACCENT
+                                } else {
+                                    TOOLBAR_SWATCH_EDGE
+                                }),
+                                if control.block.active {
+                                    2.0
+                                } else {
+                                    TOOLBAR_HAIRLINE
+                                } * scale,
+                            )),
+                        );
+                        // The chip is the colour itself, so the badge takes the ink a note on that
+                        // colour would: no single foreground reads on all five palette entries.
+                        if let Some(key) = badge {
+                            let ink = note_ink(&config::current().colors[*index]);
+                            self.draw_badge(pixmap, square, scale, key, ink);
+                        }
+                    }
+                    mark => {
+                        let (fill, edge) = if control.block.active {
+                            (TOOLBAR_ACCENT, TOOLBAR_ACCENT)
+                        } else {
+                            (TOOLBAR_BLOCK_FILL, TOOLBAR_BLOCK_EDGE)
+                        };
                         round_rect(
                             pixmap,
                             block,
                             radius,
-                            parse_hex(TOOLBAR_BLOCK_FILL),
-                            Some((parse_hex(TOOLBAR_BLOCK_EDGE), TOOLBAR_HAIRLINE * scale)),
+                            parse_hex(fill),
+                            Some((parse_hex(edge), TOOLBAR_HAIRLINE * scale)),
                         );
-                    }
-                    round_rect(
-                        pixmap,
-                        square,
-                        TOOLBAR_RADIUS * scale,
-                        parse_hex(&config::current().colors[*index]),
-                        Some((
-                            parse_hex(if control.block.active {
-                                TOOLBAR_ACCENT
-                            } else {
-                                TOOLBAR_SWATCH_EDGE
-                            }),
-                            if control.block.active {
-                                2.0
-                            } else {
-                                TOOLBAR_HAIRLINE
-                            } * scale,
-                        )),
-                    );
-                    // The chip is the colour itself, so the badge takes the ink a note on that
-                    // colour would: no single foreground reads on all five palette entries.
-                    if let Some(key) = badge {
-                        let ink = note_ink(&config::current().colors[*index]);
-                        self.draw_badge(pixmap, square, scale, key, ink);
-                    }
-                }
-                mark => {
-                    let (fill, edge) = if control.block.active {
-                        (TOOLBAR_ACCENT, TOOLBAR_ACCENT)
-                    } else {
-                        (TOOLBAR_BLOCK_FILL, TOOLBAR_BLOCK_EDGE)
-                    };
-                    round_rect(
-                        pixmap,
-                        block,
-                        radius,
-                        parse_hex(fill),
-                        Some((parse_hex(edge), TOOLBAR_HAIRLINE * scale)),
-                    );
-                    // What the block draws stays where it is and the capsule grows to its right,
-                    // so the block reads as the same square, stretched. An icon or the readout's
-                    // number is centred in the square, never in the stretched rectangle.
-                    match mark {
-                        Mark::Icon(icon) => {
-                            draw_icon(
-                                pixmap,
-                                *icon,
-                                square,
-                                scale,
-                                TOOLBAR_FOREGROUND,
-                                badge.is_some(),
-                            );
-                            if let Some(key) = badge {
-                                self.draw_badge(pixmap, square, scale, key, TOOLBAR_FOREGROUND);
-                            }
-                        }
-                        Mark::Value(value) => {
-                            let width = self.text_width(value, TOOLBAR_TEXT_SIZE);
-                            let item = toolbar_text(
-                                square_local.x + (TOOLBAR_BLOCK - width) / 2.0,
-                                square_local.y,
-                                TOOLBAR_BLOCK,
-                                TOOLBAR_TEXT_SIZE,
-                                TOOLBAR_FOREGROUND,
-                                value,
-                            );
-                            self.draw_text(
-                                pixmap,
-                                &item,
-                                Screen {
+                        // What the block draws stays where it is and the capsule grows to its right,
+                        // so the block reads as the same square, stretched. An icon or the readout's
+                        // number is centred in the square, never in the stretched rectangle.
+                        match mark {
+                            Mark::Icon(icon) => {
+                                draw_icon(
+                                    pixmap,
+                                    *icon,
+                                    square,
                                     scale,
-                                    view: View::default(),
-                                },
-                                None,
-                                None,
-                                None,
-                            );
+                                    TOOLBAR_FOREGROUND,
+                                    badge.is_some(),
+                                );
+                                if let Some(key) = badge {
+                                    self.draw_badge(pixmap, square, scale, key, TOOLBAR_FOREGROUND);
+                                }
+                            }
+                            Mark::Value(value) => {
+                                let width = self.text_width(value, TOOLBAR_TEXT_SIZE);
+                                let item = toolbar_text(
+                                    square_local.x + (TOOLBAR_BLOCK - width) / 2.0,
+                                    square_local.y,
+                                    TOOLBAR_BLOCK,
+                                    TOOLBAR_TEXT_SIZE,
+                                    TOOLBAR_FOREGROUND,
+                                    value,
+                                );
+                                self.draw_text(
+                                    pixmap,
+                                    &item,
+                                    Screen {
+                                        scale,
+                                        view: View::default(),
+                                    },
+                                    None,
+                                    None,
+                                    None,
+                                );
+                            }
+                            Mark::Swatch(_) | Mark::None => {}
                         }
-                        Mark::Swatch(_) | Mark::None => {}
                     }
                 }
-            }
-            let bare = control.block.mark == Mark::None;
-            // A board's row shows its two buttons at its right end while the pointer is on it: the
-            // name is clipped where they begin, and each button is a block-sized square of its own.
-            let buttons = match control.block.action {
-                Some(ToolbarAction::Board(index)) => board_actions(toolbar, index),
-                _ => None,
-            };
-            let buttons_w = match buttons {
-                Some((true, _)) => 2.0 * TOOLBAR_BLOCK,
-                Some((false, _)) => TOOLBAR_BLOCK,
-                None => 0.0,
-            };
-            let label = row_label(toolbar, &control.block);
-            let button_rect = |slot: f32| {
-                let local = if position.horizontal() {
-                    RailRect {
-                        along: control.along + extent - slot * TOOLBAR_BLOCK,
-                        across: control.across,
-                        along_extent: TOOLBAR_BLOCK,
-                        across_extent: TOOLBAR_BLOCK,
-                    }
-                } else {
-                    RailRect {
-                        along: control.along,
-                        across: control.across + extent - slot * TOOLBAR_BLOCK,
-                        along_extent: TOOLBAR_BLOCK,
-                        across_extent: TOOLBAR_BLOCK,
-                    }
+                let bare = control.block.mark == Mark::None;
+                // A board's row shows its two buttons at its right end while the pointer is on it: the
+                // name is clipped where they begin, and each button is a block-sized square of its own.
+                let buttons = match control.block.action {
+                    Some(ToolbarAction::Board(index)) => board_actions(toolbar, index),
+                    _ => None,
                 };
-                device(local)
-            };
-            if (control.stretched || bare) && !label.is_empty() {
-                let text_width = self.text_width(label, TOOLBAR_TEXT_SIZE);
-                let item = toolbar_text(
-                    label_origin(position, capsule, bare, text_width),
-                    capsule.y,
-                    TOOLBAR_BLOCK,
-                    TOOLBAR_TEXT_SIZE,
-                    TOOLBAR_LABEL_TEXT,
-                    label,
-                );
-                // The label is uncovered by the capsule growing over it: a glyph appears once
-                // the edge has passed it, and at rest the edge is past its trailing padding.
-                let reveal = if position == ToolbarPosition::Right {
-                    Reveal::Before(capsule.x + buttons_w)
-                } else {
-                    Reveal::After(capsule.x + capsule.w - buttons_w)
+                let buttons_w = match buttons {
+                    Some((true, _)) => 2.0 * TOOLBAR_BLOCK,
+                    Some((false, _)) => TOOLBAR_BLOCK,
+                    None => 0.0,
                 };
-                self.draw_text_with(
-                    pixmap,
-                    &item,
-                    Screen {
-                        scale,
-                        view: View::default(),
-                    },
-                    None,
-                    Some(reveal),
-                    None,
-                );
-            }
-            if let Some((delete, _)) = buttons {
-                let index = match control.block.action {
-                    Some(ToolbarAction::Board(index)) => index,
-                    _ => 0,
-                };
-                if board_confirms(toolbar, index) {
-                    let actions = [
-                        ("no", ToolbarAction::CancelDeleteBoard),
-                        ("yes", ToolbarAction::DeleteBoard(index)),
-                    ];
-                    for (number, (label, action)) in actions.iter().enumerate() {
-                        let slot = (actions.len() - number) as f32;
-                        let square = button_rect(slot);
-                        self.draw_board_button(
-                            pixmap,
-                            toolbar.hover == Some(*action),
-                            square,
-                            scale,
-                            label,
-                        );
-                    }
-                } else {
-                    let mut actions = Vec::new();
-                    if delete {
-                        actions.push((Icon::Cross, ToolbarAction::AskDeleteBoard(index)));
-                    }
-                    actions.push((Icon::Pencil, ToolbarAction::RenameBoard(index)));
-                    for (number, (icon, action)) in actions.iter().enumerate() {
-                        let slot = (actions.len() - number) as f32;
-                        let square = button_rect(slot);
-                        // The button under the pointer states its own shape: a wash inside a hairline,
-                        // inset far enough that the outline never meets the row's own rounded edge.
-                        if toolbar.hover == Some(*action) {
-                            let ring = square.grown(-TOOLBAR_HOVER_INSET * scale);
-                            round_rect(
-                                pixmap,
-                                ring,
-                                (TOOLBAR_RADIUS - TOOLBAR_HOVER_INSET) * scale,
-                                parse_hex(TOOLBAR_HOVER_FILL),
-                                Some((parse_hex(TOOLBAR_FOREGROUND), TOOLBAR_HAIRLINE * scale)),
-                            );
+                let label = row_label(toolbar, &control.block);
+                let button_rect = |slot: f32| {
+                    let local = if position.horizontal() {
+                        RailRect {
+                            along: control.along + extent - slot * TOOLBAR_BLOCK,
+                            across: control.across,
+                            along_extent: TOOLBAR_BLOCK,
+                            across_extent: TOOLBAR_BLOCK,
                         }
-                        draw_icon(pixmap, *icon, square, scale, TOOLBAR_LABEL_TEXT, false);
-                    }
-                }
-            }
-            // The caret sits after the buffer's text, and the preedit after the caret: a name is
-            // typed in its row the way a text box is typed in the canvas.
-            if let (Some(edit), Some(ToolbarAction::Board(index))) =
-                (&toolbar.rename, control.block.action)
-                && edit.index == index
-            {
-                let typed: String = edit.text.chars().take(edit.cursor).collect();
-                let text_width = self.text_width(label, TOOLBAR_TEXT_SIZE);
-                let x = label_origin(position, capsule, bare, text_width)
-                    + self.text_width(&typed, TOOLBAR_TEXT_SIZE);
-                if edit.caret {
-                    let caret = Rect {
-                        x: x * scale,
-                        y: (capsule.y + TOOLBAR_BLOCK * 0.2) * scale,
-                        w: TOOLBAR_HAIRLINE.max(1.0) * scale,
-                        h: TOOLBAR_BLOCK * 0.6 * scale,
+                    } else {
+                        RailRect {
+                            along: control.along,
+                            across: control.across + extent - slot * TOOLBAR_BLOCK,
+                            along_extent: TOOLBAR_BLOCK,
+                            across_extent: TOOLBAR_BLOCK,
+                        }
                     };
-                    round_rect(pixmap, caret, 0.0, parse_hex(TOOLBAR_ACCENT), None);
-                }
-                if !edit.preedit.is_empty() {
+                    device(local)
+                };
+                if (control.stretched || bare) && !label.is_empty() {
+                    let text_width = self.text_width(label, TOOLBAR_TEXT_SIZE);
                     let item = toolbar_text(
-                        x + TOOLBAR_HAIRLINE,
+                        label_origin(position, capsule, bare, text_width),
                         capsule.y,
                         TOOLBAR_BLOCK,
                         TOOLBAR_TEXT_SIZE,
-                        TOOLBAR_FOREGROUND,
-                        &edit.preedit,
+                        TOOLBAR_LABEL_TEXT,
+                        label,
                     );
+                    // The label is uncovered by the capsule growing over it: a glyph appears once
+                    // the edge has passed it, and at rest the edge is past its trailing padding.
                     let reveal = if position == ToolbarPosition::Right {
-                        Reveal::Before(capsule.x)
+                        Reveal::Before(capsule.x + buttons_w)
                     } else {
-                        Reveal::After(capsule.x + capsule.w)
+                        Reveal::After(capsule.x + capsule.w - buttons_w)
                     };
                     self.draw_text_with(
                         pixmap,
@@ -2166,12 +2083,103 @@ impl Renderer {
                         None,
                     );
                 }
-            }
-            // The `more` block states what the drawer holds, on a line under its own label: a control
-            // nobody can find is a control nobody uses. It goes in the drawer's own column, which is
-            // empty while the drawer is closed, and it is not drawn while the drawer is open — then the
-            // controls are on screen, each named by its own block.
-            if control.stretched
+                if let Some((delete, _)) = buttons {
+                    let index = match control.block.action {
+                        Some(ToolbarAction::Board(index)) => index,
+                        _ => 0,
+                    };
+                    if board_confirms(toolbar, index) {
+                        let actions = [
+                            ("no", ToolbarAction::CancelDeleteBoard),
+                            ("yes", ToolbarAction::DeleteBoard(index)),
+                        ];
+                        for (number, (label, action)) in actions.iter().enumerate() {
+                            let slot = (actions.len() - number) as f32;
+                            let square = button_rect(slot);
+                            self.draw_board_button(
+                                pixmap,
+                                toolbar.hover == Some(*action),
+                                square,
+                                scale,
+                                label,
+                            );
+                        }
+                    } else {
+                        let mut actions = Vec::new();
+                        if delete {
+                            actions.push((Icon::Cross, ToolbarAction::AskDeleteBoard(index)));
+                        }
+                        actions.push((Icon::Pencil, ToolbarAction::RenameBoard(index)));
+                        for (number, (icon, action)) in actions.iter().enumerate() {
+                            let slot = (actions.len() - number) as f32;
+                            let square = button_rect(slot);
+                            // The button under the pointer states its own shape: a wash inside a hairline,
+                            // inset far enough that the outline never meets the row's own rounded edge.
+                            if toolbar.hover == Some(*action) {
+                                let ring = square.grown(-TOOLBAR_HOVER_INSET * scale);
+                                round_rect(
+                                    pixmap,
+                                    ring,
+                                    (TOOLBAR_RADIUS - TOOLBAR_HOVER_INSET) * scale,
+                                    parse_hex(TOOLBAR_HOVER_FILL),
+                                    Some((parse_hex(TOOLBAR_FOREGROUND), TOOLBAR_HAIRLINE * scale)),
+                                );
+                            }
+                            draw_icon(pixmap, *icon, square, scale, TOOLBAR_LABEL_TEXT, false);
+                        }
+                    }
+                }
+                // The caret sits after the buffer's text, and the preedit after the caret: a name is
+                // typed in its row the way a text box is typed in the canvas.
+                if let (Some(edit), Some(ToolbarAction::Board(index))) =
+                    (&toolbar.rename, control.block.action)
+                    && edit.index == index
+                {
+                    let typed: String = edit.text.chars().take(edit.cursor).collect();
+                    let text_width = self.text_width(label, TOOLBAR_TEXT_SIZE);
+                    let x = label_origin(position, capsule, bare, text_width)
+                        + self.text_width(&typed, TOOLBAR_TEXT_SIZE);
+                    if edit.caret {
+                        let caret = Rect {
+                            x: x * scale,
+                            y: (capsule.y + TOOLBAR_BLOCK * 0.2) * scale,
+                            w: TOOLBAR_HAIRLINE.max(1.0) * scale,
+                            h: TOOLBAR_BLOCK * 0.6 * scale,
+                        };
+                        round_rect(pixmap, caret, 0.0, parse_hex(TOOLBAR_ACCENT), None);
+                    }
+                    if !edit.preedit.is_empty() {
+                        let item = toolbar_text(
+                            x + TOOLBAR_HAIRLINE,
+                            capsule.y,
+                            TOOLBAR_BLOCK,
+                            TOOLBAR_TEXT_SIZE,
+                            TOOLBAR_FOREGROUND,
+                            &edit.preedit,
+                        );
+                        let reveal = if position == ToolbarPosition::Right {
+                            Reveal::Before(capsule.x)
+                        } else {
+                            Reveal::After(capsule.x + capsule.w)
+                        };
+                        self.draw_text_with(
+                            pixmap,
+                            &item,
+                            Screen {
+                                scale,
+                                view: View::default(),
+                            },
+                            None,
+                            Some(reveal),
+                            None,
+                        );
+                    }
+                }
+                // The `more` block states what the drawer holds, on a line under its own label: a control
+                // nobody can find is a control nobody uses. It goes in the drawer's own column, which is
+                // empty while the drawer is closed, and it is not drawn while the drawer is open — then the
+                // controls are on screen, each named by its own block.
+                if control.stretched
                 && control.block.action == Some(ToolbarAction::More)
                 && let Some(legend) = drawer_legend(toolbar, &pill.overflow)
                 // The legend is not a block's label, so it carries the same ceiling by hand: a line wider
@@ -2179,37 +2187,38 @@ impl Renderer {
                 // rail, which is what the box is for.
                 && self.text_width(&legend, TOOLBAR_TEXT_SIZE)
                     <= toolbar_ceiling(pixmap.width() as f32 / scale) - TOOLBAR_DRAWER_X
-            {
-                let anchor = position.point(
-                    origin,
-                    control.along + TOOLBAR_BLOCK + TOOLBAR_LABEL_GAP,
-                    TOOLBAR_DRAWER_X,
-                );
-                let width = self.text_width(&legend, TOOLBAR_TEXT_SIZE);
-                let x = if position == ToolbarPosition::Right {
-                    anchor.0 - width
-                } else {
-                    anchor.0
-                };
-                let item = toolbar_text(
-                    x,
-                    anchor.1,
-                    TOOLBAR_BLOCK,
-                    TOOLBAR_TEXT_SIZE,
-                    TOOLBAR_LABEL_TEXT,
-                    &legend,
-                );
-                self.draw_text(
-                    pixmap,
-                    &item,
-                    Screen {
-                        scale,
-                        view: View::default(),
-                    },
-                    None,
-                    None,
-                    None,
-                );
+                {
+                    let anchor = position.point(
+                        origin,
+                        control.along + TOOLBAR_BLOCK + TOOLBAR_LABEL_GAP,
+                        TOOLBAR_DRAWER_X,
+                    );
+                    let width = self.text_width(&legend, TOOLBAR_TEXT_SIZE);
+                    let x = if position == ToolbarPosition::Right {
+                        anchor.0 - width
+                    } else {
+                        anchor.0
+                    };
+                    let item = toolbar_text(
+                        x,
+                        anchor.1,
+                        TOOLBAR_BLOCK,
+                        TOOLBAR_TEXT_SIZE,
+                        TOOLBAR_LABEL_TEXT,
+                        &legend,
+                    );
+                    self.draw_text(
+                        pixmap,
+                        &item,
+                        Screen {
+                            scale,
+                            view: View::default(),
+                        },
+                        None,
+                        None,
+                        None,
+                    );
+                }
             }
         }
     }
@@ -2261,7 +2270,26 @@ impl Renderer {
             None,
             None,
         );
-        let mut buttons = [
+        let history = square(cards.history);
+        round_rect(
+            pixmap,
+            history,
+            TOOLBAR_RADIUS * scale,
+            parse_hex(TOOLBAR_BLOCK_FILL),
+            Some((parse_hex(TOOLBAR_BLOCK_EDGE), TOOLBAR_HAIRLINE * scale)),
+        );
+        // One card, two halves: the split is a hairline rather than two separate backgrounds.
+        let split = history.x + history.w / 2.0;
+        let divider = parse_hex(TOOLBAR_BLOCK_EDGE);
+        fill(
+            pixmap,
+            split - TOOLBAR_HAIRLINE * scale / 2.0,
+            history.y + TOOLBAR_HAIRLINE * scale,
+            (TOOLBAR_HAIRLINE * scale).max(1.0),
+            history.h - 2.0 * TOOLBAR_HAIRLINE * scale,
+            Color::rgba(divider[0], divider[1], divider[2], divider[3]),
+        );
+        for (rect, action, enabled, icon, badge) in [
             (
                 cards.undo,
                 ToolbarAction::Undo,
@@ -2276,11 +2304,10 @@ impl Renderer {
                 Icon::Redo,
                 "⇧Z",
             ),
-        ];
-        for (rect, action, enabled, icon, badge) in &mut buttons {
-            let box_ = square(*rect);
-            let hover = toolbar.hover == Some(*action);
-            if hover && *enabled {
+        ] {
+            let box_ = square(rect);
+            let hover = toolbar.hover == Some(action);
+            if hover && enabled {
                 let ring = box_.grown(-TOOLBAR_HOVER_INSET * scale);
                 round_rect(
                     pixmap,
@@ -2290,24 +2317,24 @@ impl Renderer {
                     Some((parse_hex(TOOLBAR_FOREGROUND), TOOLBAR_HAIRLINE * scale)),
                 );
             }
-            let ink = if *enabled {
+            let ink = if enabled {
                 TOOLBAR_FOREGROUND
             } else {
                 TOOLBAR_LABEL_TEXT
             };
             let icon_box = Rect {
-                x: box_.x + (box_.w - 18.0 * scale) / 2.0,
-                y: box_.y + 3.0 * scale,
-                w: 18.0 * scale,
-                h: 18.0 * scale,
+                x: box_.x + (box_.w - 20.0 * scale) / 2.0,
+                y: box_.y + 2.0 * scale,
+                w: 20.0 * scale,
+                h: 20.0 * scale,
             };
-            draw_icon(pixmap, *icon, icon_box, scale, ink, false);
+            draw_icon(pixmap, icon, icon_box, scale, ink, false);
             self.draw_badge(pixmap, box_, scale, badge, ink);
         }
         let hint = match toolbar.hover {
-            Some(ToolbarAction::Undo) if toolbar.can_undo => Some((cards.undo, "undo (Ctrl+Z)")),
+            Some(ToolbarAction::Undo) if toolbar.can_undo => Some((cards.history, "undo (Ctrl+Z)")),
             Some(ToolbarAction::Redo) if toolbar.can_redo => {
-                Some((cards.redo, "redo (Ctrl+Shift+Z)"))
+                Some((cards.history, "redo (Ctrl+Shift+Z)"))
             }
             _ => None,
         };
@@ -3591,11 +3618,12 @@ fn toolbar_ceiling(surface: f32) -> f32 {
     (surface - 2.0 * TOOLBAR_MARGIN).min(TOOLBAR_RESERVE)
 }
 
-/// One zoom readout and its two history cards. All three are the same width so the column on a
-/// side edge and the row on a top/bottom edge stay flush.
+/// One zoom readout and one history card. The history card holds both buttons, so it keeps the
+/// same width and background as the percentage.
 #[derive(Clone, Copy)]
 struct CardsLayout {
     zoom: Rect,
+    history: Rect,
     undo: Rect,
     redo: Rect,
     edge: ToolbarPosition,
@@ -3607,8 +3635,21 @@ const CARD_H: f32 = TOOLBAR_BLOCK;
 fn cards_layout(surface: (f32, f32), rail: ToolbarPosition) -> CardsLayout {
     let edge = rail.opposite();
     let gap = TOOLBAR_GAP;
+    let zero = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: 0.0,
+        h: 0.0,
+    };
+    let mut cards = CardsLayout {
+        zoom: zero,
+        history: zero,
+        undo: zero,
+        redo: zero,
+        edge,
+    };
     if edge.horizontal() {
-        let total = 3.0 * CARD_W + 2.0 * gap;
+        let total = 2.0 * CARD_W + gap;
         // Right-aligned: the bottom-centre move-to-board button owns the middle of a top/bottom
         // screen, and the cards must not sit under it.
         let x = (surface.0 - TOOLBAR_MARGIN - total).max(TOOLBAR_MARGIN);
@@ -3617,63 +3658,59 @@ fn cards_layout(surface: (f32, f32), rail: ToolbarPosition) -> CardsLayout {
         } else {
             TOOLBAR_MARGIN
         };
-        CardsLayout {
-            zoom: Rect {
-                x,
-                y,
-                w: CARD_W,
-                h: CARD_H,
-            },
-            undo: Rect {
-                x: x + CARD_W + gap,
-                y,
-                w: CARD_W,
-                h: CARD_H,
-            },
-            redo: Rect {
-                x: x + 2.0 * (CARD_W + gap),
-                y,
-                w: CARD_W,
-                h: CARD_H,
-            },
-            edge,
-        }
+        cards.zoom = Rect {
+            x,
+            y,
+            w: CARD_W,
+            h: CARD_H,
+        };
+        cards.history = Rect {
+            x: x + CARD_W + gap,
+            y,
+            w: CARD_W,
+            h: CARD_H,
+        };
     } else {
-        let total = 3.0 * CARD_H + 2.0 * gap;
+        let total = 2.0 * CARD_H + gap;
         let y = ((surface.1 - total) / 2.0).max(TOOLBAR_MARGIN);
         let x = if edge == ToolbarPosition::Right {
             (surface.0 - TOOLBAR_MARGIN - CARD_W).max(0.0)
         } else {
             TOOLBAR_MARGIN
         };
-        CardsLayout {
-            zoom: Rect {
-                x,
-                y,
-                w: CARD_W,
-                h: CARD_H,
-            },
-            undo: Rect {
-                x,
-                y: y + CARD_H + gap,
-                w: CARD_W,
-                h: CARD_H,
-            },
-            redo: Rect {
-                x,
-                y: y + 2.0 * (CARD_H + gap),
-                w: CARD_W,
-                h: CARD_H,
-            },
-            edge,
-        }
+        cards.zoom = Rect {
+            x,
+            y,
+            w: CARD_W,
+            h: CARD_H,
+        };
+        cards.history = Rect {
+            x,
+            y: y + CARD_H + gap,
+            w: CARD_W,
+            h: CARD_H,
+        };
     }
+    let half = CARD_W / 2.0;
+    cards.undo = Rect {
+        x: cards.history.x,
+        y: cards.history.y,
+        w: half,
+        h: CARD_H,
+    };
+    cards.redo = Rect {
+        x: cards.history.x + half,
+        y: cards.history.y,
+        w: half,
+        h: CARD_H,
+    };
+    cards
 }
 
 /// The area the cards and a hover hint can paint. The hint opens toward the screen interior.
 pub fn cards_bounds(surface: (f32, f32), rail: ToolbarPosition) -> Rect {
     let cards = cards_layout(surface, rail);
-    let cards_box = cards.zoom.union(cards.undo).union(cards.redo);
+    let cards_box = cards.zoom.union(cards.history);
     match cards.edge {
         ToolbarPosition::Right => Rect {
             x: cards_box.x - 190.0,
@@ -4184,22 +4221,22 @@ fn draw_icon(
             path.line_to(band[1][0], band[1][1]);
         }
         Icon::Undo | Icon::Redo => {
-            let (start, end, tip) = if icon == Icon::Undo {
-                (x + w * 0.78, x + w * 0.28, x + w * 0.28)
-            } else {
-                (x + w * 0.22, x + w * 0.72, x + w * 0.72)
-            };
-            path.move_to(start, y + h * 0.5);
-            path.line_to(end, y + h * 0.5);
-            let (dx, dy) = if icon == Icon::Undo {
-                (w * 0.18, h * 0.2)
-            } else {
-                (-w * 0.18, h * 0.2)
-            };
-            path.move_to(tip, y + h * 0.5);
-            path.line_to(tip + dx, y + h * 0.5 - dy);
-            path.move_to(tip, y + h * 0.5);
-            path.line_to(tip + dx, y + h * 0.5 + dy);
+            let undo = icon == Icon::Undo;
+            let tip = if undo { x + w * 0.24 } else { x + w * 0.76 };
+            let tail = if undo { x + w * 0.82 } else { x + w * 0.18 };
+            path.move_to(tail, y + h * 0.5);
+            path.line_to(tip, y + h * 0.5);
+            // A solid head: a hairline arrow disappears against a busy drawing, and these two
+            // cards are the only place history is reachable with the pointer.
+            let mut head = PathBuilder::new();
+            head.move_to(tip, y + h * 0.5);
+            let base = if undo { tip + w * 0.24 } else { tip - w * 0.24 };
+            head.line_to(base, y + h * 0.22);
+            head.line_to(base, y + h * 0.78);
+            head.close();
+            if let Some(head) = head.finish() {
+                filled.push(head);
+            }
         }
         Icon::Text => {
             path.move_to(x, y + h * 0.15);
@@ -7083,6 +7120,34 @@ mod tests {
 
     /// The eraser is a slanted block with a band, not the empty rounded square that read as a
     /// second rectangle tool.
+    #[test]
+    fn the_history_icons_paint_a_solid_arrow() {
+        for icon in [Icon::Undo, Icon::Redo] {
+            let mut pixmap = Pixmap::new(60, 60).unwrap();
+            draw_icon(
+                &mut pixmap.as_mut(),
+                icon,
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 60.0,
+                    h: 60.0,
+                },
+                1.0,
+                "#ffffffff",
+                false,
+            );
+            let painted = pixmap
+                .data()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|pixel| pixel[3] > 200)
+                .count();
+            assert!(painted > 40, "{icon:?} painted only {painted} pixels");
+        }
+    }
+
     #[test]
     fn the_eraser_icon_is_a_slanted_block_with_a_band() {
         let square = Rect {
