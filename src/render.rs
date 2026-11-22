@@ -337,8 +337,8 @@ fn label_origin(
     }
 }
 
-/// A short rule between the rail's families: colour chips, the tools, and the two foot controls.
-const RAIL_SEPARATOR: f32 = 6.0;
+/// A half-block rule between the rail's families: colour chips, the tools, and the two foot controls.
+const RAIL_SEPARATOR: f32 = TOOLBAR_BLOCK / 2.0;
 
 fn separates(previous: Option<ToolbarAction>, current: Option<ToolbarAction>) -> bool {
     matches!(
@@ -2375,17 +2375,6 @@ impl Renderer {
             parse_hex(TOOLBAR_BLOCK_FILL),
             Some((parse_hex(TOOLBAR_CARD_EDGE), TOOLBAR_HAIRLINE * scale)),
         );
-        // One card, two halves: the split is a hairline rather than two separate backgrounds.
-        let split = history.x + history.w / 2.0;
-        let divider = parse_hex(TOOLBAR_BLOCK_EDGE);
-        fill(
-            pixmap,
-            split - TOOLBAR_HAIRLINE * scale / 2.0,
-            history.y + TOOLBAR_HAIRLINE * scale,
-            (TOOLBAR_HAIRLINE * scale).max(1.0),
-            history.h - 2.0 * TOOLBAR_HAIRLINE * scale,
-            Color::rgba(divider[0], divider[1], divider[2], divider[3]),
-        );
         for (rect, action, enabled, icon, badge) in [
             (
                 cards.undo,
@@ -4319,11 +4308,11 @@ fn draw_icon(
         }
         Icon::Undo | Icon::Redo => {
             let undo = icon == Icon::Undo;
-            let (cx, cy) = (x + w / 2.0, y + h * 0.54);
-            let r = w * 0.32;
+            let (cx, cy) = (x + w / 2.0, y + h * 0.48);
+            let r = w * 0.34;
             let k = r * 4.0 / 3.0;
-            // Half-circle: from one side, over the top, to the other. Undo ends on the left and
-            // redo on the right, so the two cards mirror each other.
+            // Half-circle with the arrowhead on the tangent: a C over the top, ending downward on
+            // the undo side or the redo side.
             let (start, end, c1, c2) = if undo {
                 (cx + r, cx - r, cx + r, cx - r)
             } else {
@@ -4331,13 +4320,11 @@ fn draw_icon(
             };
             path.move_to(start, cy);
             path.cubic_to(c1, cy - k, c2, cy - k, end, cy);
-            // Solid head, larger than the stroke so the direction reads at card size.
-            let tip = if undo { end - w * 0.12 } else { end + w * 0.12 };
-            let base = if undo { end + w * 0.12 } else { end - w * 0.12 };
             let mut head = PathBuilder::new();
-            head.move_to(tip, cy);
-            head.line_to(base, cy - h * 0.22);
-            head.line_to(base, cy + h * 0.22);
+            let tip = [end, cy + h * 0.25];
+            head.move_to(tip[0], tip[1]);
+            head.line_to(end - w * 0.15, cy + h * 0.02);
+            head.line_to(end + w * 0.15, cy + h * 0.02);
             head.close();
             if let Some(head) = head.finish() {
                 filled.push(head);
