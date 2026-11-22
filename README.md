@@ -68,13 +68,14 @@ Every mark on the canvas is drawn as a **hand-drawn** one: a stroke is a pen tha
 | `P` | pen |
 | `E` | eraser (deletes whole strokes, shapes or text boxes; hit radius 8 logical pixels) |
 | `T` | text tool: click to place a text box with that point as its top-left corner |
-| `V` | selection tool: click an element, or drag a marquee on empty space, then drag to move, grab a handle to resize, grab the handle above the frame to rotate — circles, rectangles and diamonds turn as a whole, while lines and arrows turn their endpoints. Picking a circle, rectangle or diamond takes every stroke, text, note and shape wholly inside it, so dragging the container drags the group; picking an element inside it directly selects that element alone |
+| `V` | selection tool: click an element, or drag a marquee on empty space, then drag to move, grab a handle to resize, grab the handle above the frame to rotate — circles, rectangles and diamonds turn as a whole, while lines and arrows turn their endpoints. Picking a circle, rectangle or diamond takes every stroke, text, note and shape wholly inside it, so dragging the container drags the group; picking an element inside it directly selects that element alone; a plain click on text opens that box for editing |
 | `O` `R` `D` `L` `A` | circle, rectangle, diamond, line, arrow: drag to draw the shape between the press point and the pointer |
 | `H` | hand: drag to pan the canvas |
 | `N` | sticky note: drag out the square to create one and start typing; click an existing one to write in it |
 | `M` | open the drawer of rarely used tools beside the rail, and close it again (it also closes when something in it is picked, the pointer leaves it, or `Esc` is pressed) |
 | `B` | switch the edit-mode backdrop off and on |
 | `C` | open the boards panel beside the rail: pick a board, create one, or delete the board this screen shows (it closes on a pick, on a press elsewhere, or on `Esc`) |
+| `d` / `r` / `n` while the boards panel is open | delete / rename the board this screen shows / create `Board N`; these are the list's own keys, not the diamond, rectangle or note tools |
 | `F` | switch between one board on every screen and one board per screen — the drawer's own row |
 | `1`–`5` | pick a colour |
 | `[` / `]` | shrink / grow the active tool's size — pen width, or text size while the text tool is armed — and, with a selection held, the width of its strokes and shapes and the size of its text boxes |
@@ -94,7 +95,7 @@ Every mark on the canvas is drawn as a **hand-drawn** one: a stroke is a pen tha
 | while a text box is focused: `←` `→` `↑` `↓` | move the caret by one character or one line |
 | while a text box is focused: `Ctrl`+`V` | paste the clipboard at the caret |
 
-The rail's buttons share one card rather than drawing a border around each square; short rules separate the colour chips, the tools, `more tools` and the lock control. Every rail button with a one-key shortcut shows that letter in the bottom-left of its square; full chords and alternate bindings stay in the hover expansion. The zoom percentage card and one undo/redo card sit on the edge opposite the rail, next to each other; the two history halves share the card background and are dimmed when their action has nothing to do.
+The rail floats clear of its screen edge as one bordered card, and hovering a button paints a visible wash behind it; the buttons share that card rather than drawing a border around each square; short rules separate the colour chips, the tools, `more tools` and the lock control. Every rail button with a one-key shortcut shows that letter in the bottom-left of its square; full chords and alternate bindings stay in the hover expansion. The zoom percentage card and one undo/redo card sit on the edge opposite the rail, next to each other; the two history halves share the card background and are dimmed when their action has nothing to do.
 
 Pen, circle, rectangle, diamond, line and arrow are one-shot drawing tools: once a stroke or shape is committed, the pointer returns to `select`, so the next gesture picks or moves instead of drawing again. The text tool does the same when a non-empty text box is committed. A click that draws nothing, the eraser and the note tool keep their tool.
 

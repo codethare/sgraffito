@@ -117,7 +117,8 @@ const TOOLBAR_LABEL_TEXT: &str = "#ebebf59e";
 const TOOLBAR_SWATCH_EDGE: &str = "#ffffff4d";
 /// The wash a hovered button of a board's row takes. White rather than the accent: on the row of the
 /// board this screen shows the capsule is accent-filled, and an accent ring there is invisible.
-const TOOLBAR_HOVER_FILL: &str = "#ffffff24";
+const TOOLBAR_HOVER_FILL: &str = "#ffffff3d";
+const TOOLBAR_CARD_EDGE: &str = "#ffffff59";
 /// How far inside its cell a hovered button's outline sits, so it never touches the row's edge.
 const TOOLBAR_HOVER_INSET: f32 = 2.0;
 const UNDERLINE_HEIGHT: f32 = 1.5;
@@ -577,21 +578,25 @@ impl ToolbarPosition {
     /// Where the rail's local origin — the start of its blocks, at the inner face of its plate —
     /// sits on the output. The rail's centre is at the optical centre of the edge it is docked to.
     fn origin(self, surface: (f32, f32), column: f32) -> (f32, f32) {
+        // The plate reaches one pad outside the blocks, so keeping the plate's outer edge at
+        // TOOLBAR_MARGIN means moving the origin in by that pad. The rail then floats instead of
+        // sitting flush against the output.
+        let edge = TOOLBAR_MARGIN + TOOLBAR_PAD;
         if self.horizontal() {
             (
-                (surface.0 * TOOLBAR_CENTRE - column / 2.0).max(TOOLBAR_MARGIN),
+                (surface.0 * TOOLBAR_CENTRE - column / 2.0).max(edge),
                 match self {
-                    ToolbarPosition::Top => TOOLBAR_MARGIN,
-                    _ => surface.1 - TOOLBAR_MARGIN,
+                    ToolbarPosition::Top => edge,
+                    _ => surface.1 - edge,
                 },
             )
         } else {
             (
                 match self {
-                    ToolbarPosition::Left => TOOLBAR_MARGIN,
-                    _ => surface.0 - TOOLBAR_MARGIN,
+                    ToolbarPosition::Left => edge,
+                    _ => surface.0 - edge,
                 },
-                (surface.1 * TOOLBAR_CENTRE - column / 2.0).max(TOOLBAR_MARGIN),
+                (surface.1 * TOOLBAR_CENTRE - column / 2.0).max(edge),
             )
         }
     }
@@ -1859,7 +1864,7 @@ impl Renderer {
             }),
             TOOLBAR_RADIUS * scale,
             parse_hex(TOOLBAR_PLATE_FILL),
-            None,
+            Some((parse_hex(TOOLBAR_CARD_EDGE), TOOLBAR_HAIRLINE * scale)),
         );
         // The line through the middle of the backdrop options: the four modes are one family, and
         // the line says so without a second plate. It is drawn behind the buttons.
@@ -1982,6 +1987,8 @@ impl Renderer {
                     w: TOOLBAR_BLOCK * scale,
                     h: TOOLBAR_BLOCK * scale,
                 };
+                let hovered =
+                    control.block.action.is_some() && control.block.action == toolbar.hover;
                 // The key on the block's face. It is the primary shortcut only; the capsule the block
                 // opens into states the full key, an alternate or a chord included.
                 let badge = control.block.action.and_then(badge_of);
@@ -1995,6 +2002,15 @@ impl Renderer {
                                 radius,
                                 parse_hex(TOOLBAR_BLOCK_FILL),
                                 Some((parse_hex(TOOLBAR_BLOCK_EDGE), TOOLBAR_HAIRLINE * scale)),
+                            );
+                        }
+                        if hovered {
+                            round_rect(
+                                pixmap,
+                                square.grown(2.0 * scale),
+                                TOOLBAR_RADIUS * scale,
+                                parse_hex(TOOLBAR_HOVER_FILL),
+                                None,
                             );
                         }
                         round_rect(
@@ -2029,6 +2045,8 @@ impl Renderer {
                         if control.block.column != 0 {
                             let (fill, edge) = if control.block.active {
                                 (TOOLBAR_ACCENT, TOOLBAR_ACCENT)
+                            } else if hovered {
+                                (TOOLBAR_HOVER_FILL, TOOLBAR_CARD_EDGE)
                             } else {
                                 (TOOLBAR_BLOCK_FILL, TOOLBAR_BLOCK_EDGE)
                             };
@@ -2043,6 +2061,21 @@ impl Renderer {
                             round_rect(pixmap, block, radius, parse_hex(TOOLBAR_BLOCK_FILL), None);
                         } else if control.block.active {
                             round_rect(pixmap, block, radius, parse_hex(TOOLBAR_ACCENT), None);
+                        } else if hovered {
+                            round_rect(pixmap, block, radius, parse_hex(TOOLBAR_HOVER_FILL), None);
+                        }
+                        if hovered
+                            && !control.block.active
+                            && control.block.column == 0
+                            && control.stretched
+                        {
+                            round_rect(
+                                pixmap,
+                                square,
+                                TOOLBAR_RADIUS * scale,
+                                parse_hex(TOOLBAR_HOVER_FILL),
+                                None,
+                            );
                         }
                         // What the block draws stays where it is and the capsule grows to its right,
                         // so the block reads as the same square, stretched. An icon or the readout's
@@ -2311,7 +2344,7 @@ impl Renderer {
             zoom,
             TOOLBAR_RADIUS * scale,
             parse_hex(TOOLBAR_BLOCK_FILL),
-            Some((parse_hex(TOOLBAR_BLOCK_EDGE), TOOLBAR_HAIRLINE * scale)),
+            Some((parse_hex(TOOLBAR_CARD_EDGE), TOOLBAR_HAIRLINE * scale)),
         );
         let percent = format!("{}%", (toolbar.zoom * 100.0).round() as i32);
         let text_w = self.text_width(&percent, TOOLBAR_TEXT_SIZE);
@@ -2340,7 +2373,7 @@ impl Renderer {
             history,
             TOOLBAR_RADIUS * scale,
             parse_hex(TOOLBAR_BLOCK_FILL),
-            Some((parse_hex(TOOLBAR_BLOCK_EDGE), TOOLBAR_HAIRLINE * scale)),
+            Some((parse_hex(TOOLBAR_CARD_EDGE), TOOLBAR_HAIRLINE * scale)),
         );
         // One card, two halves: the split is a hairline rather than two separate backgrounds.
         let split = history.x + history.w / 2.0;

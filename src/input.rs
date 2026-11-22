@@ -199,6 +199,24 @@ pub fn cuts_selection(ctrl: bool, keysym: Keysym) -> bool {
     ctrl && matches!(keysym, Keysym::x | Keysym::X)
 }
 
+/// The board list's own keys while it is open. It is a menu, so its letters act on the boards
+/// rather than arming the main rail's tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoardListKey {
+    Delete,
+    Rename,
+    New,
+}
+
+pub fn board_list_key(keysym: Keysym) -> Option<BoardListKey> {
+    match keysym {
+        Keysym::d | Keysym::D => Some(BoardListKey::Delete),
+        Keysym::r | Keysym::R => Some(BoardListKey::Rename),
+        Keysym::n | Keysym::N => Some(BoardListKey::New),
+        _ => None,
+    }
+}
+
 /// Key mapping while no text box is edited: `P`/`E`/`T`/`V` switch tools, and the shape tools take
 /// the initials of what they draw. `V` arms select as it does in the usual drawing applications;
 /// the compositor's `Ctrl+V` paste is handled before this map is reached.
@@ -417,6 +435,38 @@ impl KeyboardHandler for App {
                     }
                 }
                 EditAction::InputMethod => {}
+            }
+            return;
+        }
+        if self.boards_open
+            && !self.ctrl
+            && !self.alt
+            && let Some(key) = board_list_key(event.keysym)
+        {
+            let acting = self
+                .keyboard_focus
+                .or_else(|| self.outputs.keys().next().copied());
+            let Some(acting) = acting else {
+                return;
+            };
+            let board = self.outputs.get(&acting).map(|out| out.board().to_string());
+            match key {
+                BoardListKey::Delete => {
+                    if let Some(name) = board {
+                        self.delete_board_named(&name);
+                    }
+                }
+                BoardListKey::Rename => {
+                    if let Some(name) = board {
+                        let index = self.doc.names().position(|n| *n == name);
+                        if let Some(index) = index {
+                            self.begin_rename(index, &name);
+                        }
+                    }
+                }
+                BoardListKey::New => {
+                    self.new_board(Some(acting));
+                }
             }
             return;
         }
@@ -981,7 +1031,18 @@ impl App {
                 }
             }
             Tool::Text => self.begin_text_edit(key, canvas[0], canvas[1]),
-            Tool::Selection => self.select_press(*key, x, y),
+            Tool::Selection => {
+                // Text is content before it is an object: a plain select press on measured glyphs
+                // opens the box at that point. Shift still toggles membership and Alt still copies.
+                if !self.shift
+                    && !self.alt
+                    && self.text_index_at(key, canvas[0], canvas[1]).is_some()
+                {
+                    self.begin_text_edit(key, canvas[0], canvas[1]);
+                } else {
+                    self.select_press(*key, x, y);
+                }
+            }
             Tool::Circle => self.begin_shape(key, canvas[0], canvas[1], ShapeKind::Circle),
             Tool::Rect => self.begin_shape(key, canvas[0], canvas[1], ShapeKind::Rect),
             Tool::Diamond => self.begin_shape(key, canvas[0], canvas[1], ShapeKind::Diamond),

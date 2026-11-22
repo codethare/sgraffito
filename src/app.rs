@@ -2927,42 +2927,42 @@ impl App {
         }
     }
 
-    pub(crate) fn begin_text_edit(&mut self, key: &u32, x: f32, y: f32) {
-        let Some(out) = self.outputs.get(key) else {
-            return;
-        };
+    /// The text box whose measured glyphs are under a canvas point. The select tool uses this to
+    /// turn a click on text into an edit, without creating a box when the click misses.
+    pub(crate) fn text_index_at(&mut self, key: &u32, x: f32, y: f32) -> Option<usize> {
+        let out = self.outputs.get(key)?;
         let board_name = out.board();
         let scale = out.scale;
+        let view = out.view;
         // The click is tested against the text the renderer measures, not against the font-size
         // estimate the eraser uses: that estimate is 0.6 em per character, which is too narrow
-        // for CJK, so clicking such a glyph used to start a new box instead of editing it.
-        let existing = self.doc.boards.get(board_name).and_then(|ann| {
-            ann.texts.iter().position(|t| {
-                self.renderer
-                    .text_edit_bounds(
-                        &t.text,
-                        t,
-                        Screen {
-                            scale,
-                            view: out.view,
-                        },
-                    )
-                    .contains(x, y)
-            })
-        });
+        // for CJK.
+        let ann = self.doc.boards.get(board_name)?;
+        ann.texts.iter().position(|t| {
+            self.renderer
+                .text_edit_bounds(&t.text, t, Screen { scale, view })
+                .contains(x, y)
+        })
+    }
+
+    pub(crate) fn begin_text_edit(&mut self, key: &u32, x: f32, y: f32) {
+        let Some(board_name) = self.outputs.get(key).map(|out| out.board().to_string()) else {
+            return;
+        };
+        let existing = self.text_index_at(key, x, y);
         // A note is a thing you write in, so the text tool enters it rather than dropping a text box on
         // top of it.
         let on_note = self
             .doc
             .boards
-            .get(board_name)
+            .get(&board_name)
             .and_then(|ann| ann.notes.iter().position(|n| n.bounds().contains(x, y)));
         if let Some(index) = on_note {
             self.enter_note(key, index);
             return;
         }
         let (item, index) = match existing {
-            Some(idx) => (self.doc.boards[board_name].texts[idx].clone(), Some(idx)),
+            Some(idx) => (self.doc.boards[&board_name].texts[idx].clone(), Some(idx)),
             None => (
                 TextItem {
                     x,

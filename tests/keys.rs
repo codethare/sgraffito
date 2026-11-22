@@ -1,8 +1,8 @@
 use sgraffito::app::{MAX_PASTE_BYTES, Tool, read_selection, text_mime};
 use sgraffito::canvas::Caret;
 use sgraffito::input::{
-    EditAction, RenameKey, bytes_to_delete, color_for_keysym, edit_action, rename_key,
-    size_step_for_keysym, tool_for_keysym, wants_sampling,
+    BoardListKey, EditAction, RenameKey, board_list_key, bytes_to_delete, color_for_keysym,
+    edit_action, rename_key, size_step_for_keysym, tool_for_keysym, wants_sampling,
 };
 use smithay_client_toolkit::seat::keyboard::Keysym;
 
@@ -483,4 +483,15 @@ fn a_rename_commits_on_enter_and_cancels_on_escape() {
     assert_eq!(rename_key(Keysym::Left, true), RenameKey::Ignore);
     assert_eq!(rename_key(Keysym::p, true), RenameKey::Buffer);
     assert_eq!(rename_key(Keysym::p, false), RenameKey::Ignore);
+}
+
+#[test]
+fn the_open_board_list_has_its_own_d_r_n_keys() {
+    assert_eq!(board_list_key(Keysym::d), Some(BoardListKey::Delete));
+    assert_eq!(board_list_key(Keysym::D), Some(BoardListKey::Delete));
+    assert_eq!(board_list_key(Keysym::r), Some(BoardListKey::Rename));
+    assert_eq!(board_list_key(Keysym::R), Some(BoardListKey::Rename));
+    assert_eq!(board_list_key(Keysym::n), Some(BoardListKey::New));
+    assert_eq!(board_list_key(Keysym::N), Some(BoardListKey::New));
+    assert_eq!(board_list_key(Keysym::v), None);
 }

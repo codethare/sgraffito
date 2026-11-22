@@ -1381,8 +1381,8 @@ fn the_rail_folds_to_fit_a_short_output_and_is_pinned_only_below_the_foot() {
     let pinned = toolbar_bounds(&rail, tiny_w as f32, tiny_h as f32);
     assert_eq!(
         pinned.y,
-        8.0 - 1.0,
-        "the top is the margin, hairline included"
+        8.0 + 6.0 - 1.0,
+        "the top is the margin and pad, hairline included"
     );
     assert!(
         pinned.y + pinned.h > tiny_h as f32,
@@ -3809,10 +3809,11 @@ fn a_panel_draws_only_rows_that_are_inside_the_output_and_clickable() {
         "the box itself leaves the output: {band:?}"
     );
     let mut renderer = Renderer::new();
-    // The panel's own column, one block right of the rail's.
-    let column_x = band.x + 1.0 + 40.0;
+    // The panel's own column, one block right of the rail's, with the pad and hairline that the
+    // floating plate puts between the bounds and the first block.
+    let column_x = band.x + 7.0 + 40.0;
     let painted: Vec<u32> = (0..h)
-        .filter(|y| (50..300).any(|x| alpha(&buf, w, x, *y) > 0))
+        .filter(|y| (55..300).any(|x| alpha(&buf, w, x, *y) > 0))
         .collect();
     let (first, last) = (
         *painted.first().expect("the drawer drew nothing") as f32,
