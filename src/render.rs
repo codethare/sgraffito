@@ -31,7 +31,7 @@ const ERASER_MARKER_RADIUS: f32 = 8.0;
 /// opens across the rail toward the interior. The default is the left edge (the side measured
 /// fastest for toolbar targets), with its vertical centre at the optical centre, roughly 5% above
 /// the geometric centre, where the gaze rests.
-const TOOLBAR_MARGIN: f32 = 14.0;
+const TOOLBAR_MARGIN: f32 = 18.0;
 const TOOLBAR_CENTRE: f32 = 0.45;
 /// Side of one block: the rail is a column or row of these, above the HIG's minimum pointer target.
 const TOOLBAR_BLOCK: f32 = 30.0;
@@ -356,12 +356,14 @@ fn draw_rail_separators(
     position: ToolbarPosition,
     scale: f32,
 ) {
-    let mut previous: Option<(Option<ToolbarAction>, f32)> = None;
+    let mut previous: Option<Option<ToolbarAction>> = None;
     for control in pill.controls.iter().filter(|c| c.block.column == 0) {
-        if let Some((previous_action, previous_along)) = previous {
+        if let Some(previous_action) = previous {
             let boundary = separates(previous_action, control.block.action);
             if boundary {
-                let along = (previous_along + TOOLBAR_BLOCK + control.along) / 2.0;
+                // Measure from the following button, so the colour rule and the `more tools` rule
+                // keep the same clearance even if their surrounding gaps differ.
+                let along = control.along - TOOLBAR_GROUP_GAP / 2.0;
                 let across = TOOLBAR_BLOCK / 2.0;
                 let (x, y) = position.point(origin, along, across);
                 let (x, y) = (x * scale, y * scale);
@@ -389,7 +391,7 @@ fn draw_rail_separators(
                 }
             }
         }
-        previous = Some((control.block.action, control.along));
+        previous = Some(control.block.action);
     }
 }
 
