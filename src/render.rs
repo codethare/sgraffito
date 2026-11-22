@@ -2433,6 +2433,7 @@ impl Renderer {
             parse_hex(TOOLBAR_BLOCK_FILL),
             Some((parse_hex(TOOLBAR_CARD_EDGE), TOOLBAR_HAIRLINE * scale)),
         );
+        draw_card_shadow(pixmap, history, TOOLBAR_RADIUS * scale, scale);
         for (rect, action, enabled, icon, badge) in [
             (
                 cards.undo,
