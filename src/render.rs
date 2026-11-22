@@ -81,6 +81,10 @@ const ICON_INSET: f32 = 7.0;
 const TOOLBAR_RESERVE: f32 = 320.0;
 /// How far the drawer's column starts from the rail's.
 const TOOLBAR_DRAWER_X: f32 = TOOLBAR_BLOCK + TOOLBAR_GAP;
+/// The outer edge of a panel card: clear of the rail's plate, with the same gap the colour card uses.
+const TOOLBAR_PANEL_X: f32 = TOOLBAR_BLOCK + TOOLBAR_PAD + TOOLBAR_GAP;
+/// The first column of blocks inside that panel card, one pad in from its edge.
+const TOOLBAR_PANEL_ROW_X: f32 = TOOLBAR_PANEL_X + TOOLBAR_PAD;
 const TOOLBAR_CACHE_CAP: usize = 16;
 /// `#rrggbbaa`. The block fill stands in for a HUD material: a `wl_shm` layer surface cannot be
 /// blurred, so there is translucency but no real vibrancy. The alpha is the opacity that keeps
@@ -716,16 +720,16 @@ fn rail_layout(toolbar: &Toolbar, surface: (f32, f32), position: ToolbarPosition
             .min((room - width).max(0.0));
         RailRect {
             along: start,
-            across: TOOLBAR_DRAWER_X - TOOLBAR_PAD,
+            across: TOOLBAR_PANEL_X,
             along_extent: width,
             across_extent: rows_h + 2.0 * TOOLBAR_PAD,
         }
     } else {
         RailRect {
             along: along - TOOLBAR_PAD,
-            across: TOOLBAR_DRAWER_X - TOOLBAR_PAD,
+            across: TOOLBAR_PANEL_X,
             along_extent: rows_h + 2.0 * TOOLBAR_PAD,
-            across_extent: TOOLBAR_RESERVE - TOOLBAR_DRAWER_X + TOOLBAR_PAD,
+            across_extent: TOOLBAR_RESERVE - TOOLBAR_PANEL_X,
         }
     };
     let reach = (plate.along + plate.along_extent).max(column);
@@ -1864,6 +1868,35 @@ impl Renderer {
             Some((parse_hex(TOOLBAR_CARD_EDGE), TOOLBAR_HAIRLINE * scale)),
         );
         draw_card_shadow(pixmap, plate, TOOLBAR_RADIUS * scale, scale);
+        // The open panel is one card beside the rail, not a stack of independently bordered rows.
+        // It unfurls outward with the rows, so at the start of the animation it is only as wide as
+        // their squares rather than appearing whole before them.
+        if let Some(panel) = pill.panel {
+            let grow = toolbar.panel_grow.clamp(0.0, 1.1);
+            let base = TOOLBAR_BLOCK + 2.0 * TOOLBAR_PAD;
+            let panel = match position {
+                ToolbarPosition::Left | ToolbarPosition::Top => RailRect {
+                    across_extent: base + (panel.across_extent - base) * grow,
+                    ..panel
+                },
+                ToolbarPosition::Right | ToolbarPosition::Bottom => RailRect {
+                    across: panel.across + panel.across_extent
+                        - base
+                        - (panel.across_extent - base) * grow,
+                    across_extent: base + (panel.across_extent - base) * grow,
+                    ..panel
+                },
+            };
+            let card = device(panel);
+            round_rect(
+                pixmap,
+                card,
+                TOOLBAR_RADIUS * scale,
+                parse_hex(TOOLBAR_BLOCK_FILL),
+                Some((parse_hex(TOOLBAR_CARD_EDGE), TOOLBAR_HAIRLINE * scale)),
+            );
+            draw_card_shadow(pixmap, card, TOOLBAR_RADIUS * scale, scale);
+        }
         // The line through the middle of the backdrop options: the four modes are one family, and
         // the line says so without a second plate. It is drawn behind the buttons.
         if toolbar.more
@@ -2041,20 +2074,19 @@ impl Renderer {
                         // their own. A pop-out still needs a surface over the plate, and an active
                         // tool still needs its accent. Panel rows keep their own capsules.
                         if control.block.column != 0 {
-                            let (fill, edge) = if control.block.active {
-                                (TOOLBAR_ACCENT, TOOLBAR_ACCENT)
+                            // The panel is one card: its rows paint only their own state, never a
+                            // second capsule and border on top of that card.
+                            if control.block.active {
+                                round_rect(pixmap, block, radius, parse_hex(TOOLBAR_ACCENT), None);
                             } else if hovered {
-                                (TOOLBAR_HOVER_FILL, TOOLBAR_CARD_EDGE)
-                            } else {
-                                (TOOLBAR_BLOCK_FILL, TOOLBAR_BLOCK_EDGE)
-                            };
-                            round_rect(
-                                pixmap,
-                                block,
-                                radius,
-                                parse_hex(fill),
-                                Some((parse_hex(edge), TOOLBAR_HAIRLINE * scale)),
-                            );
+                                round_rect(
+                                    pixmap,
+                                    block,
+                                    radius,
+                                    parse_hex(TOOLBAR_HOVER_FILL),
+                                    None,
+                                );
+                            }
                         } else if control.stretched {
                             round_rect(pixmap, block, radius, parse_hex(TOOLBAR_BLOCK_FILL), None);
                         } else if control.block.active {
@@ -2791,8 +2823,10 @@ impl Renderer {
                     plate.map_or(TOOLBAR_PAD, |plate| plate.along + TOOLBAR_PAD),
                     panel_across,
                 )
+            } else if column == 0 {
+                (along[column], 0.0)
             } else {
-                (along[column], block.column as f32 * TOOLBAR_DRAWER_X)
+                (along[column], TOOLBAR_PANEL_ROW_X)
             };
             let gap = block.gap;
             // The block that owns the open panel stays a square: the list it opened says what it is,
@@ -2826,7 +2860,7 @@ impl Renderer {
             } else if block.column == 0 {
                 ceiling
             } else {
-                ceiling - TOOLBAR_DRAWER_X
+                ceiling - TOOLBAR_PANEL_ROW_X
             };
             let mut width = match label {
                 // A row of names has no square, so its capsule is the text and a pad on each side: the
@@ -3031,7 +3065,10 @@ impl Renderer {
                 let (along, across) = if position.horizontal() {
                     (scrim.0 + (index as f32 + 1.0) * TOOLBAR_DRAWER_X, scrim.1)
                 } else {
-                    (scrim.0, column as f32 * TOOLBAR_DRAWER_X)
+                    (
+                        scrim.0,
+                        TOOLBAR_PANEL_ROW_X + (index as f32 + 1.0) * TOOLBAR_DRAWER_X,
+                    )
                 };
                 controls.push(Control {
                     block: Block {
@@ -3059,6 +3096,45 @@ impl Renderer {
                 ));
             }
         }
+        // One card wraps the whole panel. It is fitted to the controls the panel actually holds
+        // rather than to the reserve the layout must keep for hit-testing and damage, so a short
+        // list gets a short card and the backdrop's four extra buttons are still inside it.
+        let panel = plate.map(|plate| {
+            let (full_start, full_end) = if position.horizontal() {
+                (plate.along, plate.along + plate.along_extent)
+            } else {
+                (plate.across, plate.across + plate.across_extent)
+            };
+            let mut span: Option<(f32, f32)> = None;
+            for control in controls.iter().filter(|control| control.block.column > 0) {
+                let (at, extent) = if position.horizontal() {
+                    (control.along, control.along_extent)
+                } else {
+                    (control.across, control.across_extent)
+                };
+                span = Some(match span {
+                    Some((start, end)) => (start.min(at), end.max(at + extent)),
+                    None => (at, at + extent),
+                });
+            }
+            let (start, end) = span.unwrap_or((full_start, full_end));
+            let (start, end) = (start - TOOLBAR_PAD, end + TOOLBAR_PAD);
+            if position.horizontal() {
+                RailRect {
+                    along: start,
+                    across: plate.across,
+                    along_extent: end - start,
+                    across_extent: plate.across_extent,
+                }
+            } else {
+                RailRect {
+                    along: plate.along,
+                    across: start,
+                    along_extent: plate.along_extent,
+                    across_extent: end - start,
+                }
+            }
+        });
         // The walkway into a panel. The drawer and the boards list own the strip beside the rail, from
         // their first row to their last — a block level with a row answers for the list, which is how the
         // pointer walks into a tall list from any height. The width list hangs off the readout, whose rows
@@ -3068,22 +3144,41 @@ impl Renderer {
             Some(ToolbarAction::Size) => TOOLBAR_BLOCK,
             _ => 0.0,
         };
-        let corridor = match (plate, owner) {
-            (Some(plate), Some(owner)) => Some((
-                RailRect {
-                    along: plate.along,
-                    across: corridor_across,
-                    along_extent: plate.along_extent,
-                    across_extent: TOOLBAR_DRAWER_X - corridor_across,
-                },
-                owner,
-            )),
+        let corridor = match (panel, owner) {
+            (Some(panel), Some(owner)) => {
+                // A side rail walks into the list from any row; a top or bottom rail drops from the
+                // one block that opened it, so the walkway must stay as narrow as that block and
+                // leave the neighbouring controls their own presses.
+                let along = if position.horizontal() {
+                    controls
+                        .iter()
+                        .find(|control| control.block.action == Some(owner))
+                        .map_or(panel.along, |control| control.along)
+                } else {
+                    panel.along
+                };
+                let along_extent = if position.horizontal() {
+                    TOOLBAR_BLOCK
+                } else {
+                    panel.along_extent
+                };
+                Some((
+                    RailRect {
+                        along,
+                        across: corridor_across,
+                        along_extent,
+                        across_extent: TOOLBAR_PANEL_ROW_X - corridor_across,
+                    },
+                    owner,
+                ))
+            }
             _ => None,
         };
         ToolbarPill {
             controls,
             hits,
             corridor,
+            panel,
             column,
             reach,
             overflow,
@@ -3843,6 +3938,8 @@ struct ToolbarPill {
     /// and a step into a neighbouring block would read as leaving the menu. It is a strip of its own rather
     /// than a wider box on the block, because the rail's rows answer in column order and a later row would win.
     corridor: Option<(RailRect, ToolbarAction)>,
+    /// The one card behind the open panel's rows, fitted to them.
+    panel: Option<RailRect>,
     /// Length of the rail's own column on this output, which the plate and the origin are placed from.
     column: f32,
     /// Everything the rail and its open panel reach along the rail's axis: what the frame paints, what
@@ -5331,6 +5428,69 @@ mod tests {
             let mut renderer = Renderer::new();
             let pill = renderer.toolbar_pill(&rail, surface, position);
             let origin = position.origin(surface, pill.column);
+            if position == ToolbarPosition::Left {
+                for control in pill
+                    .controls
+                    .iter()
+                    .filter(|control| control.block.column > 0)
+                {
+                    eprintln!(
+                        "DBG {:?} across {} width {} label {:?}",
+                        control.block.action,
+                        control.across,
+                        control.across_extent,
+                        control.block.label
+                    );
+                }
+            }
+            let card = position.place(
+                origin,
+                pill.panel
+                    .expect("an open drawer has one card behind its rows"),
+            );
+            on_screen(card, surface, "the drawer's card");
+            for control in pill
+                .controls
+                .iter()
+                .filter(|control| control.block.column > 0)
+            {
+                let row = block_rect(position, surface, &pill, control);
+                assert!(
+                    row.x >= card.x - 0.01
+                        && row.y >= card.y - 0.01
+                        && row.x + row.w <= card.x + card.w + 0.01
+                        && row.y + row.h <= card.y + card.h + 0.01,
+                    "{position:?}: a panel control hangs outside its card"
+                );
+            }
+            // The card sits clear of the rail's own plate, so it reads as a separate panel.
+            let gap = TOOLBAR_PANEL_X;
+            match position {
+                ToolbarPosition::Left => {
+                    assert!(
+                        card.x >= origin.0 + gap - 0.01,
+                        "{position:?}: the card {card:?} overlaps origin {origin:?} gap {gap}"
+                    )
+                }
+                ToolbarPosition::Right => {
+                    assert!(
+                        card.x + card.w <= origin.0 - gap + 0.01,
+                        "{position:?}: the card overlaps"
+                    )
+                }
+                ToolbarPosition::Top => {
+                    assert!(
+                        card.y >= origin.1 + gap - 0.01,
+                        "{position:?}: the card overlaps"
+                    )
+                }
+                ToolbarPosition::Bottom => {
+                    assert!(
+                        card.y + card.h <= origin.1 - gap + 0.01,
+                        "{position:?}: the card overlaps"
+                    )
+                }
+            }
             let (corridor, owner) = pill.corridor.expect("an open drawer has a corridor");
             assert_eq!(owner, ToolbarAction::More);
             on_screen(
@@ -5685,7 +5845,7 @@ mod tests {
                     &rail,
                     w,
                     h,
-                    ox + TOOLBAR_DRAWER_X + 6.0,
+                    ox + TOOLBAR_DRAWER_X + TOOLBAR_GAP + TOOLBAR_PAD + 6.0,
                     oy + row_y(step) + 5.0
                 ),
                 Some(action),
@@ -6094,7 +6254,7 @@ mod tests {
                 .clone();
             let (ox, oy) = position.origin((900.0, 1000.0), pill.column);
             (
-                ox + TOOLBAR_DRAWER_X,
+                ox + control.across,
                 oy + control.along,
                 control.across_extent,
             )

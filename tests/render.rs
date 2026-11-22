@@ -1860,7 +1860,7 @@ fn the_drawer_opens_beside_the_rail_without_moving_it() {
     // level with the block that opened it — the row the corridor leads into, so the pointer can walk from
     // the block straight onto the list.
     let band = toolbar_bounds(&open, fw, fh);
-    let column_x = band.x + 1.0 + 30.0 + 4.0 + 15.0;
+    let column_x = band.x + 1.0 + 44.0 + 15.0;
     let mut more_row = None;
     for step in 1..band.h as u32 {
         let y = band.y + step as f32;
@@ -3475,7 +3475,7 @@ fn the_boards_panel_states_the_documents_boards() {
     let mut renderer = Renderer::new();
     let rail = boards_rail(&[("Board 1", false), ("office", true)]);
     // Sweeping the panel's column top to bottom gives its rows in the order they are drawn.
-    let sweep = sweep_rail(&mut renderer, &rail, w, h, 40.0);
+    let sweep = sweep_rail(&mut renderer, &rail, w, h, 60.0);
     let mut rows: Vec<ToolbarAction> = Vec::new();
     for action in sweep.into_iter().flatten() {
         if !rows.contains(&action) {
@@ -3500,7 +3500,7 @@ fn a_panel_with_one_board_has_no_delete_row() {
     let (w, h) = (900.0f32, 1000.0f32);
     let mut renderer = Renderer::new();
     let rail = boards_rail(&[("Board 1", true)]);
-    let sweep = sweep_rail(&mut renderer, &rail, w, h, 40.0);
+    let sweep = sweep_rail(&mut renderer, &rail, w, h, 60.0);
     let mut rows: Vec<ToolbarAction> = Vec::new();
     for action in sweep.into_iter().flatten() {
         if !rows.contains(&action) {
@@ -3517,7 +3517,7 @@ fn a_board_row_is_hit_as_that_board() {
     let mut renderer = Renderer::new();
     let rail = boards_rail(&[("Board 1", false), ("office", true)]);
     let index = |renderer: &mut Renderer, action: ToolbarAction| {
-        let sweep = sweep_rail(renderer, &rail, w, h, 40.0);
+        let sweep = sweep_rail(renderer, &rail, w, h, 60.0);
         sweep.iter().position(|hit| *hit == Some(action))
     };
     let (first, second) = (
@@ -3541,7 +3541,7 @@ fn the_boards_block_owns_its_row_as_far_as_the_panel_and_a_row_owns_its_column()
     let base = band.x + 1.0 + 6.0;
     // The rail's own column for the block, the panel's column for its rows.
     let rail_sweep = sweep_rail(&mut renderer, &rail, w, h, 20.0);
-    let panel_sweep = sweep_rail(&mut renderer, &rail, w, h, 40.0);
+    let panel_sweep = sweep_rail(&mut renderer, &rail, w, h, 60.0);
     let row_of = |sweep: &[Option<ToolbarAction>], action: ToolbarAction| {
         sweep
             .iter()
@@ -3554,7 +3554,7 @@ fn the_boards_block_owns_its_row_as_far_as_the_panel_and_a_row_owns_its_column()
     );
     // The corridor: the block's own row reaches exactly to the panel's column, so the pointer is on the
     // block until it is on the panel's own column.
-    for x in 0..32 {
+    for x in 0..44 {
         assert_eq!(
             renderer.toolbar_hit(&rail, w, h, base + x as f32, block_y),
             Some(ToolbarAction::Boards),
@@ -3562,7 +3562,7 @@ fn the_boards_block_owns_its_row_as_far_as_the_panel_and_a_row_owns_its_column()
         );
     }
     // And the row is still the row once the pointer is in the panel's own column.
-    for x in 34..60 {
+    for x in 46..60 {
         assert_eq!(
             renderer.toolbar_hit(&rail, w, h, base + x as f32, first_row_y),
             Some(ToolbarAction::Board(0)),
@@ -3600,7 +3600,7 @@ fn the_row_the_pointer_walks_into_deletes_nothing() {
         &sweep_rail(&mut renderer, &shut, w, h, 20.0),
         ToolbarAction::Boards,
     ) + 8;
-    let panel = sweep_rail(&mut renderer, &open, w, h, 40.0);
+    let panel = sweep_rail(&mut renderer, &open, w, h, 60.0);
     // The corridor leads the pointer in along the row level with the block, so that row must not be
     // one that destroys a board: a delete is a button at a row's right end, which the corridor never
     // reaches.
@@ -3643,7 +3643,7 @@ fn a_panel_eases_open_from_squares_to_rows() {
     // Beyond the 30 pt square a row paints nothing until its capsule opens, so the closed panel is the
     // reference for both ends of the transition.
     let beyond_square = |a: &[u8], b: &[u8]| {
-        (96..260)
+        (120..260)
             .flat_map(|x| (0..h).map(move |y| (x, y)))
             .filter(|(x, y)| {
                 let i = ((y * w + x) * 4) as usize;
@@ -3722,8 +3722,8 @@ fn the_pointer_can_walk_from_the_block_into_its_panel_and_between_its_rows() {
         .expect("the boards block") as f32;
     // The middle of the block's own band, and the panel's column.
     let y = band.y + block_row + 15.0;
-    // The panel's own column: a block is 30 wide and the panel starts one gap past it.
-    let inside_panel = base + 34.0 + 10.0;
+    // The panel's own column: a block and a pad past the rail, then the card's own pad.
+    let inside_panel = base + 46.0 + 15.0;
     // 1. Sideways out of the block: the row that shares its band takes over where the block's box ends.
     for x in 0..60 {
         assert!(
@@ -3765,7 +3765,7 @@ fn a_folded_tool_is_reached_through_the_drawer() {
     rail.more = true;
     let hit = |renderer: &mut Renderer, x: f32, y: f32| renderer.toolbar_hit(&rail, w, h, x, y);
     // The note's tool is not on this output's rail, but it is a row of its drawer.
-    let column_x = toolbar_bounds(&rail, w, h).x + 1.0 + 40.0;
+    let column_x = toolbar_bounds(&rail, w, h).x + 1.0 + 60.0;
     let found = (0..h as u32)
         .map(|y| y as f32 + 0.5)
         .any(|y| hit(&mut renderer, column_x, y) == Some(ToolbarAction::Tool(Tool::Note)));
@@ -3879,10 +3879,10 @@ fn the_corridor_covers_the_panels_whole_span_not_just_the_blocks_row() {
     }
 }
 
-/// A panel has no plate behind it: the rows are the control, and a dark rectangle behind the list was a second
-/// surface to read through. So the panel's column is the wallpaper between the rows and above the first one.
+/// A panel is one card behind its rows: the rows share that surface instead of each carrying a
+/// capsule of its own, and the padding between them belongs to the card.
 #[test]
-fn a_panel_paints_no_plate_behind_its_rows() {
+fn a_panel_paints_one_card_behind_its_rows() {
     let (w, h) = (900u32, 1000u32);
     let mut rail = boards_rail(&[("Board 1", true), ("office", false)]);
     rail.backdrop = Backdrop::Transparent;
@@ -3902,8 +3902,8 @@ fn a_panel_paints_no_plate_behind_its_rows() {
     );
     let mut renderer = Renderer::new();
     let band = toolbar_bounds(&rail, w as f32, h as f32);
-    // One point for the hit test, one inside a row's capsule for the pixels.
-    let (x, probe) = (band.x + 1.0 + 40.0, band.x + 1.0 + 55.0);
+    // The panel's own column, inside both the card and a row.
+    let (x, probe) = (band.x + 1.0 + 61.0, band.x + 1.0 + 61.0);
     let row = (0..h)
         .map(|y| y as f32 + 0.5)
         .find(|y| {
@@ -3912,12 +3912,11 @@ fn a_panel_paints_no_plate_behind_its_rows() {
                 .is_some()
         })
         .expect("the panel has no rows");
-    // Two pixels above the first row, and the gap between two rows: both were the plate's before.
+    // The padding above the first row and the gap between two rows are the same card now.
     for y in [row - 2.0, row + 32.0] {
-        assert_eq!(
-            alpha(&buf, w, probe as u32, y as u32),
-            0,
-            "the panel painted a plate at y={y}"
+        assert!(
+            alpha(&buf, w, probe as u32, y as u32) > 0,
+            "the panel's card has a hole at y={y}"
         );
     }
     // The rows themselves are still painted, so this is not a test of an empty panel.
