@@ -399,22 +399,20 @@ fn draw_rail_separators(
 /// palette, the tools and the size group, in their own order.
 fn rail_candidates(toolbar: &Toolbar) -> Vec<Block> {
     let colors = &config::current().colors;
-    let mut blocks: Vec<Block> = colors
+    let active = colors
         .iter()
-        .enumerate()
-        .map(|(index, color)| Block {
-            mark: Mark::Swatch(index),
-            column: 0,
-            label: labelled(
-                ToolbarAction::Color(index),
-                &format!("colour {}", index + 1),
-            ),
-            action: Some(ToolbarAction::Color(index)),
-            active: color == &toolbar.color,
-            gap: TOOLBAR_GAP,
-        })
-        .collect();
-    blocks[colors.len() - 1].gap = TOOLBAR_GROUP_GAP;
+        .position(|color| color == &toolbar.color)
+        .unwrap_or(0);
+    // One swatch on the rail: the colour in hand. The other four live in the flyout that opens
+    // when the pointer is on it or a colour key just changed the active one.
+    let mut blocks: Vec<Block> = vec![Block {
+        mark: Mark::Swatch(active),
+        column: 0,
+        label: labelled(ToolbarAction::Color(active), "current colour"),
+        action: Some(ToolbarAction::Color(active)),
+        active: true,
+        gap: TOOLBAR_GROUP_GAP,
+    }];
     for (tool, icon, label) in [
         (Tool::Pen, Icon::Pen, "pen"),
         (Tool::Eraser, Icon::Eraser, "eraser"),
@@ -2318,6 +2316,66 @@ impl Renderer {
                 }
             }
         }
+        self.draw_color_strip(pixmap, &pill, toolbar, origin, position, scale);
+    }
+
+    /// The four colours that are not in hand, beside the one swatch that is. The strip is one card,
+    /// like the rail, and each chip keeps the number of its colour key.
+    fn draw_color_strip(
+        &mut self,
+        pixmap: &mut PixmapMut,
+        pill: &ToolbarPill,
+        toolbar: &Toolbar,
+        origin: (f32, f32),
+        position: ToolbarPosition,
+        scale: f32,
+    ) {
+        let Some(strip) = color_strip(pill, toolbar) else {
+            return;
+        };
+        let square = |r: RailRect| {
+            let r = position.place(origin, r);
+            Rect {
+                x: r.x * scale,
+                y: r.y * scale,
+                w: r.w * scale,
+                h: r.h * scale,
+            }
+        };
+        let plate = square(strip.plate);
+        round_rect(
+            pixmap,
+            plate,
+            TOOLBAR_RADIUS * scale,
+            parse_hex(TOOLBAR_BLOCK_FILL),
+            Some((parse_hex(TOOLBAR_CARD_EDGE), TOOLBAR_HAIRLINE * scale)),
+        );
+        draw_card_shadow(pixmap, plate, TOOLBAR_RADIUS * scale, scale);
+        let colors = &config::current().colors;
+        for (index, rail) in &strip.chips {
+            let rect = square(*rail);
+            if toolbar.hover == Some(ToolbarAction::Color(*index)) {
+                round_rect(
+                    pixmap,
+                    rect.grown(2.0 * scale),
+                    TOOLBAR_RADIUS * scale,
+                    parse_hex(TOOLBAR_HOVER_FILL),
+                    None,
+                );
+            }
+            round_rect(
+                pixmap,
+                rect,
+                TOOLBAR_RADIUS * scale,
+                parse_hex(&colors[*index]),
+                Some((parse_hex(TOOLBAR_SWATCH_EDGE), TOOLBAR_HAIRLINE * scale)),
+            );
+            let key = ["1", "2", "3", "4", "5"]
+                .get(*index)
+                .copied()
+                .unwrap_or("?");
+            self.draw_badge(pixmap, rect, scale, key, note_ink(&colors[*index]));
+        }
     }
 
     /// The zoom percentage and the two history cards, on the edge opposite the rail. They are
@@ -2509,6 +2567,16 @@ impl Renderer {
         let pill = self.cached_toolbar_pill(toolbar, (width, height), position)?;
         let origin = position.origin((width, height), pill.column);
         let (along, across) = position.to_local(origin, x, y);
+        if let Some(strip) = color_strip(&pill, toolbar)
+            && let Some((index, _)) = strip.chips.iter().find(|(_, r)| {
+                along >= r.along
+                    && along < r.along + r.along_extent
+                    && across >= r.across
+                    && across < r.across + r.across_extent
+            })
+        {
+            return Some(ToolbarAction::Color(*index));
+        }
         if along < 0.0 || across < 0.0 || along >= pill.reach {
             return None;
         }
@@ -3636,6 +3704,7 @@ fn same_layout(a: &Toolbar, b: &Toolbar) -> bool {
         && a.target == b.target
         && a.rename == b.rename
         && a.delete_confirm == b.delete_confirm
+        && a.colors_open == b.colors_open
         && a.boards == b.boards
         && a.shared == b.shared
         && a.backdrop == b.backdrop
@@ -3702,6 +3771,57 @@ fn draw_card_shadow(pixmap: &mut PixmapMut, rect: Rect, radius: f32, scale: f32)
         [0, 0, 0, 0],
         Some((parse_hex(TOOLBAR_CARD_SHADOW), 2.0 * inset)),
     );
+}
+
+/// The other colours, beside the one swatch that stays on the rail.
+#[derive(Clone)]
+struct ColorStrip {
+    plate: RailRect,
+    chips: Vec<(usize, RailRect)>,
+}
+
+fn color_strip(pill: &ToolbarPill, toolbar: &Toolbar) -> Option<ColorStrip> {
+    if !toolbar.colors_open {
+        return None;
+    }
+    let colors = &config::current().colors;
+    let active = colors
+        .iter()
+        .position(|color| color == &toolbar.color)
+        .unwrap_or(0);
+    let control = pill
+        .controls
+        .iter()
+        .find(|control| control.block.action == Some(ToolbarAction::Color(active)))?;
+    let across = control.across + TOOLBAR_BLOCK + TOOLBAR_GAP;
+    let mut along = control.along;
+    let mut chips = Vec::new();
+    for index in 0..colors.len() {
+        if index == active {
+            continue;
+        }
+        chips.push((
+            index,
+            RailRect {
+                along,
+                across,
+                along_extent: TOOLBAR_BLOCK,
+                across_extent: TOOLBAR_BLOCK,
+            },
+        ));
+        along += TOOLBAR_BLOCK + TOOLBAR_GAP;
+    }
+    let along_extent =
+        chips.len() as f32 * (TOOLBAR_BLOCK + TOOLBAR_GAP) - TOOLBAR_GAP + 2.0 * TOOLBAR_PAD;
+    Some(ColorStrip {
+        plate: RailRect {
+            along: control.along - TOOLBAR_PAD,
+            across: across - TOOLBAR_PAD,
+            along_extent,
+            across_extent: TOOLBAR_BLOCK + 2.0 * TOOLBAR_PAD,
+        },
+        chips,
+    })
 }
 
 /// The room a stretched block may take, from the rail's own edge: bounded by the output's width and by the
@@ -3788,6 +3908,19 @@ pub fn cards_bounds(surface: (f32, f32), position: CardPosition) -> Rect {
     }
 }
 
+/// The card behind the colour flyout, in output coordinates. The swatch stays the first rail block,
+/// so its position is fixed and this can be measured without a renderer.
+pub fn color_strip_bounds(position: ToolbarPosition, surface: (f32, f32), column: f32) -> Rect {
+    let origin = position.origin(surface, column);
+    let plate = RailRect {
+        along: 0.0,
+        across: TOOLBAR_BLOCK + TOOLBAR_GAP - TOOLBAR_PAD,
+        along_extent: 4.0 * (TOOLBAR_BLOCK + TOOLBAR_GAP) - TOOLBAR_GAP + 2.0 * TOOLBAR_PAD,
+        across_extent: TOOLBAR_BLOCK + 2.0 * TOOLBAR_PAD,
+    };
+    position.place(origin, plate)
+}
+
 /// Everything the rail paints. A stretched block's width depends on the font, so the damage
 /// accounting reserves the widest block `toolbar_pill` will build, as a strip on the output's edge
 /// the rail is docked to; the strip only joins a damage box that reaches it.
@@ -3812,7 +3945,7 @@ fn toolbar_bounds_at(
     // pixels behind.
     let outer = TOOLBAR_PAD + TOOLBAR_HAIRLINE;
     let strip = toolbar_ceiling(width) + 2.0 * outer;
-    if position.horizontal() {
+    let rail = if position.horizontal() {
         let strip = strip.min(height);
         let reach = layout
             .reach
@@ -3839,6 +3972,11 @@ fn toolbar_bounds_at(
             w: strip,
             h: layout.reach + 2.0 * TOOLBAR_HAIRLINE,
         }
+    };
+    if toolbar.colors_open {
+        rail.union(color_strip_bounds(position, surface, layout.column))
+    } else {
+        rail
     }
 }
 
@@ -6224,6 +6362,7 @@ mod tests {
             zoom: 1.0,
             can_undo: false,
             can_redo: false,
+            colors_open: false,
         }
     }
 
@@ -6523,6 +6662,7 @@ mod tests {
                 zoom: 1.0,
                 can_undo: false,
                 can_redo: false,
+                colors_open: false,
             }),
             ..Default::default()
         };
@@ -6875,6 +7015,7 @@ mod tests {
             zoom: 1.0,
             can_undo: false,
             can_redo: false,
+            colors_open: false,
         }
     }
 
@@ -7056,7 +7197,7 @@ mod tests {
             _ => None,
         };
         let blocks = toolbar_blocks(&rail_state(), 1000.0);
-        assert_eq!(blocks.len(), 20);
+        assert_eq!(blocks.len(), 16);
         let mut stated = 0;
         for block in &blocks {
             let Some(action) = block.action else {
@@ -7119,10 +7260,10 @@ mod tests {
             };
             assert!(applies, "'{}' names a key that does not do it", block.label);
         }
-        // Nineteen blocks apply something: five colours, eleven tools, boards, the drawer's control and
-        // lock. Both panel switches are in the drawer, which is closed in this rail, and the width readout
-        // applies nothing of its own.
-        assert_eq!(stated, 19);
+        // Fifteen blocks apply something: the active colour, eleven tools, boards, the drawer's control
+        // and lock. Both panel switches are in the drawer, which is closed in this rail, and the width
+        // readout applies nothing of its own.
+        assert_eq!(stated, 15);
     }
 
     /// A face mark is a lone key. The capsule names the full key, a chord and any alternate included.
@@ -7348,5 +7489,41 @@ mod tests {
             Some(ToolbarAction::Tool(Tool::Pen)),
             Some(ToolbarAction::Size)
         ));
+    }
+
+    #[test]
+    fn the_colour_strip_shows_only_the_active_chip_until_opened() {
+        let mut toolbar = crate::render::tests::rail_for_legend();
+        let mut renderer = Renderer::new();
+        let surface = (900.0, 1000.0);
+        let closed = renderer.toolbar_pill(&toolbar, surface, ToolbarPosition::Left);
+        let colours = closed
+            .controls
+            .iter()
+            .filter(|control| matches!(control.block.action, Some(ToolbarAction::Color(_))))
+            .count();
+        assert_eq!(colours, 1, "more than the active chip stayed on the rail");
+
+        toolbar.colors_open = true;
+        let open = renderer.toolbar_pill(&toolbar, surface, ToolbarPosition::Left);
+        let strip = color_strip(&open, &toolbar).expect("the opened strip is missing");
+        assert_eq!(strip.chips.len(), 4);
+        let origin = ToolbarPosition::Left.origin(surface, open.column);
+        for (index, rail) in &strip.chips {
+            let rect = ToolbarPosition::Left.place(origin, *rail);
+            let x = rect.x + rect.w / 2.0;
+            let y = rect.y + rect.h / 2.0;
+            assert_eq!(
+                renderer.toolbar_hit_at(
+                    ToolbarPosition::Left,
+                    &toolbar,
+                    surface.0,
+                    surface.1,
+                    x,
+                    y
+                ),
+                Some(ToolbarAction::Color(*index))
+            );
+        }
     }
 }

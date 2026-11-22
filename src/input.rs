@@ -501,6 +501,7 @@ impl KeyboardHandler for App {
             self.set_tool(tool);
         } else if let Some(idx) = color_for_keysym(event.keysym) {
             self.set_color(idx);
+            self.reveal_colors();
         } else if let Some(dir) = size_step_for_keysym(event.keysym) {
             self.nudge_size(dir);
         } else if let Some(action) = panel_action_for_keysym(event.keysym) {
@@ -1175,6 +1176,7 @@ impl App {
             self.toolbar_hover = hover;
             // A fresh block opens from nothing; leaving the rail closes immediately.
             self.toolbar_hover_since = hover.map(|_| Instant::now());
+            self.hover_colors(matches!(hover, Some(ToolbarAction::Color(_))));
             self.refresh_toolbar_hover();
         }
         let over = hover.is_some();
@@ -1214,7 +1216,10 @@ impl App {
         self.commit_transient_drawing();
         match action {
             ToolbarAction::Tool(tool) => self.set_tool(tool),
-            ToolbarAction::Color(index) => self.set_color(index),
+            ToolbarAction::Color(index) => {
+                self.set_color(index);
+                self.close_colors();
+            }
             ToolbarAction::SizeStep(dir) => self.nudge_size(dir),
             ToolbarAction::More => self.toggle_more(),
             // A click on the readout toggles its list, like every other control on the rail.

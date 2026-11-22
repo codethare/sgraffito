@@ -268,6 +268,7 @@ fn rail_state() -> Toolbar {
         zoom: 1.0,
         can_undo: false,
         can_redo: false,
+        colors_open: false,
         tool: Tool::Pen,
         color: "#e01b24".to_string(),
         size: 3.0,

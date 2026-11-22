@@ -3174,6 +3174,8 @@ pub struct Toolbar {
     /// Whether a document change can be undone and whether an undone one can be redone.
     pub can_undo: bool,
     pub can_redo: bool,
+    /// Whether the collapsed colour swatch is showing the other four colours beside it.
+    pub colors_open: bool,
 }
 
 #[derive(Debug, Clone)]

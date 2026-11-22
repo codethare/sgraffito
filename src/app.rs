@@ -63,8 +63,8 @@ use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::ZwpTextIn
 
 use crate::input::{Nav, PinchData};
 use crate::render::{
-    DamageRegion, FrameCache, Renderer, Screen, buffer_format, cards_bounds, move_button_bounds,
-    snap_hint_bounds, toolbar_bounds, transient_bounds, transient_damage,
+    DamageRegion, FrameCache, Renderer, Screen, buffer_format, cards_bounds, color_strip_bounds,
+    move_button_bounds, snap_hint_bounds, toolbar_bounds, transient_bounds, transient_damage,
 };
 use crate::store::{self, Store};
 
@@ -91,6 +91,9 @@ const TOOLBAR_ANIM: Duration = Duration::from_millis(140);
 /// How long the caret stays on, and then off. Slow enough not to pull the eye off the name.
 const CARET_BLINK: Duration = Duration::from_millis(530);
 const FRAME_WAIT: Duration = Duration::from_millis(16);
+/// How long a shortcut-opened colour strip stays after a colour key, matching the dwell common
+/// palette popovers use before they collapse again.
+const COLOR_POPUP_DWELL: Duration = Duration::from_millis(1500);
 pub const IDLE_WAIT: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -375,6 +378,10 @@ pub struct App {
     pub(crate) clipboard_open: bool,
     /// What a pick in the board list applies instead of switching the screen.
     pub(crate) target: Option<Target>,
+    /// Whether the collapsed colour swatch is expanded.
+    pub(crate) colors_open: bool,
+    /// When a shortcut-opened colour strip closes itself; `None` while the pointer keeps it open.
+    colors_until: Option<Instant>,
     /// The in-app clipboard history, newest first. Session state: it is never written to the file.
     pub(crate) clips: Vec<ClipEntry>,
     /// The board's name being edited in the list, if any. A name is typed where it is read, so this is
@@ -622,6 +629,8 @@ impl App {
             size_open: false,
             clipboard_open: false,
             target: None,
+            colors_open: false,
+            colors_until: None,
             clips: Vec::new(),
             rename: None,
             delete_confirm: None,
@@ -892,6 +901,7 @@ impl App {
                     zoom: self.outputs.get(&key).map_or(1.0, |out| out.view.zoom),
                     can_undo: self.undo.can_undo(),
                     can_redo: self.undo.can_redo(),
+                    colors_open: self.colors_open,
                 })
             }
         }
@@ -2756,6 +2766,37 @@ impl App {
         }
     }
 
+    /// Show the other colours after a colour shortcut. The active swatch on the rail has already
+    /// changed; this only opens the strip for a short dwell.
+    pub(crate) fn reveal_colors(&mut self) {
+        self.colors_open = true;
+        self.colors_until = Some(Instant::now() + COLOR_POPUP_DWELL);
+        self.refresh_toolbar();
+    }
+
+    /// Hold the strip while the pointer is on the active swatch or any of its colours; once the
+    /// pointer leaves a strip with no shortcut deadline, it collapses.
+    pub(crate) fn hover_colors(&mut self, over: bool) {
+        if over {
+            if !self.colors_open || self.colors_until.is_some() {
+                self.colors_open = true;
+                self.colors_until = None;
+                self.refresh_toolbar();
+            }
+        } else if self.colors_until.is_none() && self.colors_open {
+            self.colors_open = false;
+            self.refresh_toolbar();
+        }
+    }
+
+    pub(crate) fn close_colors(&mut self) {
+        if self.colors_open || self.colors_until.is_some() {
+            self.colors_open = false;
+            self.colors_until = None;
+            self.refresh_toolbar();
+        }
+    }
+
     pub(crate) fn set_color(&mut self, idx: usize) {
         if idx < crate::config::current().colors.len() {
             self.color_idx = idx;
@@ -3316,6 +3357,17 @@ impl App {
         let dt = now.saturating_duration_since(self.last_tick).as_secs_f32();
         self.last_tick = now;
         self.step_zooms(dt);
+        if let Some(until) = self.colors_until
+            && now >= until
+        {
+            self.colors_until = None;
+            // A pointer still resting on a colour keeps the strip open; the deadline only dismisses
+            // a strip opened by a shortcut when the pointer is elsewhere.
+            if !matches!(self.toolbar_hover, Some(ToolbarAction::Color(_))) && self.colors_open {
+                self.colors_open = false;
+                self.refresh_toolbar();
+            }
+        }
         // A canvas that has stopped goes back to full resolution on its own tick, not on the next
         // pointer event: nothing may be left drawn coarse while the image is still.
         let mut settled = false;
@@ -3383,6 +3435,10 @@ impl App {
     fn next_wait(&self) -> Duration {
         if self.animating() {
             FRAME_WAIT
+        } else if let Some(until) = self.colors_until {
+            until
+                .saturating_duration_since(Instant::now())
+                .min(IDLE_WAIT)
         } else if let Some(rename) = &self.rename {
             // The loop wakes when the caret changes, not sixty times a second.
             let half = CARET_BLINK.as_millis();
@@ -3657,6 +3713,17 @@ impl App {
                 let surface = (w as f32, h as f32);
                 box_ = box_.union(toolbar_bounds(toolbar, surface.0, surface.1));
                 box_ = box_.union(cards_bounds(surface, crate::config::current().cards));
+                let position = crate::config::current().toolbar;
+                let along = if position.horizontal() {
+                    surface.0
+                } else {
+                    surface.1
+                };
+                box_ = box_.union(color_strip_bounds(
+                    position,
+                    surface,
+                    crate::render::rail_column(toolbar, along),
+                ));
             }
             Some(box_)
         } else if let Some(text_damage) = text_damage {
@@ -3672,8 +3739,21 @@ impl App {
                     .map(|toolbar| toolbar_bounds(toolbar, surface.0, surface.1)),
             );
             let mut box_ = transient_damage(out.last_transient, transient, rail);
-            if out.toolbar_dirty {
+            if out.toolbar_dirty
+                && let Some(toolbar) = out.overlay.toolbar.as_ref()
+            {
                 box_ = box_.union(cards_bounds(surface, crate::config::current().cards));
+                let position = crate::config::current().toolbar;
+                let along = if position.horizontal() {
+                    surface.0
+                } else {
+                    surface.1
+                };
+                box_ = box_.union(color_strip_bounds(
+                    position,
+                    surface,
+                    crate::render::rail_column(toolbar, along),
+                ));
             }
             Some(box_)
         } else {
