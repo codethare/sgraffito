@@ -4222,17 +4222,25 @@ fn draw_icon(
         }
         Icon::Undo | Icon::Redo => {
             let undo = icon == Icon::Undo;
-            let tip = if undo { x + w * 0.24 } else { x + w * 0.76 };
-            let tail = if undo { x + w * 0.82 } else { x + w * 0.18 };
-            path.move_to(tail, y + h * 0.5);
-            path.line_to(tip, y + h * 0.5);
-            // A solid head: a hairline arrow disappears against a busy drawing, and these two
-            // cards are the only place history is reachable with the pointer.
+            let (cx, cy) = (x + w / 2.0, y + h * 0.54);
+            let r = w * 0.32;
+            let k = r * 4.0 / 3.0;
+            // Half-circle: from one side, over the top, to the other. Undo ends on the left and
+            // redo on the right, so the two cards mirror each other.
+            let (start, end, c1, c2) = if undo {
+                (cx + r, cx - r, cx + r, cx - r)
+            } else {
+                (cx - r, cx + r, cx - r, cx + r)
+            };
+            path.move_to(start, cy);
+            path.cubic_to(c1, cy - k, c2, cy - k, end, cy);
+            // Solid head, larger than the stroke so the direction reads at card size.
+            let tip = if undo { end - w * 0.12 } else { end + w * 0.12 };
+            let base = if undo { end + w * 0.12 } else { end - w * 0.12 };
             let mut head = PathBuilder::new();
-            head.move_to(tip, y + h * 0.5);
-            let base = if undo { tip + w * 0.24 } else { tip - w * 0.24 };
-            head.line_to(base, y + h * 0.22);
-            head.line_to(base, y + h * 0.78);
+            head.move_to(tip, cy);
+            head.line_to(base, cy - h * 0.22);
+            head.line_to(base, cy + h * 0.22);
             head.close();
             if let Some(head) = head.finish() {
                 filled.push(head);
