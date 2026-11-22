@@ -396,6 +396,7 @@ fn toolbar(tool: Tool, color: &'static str, size: f32, hover: Option<ToolbarActi
         can_undo: false,
         can_redo: false,
         colors_open: false,
+        colors_grow: 1.0,
     }
 }
 
@@ -1135,15 +1136,16 @@ fn the_pop_out_edge_uncovers_the_label() {
 
 #[test]
 fn the_pop_out_eases_from_nothing_to_open() {
-    use sgraffito::app::{ease_out, hover_grow};
+    use sgraffito::app::{ease_out, hover_grow, spring_out};
     use std::time::{Duration, Instant};
     let now = Instant::now();
     // No block under the pointer: nothing is drawn stretched, so its progress is complete.
     assert_eq!(hover_grow(None, now), 1.0);
     assert_eq!(hover_grow(Some(now), now), 0.0);
-    // Ease-out: past halfway at half the time, and settled once the time is up.
+    // Spring: past halfway at half the time, with a small overshoot, and settled once time is up.
     let half = hover_grow(Some(now - Duration::from_millis(70)), now);
-    assert!(half > 0.5 && half < 1.0, "half time gives {half}");
+    assert!(half > 0.5, "half time gives {half}");
+    assert!(spring_out(0.5) > 1.0, "the spring does not overshoot");
     assert_eq!(hover_grow(Some(now - Duration::from_millis(140)), now), 1.0);
     assert_eq!(hover_grow(Some(now - Duration::from_secs(9)), now), 1.0);
     assert_eq!(ease_out(0.0), 0.0);
@@ -2481,6 +2483,7 @@ fn a_row_of_the_panel_can_be_clicked_with_the_pointer_on_the_block_that_opened_i
         can_undo: false,
         can_redo: false,
         colors_open: false,
+        colors_grow: 1.0,
     };
     let mut renderer = Renderer::new();
     let band = toolbar_bounds(&rail(), w as f32, h as f32);

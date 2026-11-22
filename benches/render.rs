@@ -269,6 +269,7 @@ fn rail_state() -> Toolbar {
         can_undo: false,
         can_redo: false,
         colors_open: false,
+        colors_grow: 1.0,
         tool: Tool::Pen,
         color: "#e01b24".to_string(),
         size: 3.0,

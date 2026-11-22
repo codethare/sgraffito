@@ -3176,6 +3176,8 @@ pub struct Toolbar {
     pub can_redo: bool,
     /// Whether the collapsed colour swatch is showing the other four colours beside it.
     pub colors_open: bool,
+    /// How far that flyout has unfurled, 0 to about 1.
+    pub colors_grow: f32,
 }
 
 #[derive(Debug, Clone)]

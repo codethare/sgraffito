@@ -53,6 +53,7 @@ fn config_paints_the_palette_and_the_note_border() {
             can_undo: false,
             can_redo: false,
             colors_open: false,
+            colors_grow: 1.0,
         }),
         ..Default::default()
     };

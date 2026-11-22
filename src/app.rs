@@ -382,6 +382,8 @@ pub struct App {
     pub(crate) colors_open: bool,
     /// When a shortcut-opened colour strip closes itself; `None` while the pointer keeps it open.
     colors_until: Option<Instant>,
+    /// When the colour strip started unfurling.
+    colors_since: Option<Instant>,
     /// The in-app clipboard history, newest first. Session state: it is never written to the file.
     pub(crate) clips: Vec<ClipEntry>,
     /// The board's name being edited in the list, if any. A name is typed where it is read, so this is
@@ -631,6 +633,7 @@ impl App {
             target: None,
             colors_open: false,
             colors_until: None,
+            colors_since: None,
             clips: Vec::new(),
             rename: None,
             delete_confirm: None,
@@ -902,6 +905,7 @@ impl App {
                     can_undo: self.undo.can_undo(),
                     can_redo: self.undo.can_redo(),
                     colors_open: self.colors_open,
+                    colors_grow: hover_grow(self.colors_since, Instant::now()),
                 })
             }
         }
@@ -1642,8 +1646,15 @@ impl App {
     /// Whether a pop-out is still opening, and so whether the loop has to come back for the next
     /// frame of it.
     fn animating(&self) -> bool {
-        self.toolbar_grow(Instant::now()) < 1.0
-            || self.panel_grow(Instant::now()) < 1.0
+        let now = Instant::now();
+        self.toolbar_hover_since
+            .is_some_and(|started| now.saturating_duration_since(started) < TOOLBAR_ANIM)
+            || self
+                .panel_open_since
+                .is_some_and(|started| now.saturating_duration_since(started) < TOOLBAR_ANIM)
+            || self
+                .colors_since
+                .is_some_and(|started| now.saturating_duration_since(started) < TOOLBAR_ANIM)
             || zoom_in_flight(self.outputs.values().map(|out| out.zoom))
             || self.outputs.values().any(|out| out.motion.quality() < 1.0)
     }
@@ -2769,6 +2780,9 @@ impl App {
     /// Show the other colours after a colour shortcut. The active swatch on the rail has already
     /// changed; this only opens the strip for a short dwell.
     pub(crate) fn reveal_colors(&mut self) {
+        if !self.colors_open {
+            self.colors_since = Some(Instant::now());
+        }
         self.colors_open = true;
         self.colors_until = Some(Instant::now() + COLOR_POPUP_DWELL);
         self.refresh_toolbar();
@@ -2779,6 +2793,9 @@ impl App {
     pub(crate) fn hover_colors(&mut self, over: bool) {
         if over {
             if !self.colors_open || self.colors_until.is_some() {
+                if !self.colors_open {
+                    self.colors_since = Some(Instant::now());
+                }
                 self.colors_open = true;
                 self.colors_until = None;
                 self.refresh_toolbar();
@@ -2793,6 +2810,7 @@ impl App {
         if self.colors_open || self.colors_until.is_some() {
             self.colors_open = false;
             self.colors_until = None;
+            self.colors_since = None;
             self.refresh_toolbar();
         }
     }
@@ -3365,6 +3383,7 @@ impl App {
             // a strip opened by a shortcut when the pointer is elsewhere.
             if !matches!(self.toolbar_hover, Some(ToolbarAction::Color(_))) && self.colors_open {
                 self.colors_open = false;
+                self.colors_since = None;
                 self.refresh_toolbar();
             }
         }
@@ -3856,7 +3875,18 @@ pub fn hover_grow(started: Option<Instant>, now: Instant) -> f32 {
         return 1.0;
     };
     let elapsed = now.saturating_duration_since(started);
-    ease_out((elapsed.as_secs_f32() / TOOLBAR_ANIM.as_secs_f32()).clamp(0.0, 1.0))
+    spring_out((elapsed.as_secs_f32() / TOOLBAR_ANIM.as_secs_f32()).clamp(0.0, 1.0))
+}
+
+/// A lightly damped spring: it arrives fast, overshoots a little and settles. Used for every
+/// pop-out so opening reads as a physical response, not a linear resize.
+pub fn spring_out(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    if t >= 1.0 {
+        return 1.0;
+    }
+    let (k, w) = (5.0_f32, 8.0_f32);
+    1.0 - (-k * t).exp() * ((w * t).cos() + (k / w) * (w * t).sin())
 }
 
 /// The curve of the pop-out: fast at first and settling, so the stretch reads as a response to

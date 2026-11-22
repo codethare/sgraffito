@@ -1920,7 +1920,7 @@ impl Renderer {
         draw_rail_separators(pixmap, &pill, origin, position, scale);
         // How far the block under the pointer has opened. The layout is settled, so a frame of the
         // transition only moves the capsule's trailing edge and the text that edge uncovers.
-        let grow = toolbar.grow.clamp(0.0, 1.0);
+        let grow = toolbar.grow.clamp(0.0, 1.1);
         // Two passes: settled squares first, then every pop-out — a hovered capsule and a panel's
         // rows — so a pop-out covers the buttons it grows across instead of being cut by whichever
         // control happens to come later in the layout.
@@ -1935,7 +1935,7 @@ impl Renderer {
                 let opening = if control.block.column == 0 {
                     grow
                 } else {
-                    toolbar.panel_grow.clamp(0.0, 1.0)
+                    toolbar.panel_grow.clamp(0.0, 1.1)
                 };
                 let full = if position.horizontal() {
                     control.along_extent
@@ -2330,19 +2330,29 @@ impl Renderer {
         position: ToolbarPosition,
         scale: f32,
     ) {
-        let Some(strip) = color_strip(pill, toolbar) else {
+        let Some(strip) = color_strip(pill, toolbar, origin, position) else {
             return;
         };
-        let square = |r: RailRect| {
-            let r = position.place(origin, r);
-            Rect {
-                x: r.x * scale,
-                y: r.y * scale,
-                w: r.w * scale,
-                h: r.h * scale,
-            }
+        let scaled = |r: Rect| Rect {
+            x: r.x * scale,
+            y: r.y * scale,
+            w: r.w * scale,
+            h: r.h * scale,
         };
-        let plate = square(strip.plate);
+        let grow = toolbar.colors_grow.clamp(0.0, 1.1);
+        let full = strip.plate;
+        let row = (full.w - 2.0 * TOOLBAR_PAD) * grow;
+        let plate_x = if position == ToolbarPosition::Right {
+            full.x + full.w - row - 2.0 * TOOLBAR_PAD
+        } else {
+            full.x
+        };
+        let plate = scaled(Rect {
+            x: plate_x,
+            y: full.y,
+            w: row + 2.0 * TOOLBAR_PAD,
+            h: full.h,
+        });
         round_rect(
             pixmap,
             plate,
@@ -2352,8 +2362,26 @@ impl Renderer {
         );
         draw_card_shadow(pixmap, plate, TOOLBAR_RADIUS * scale, scale);
         let colors = &config::current().colors;
-        for (index, rail) in &strip.chips {
-            let rect = square(*rail);
+        for (index, chip) in &strip.chips {
+            let offset = if position == ToolbarPosition::Right {
+                full.x + full.w - (chip.x + TOOLBAR_BLOCK)
+            } else {
+                chip.x - full.x
+            };
+            let chip_x = if position == ToolbarPosition::Right {
+                plate.x + plate.w - TOOLBAR_BLOCK - offset * grow
+            } else {
+                plate.x + offset * grow
+            };
+            if chip_x + TOOLBAR_BLOCK > plate.x + plate.w + 0.5 || chip_x < plate.x - 0.5 {
+                continue;
+            }
+            let rect = scaled(Rect {
+                x: chip_x,
+                y: chip.y,
+                w: TOOLBAR_BLOCK,
+                h: TOOLBAR_BLOCK,
+            });
             if toolbar.hover == Some(ToolbarAction::Color(*index)) {
                 round_rect(
                     pixmap,
@@ -2376,6 +2404,58 @@ impl Renderer {
                 .unwrap_or("?");
             self.draw_badge(pixmap, rect, scale, key, note_ink(&colors[*index]));
         }
+        if grow < 0.95 {
+            return;
+        }
+        let Some(ToolbarAction::Color(index)) = toolbar.hover else {
+            return;
+        };
+        let key = ["1", "2", "3", "4", "5"].get(index).copied().unwrap_or("?");
+        let label = format!("colour {} ({key})", index + 1);
+        let width = self.text_width(&label, TOOLBAR_TEXT_SIZE) + 2.0 * TOOLBAR_LABEL_PAD;
+        let surface = (
+            pixmap.width() as f32 / scale,
+            pixmap.height() as f32 / scale,
+        );
+        let plate_rect = strip.plate;
+        let mut x = plate_rect.x + plate_rect.w + TOOLBAR_GAP;
+        if x + width > surface.0 - TOOLBAR_MARGIN {
+            x = plate_rect.x - TOOLBAR_GAP - width;
+        }
+        let x = x.max(TOOLBAR_MARGIN);
+        let y = plate_rect.y + (plate_rect.h - TOOLBAR_BLOCK) / 2.0;
+        let capsule = Rect {
+            x: x * scale,
+            y: y * scale,
+            w: width * scale,
+            h: TOOLBAR_BLOCK * scale,
+        };
+        round_rect(
+            pixmap,
+            capsule,
+            TOOLBAR_RADIUS * scale,
+            parse_hex(TOOLBAR_BLOCK_FILL),
+            Some((parse_hex(TOOLBAR_CARD_EDGE), TOOLBAR_HAIRLINE * scale)),
+        );
+        let item = toolbar_text(
+            x + TOOLBAR_LABEL_PAD,
+            y,
+            TOOLBAR_BLOCK,
+            TOOLBAR_TEXT_SIZE,
+            TOOLBAR_LABEL_TEXT,
+            &label,
+        );
+        self.draw_text(
+            pixmap,
+            &item,
+            Screen {
+                scale,
+                view: View::default(),
+            },
+            None,
+            None,
+            None,
+        );
     }
 
     /// The zoom percentage and the two history cards, on the edge opposite the rail. They are
@@ -2403,7 +2483,6 @@ impl Renderer {
             parse_hex(TOOLBAR_BLOCK_FILL),
             Some((parse_hex(TOOLBAR_CARD_EDGE), TOOLBAR_HAIRLINE * scale)),
         );
-        draw_card_shadow(pixmap, zoom, TOOLBAR_RADIUS * scale, scale);
         let percent = format!("{}%", (toolbar.zoom * 100.0).round() as i32);
         let text_w = self.text_width(&percent, TOOLBAR_TEXT_SIZE);
         let text = toolbar_text(
@@ -2433,7 +2512,6 @@ impl Renderer {
             parse_hex(TOOLBAR_BLOCK_FILL),
             Some((parse_hex(TOOLBAR_CARD_EDGE), TOOLBAR_HAIRLINE * scale)),
         );
-        draw_card_shadow(pixmap, history, TOOLBAR_RADIUS * scale, scale);
         for (rect, action, enabled, icon, badge) in [
             (
                 cards.undo,
@@ -2568,13 +2646,8 @@ impl Renderer {
         let pill = self.cached_toolbar_pill(toolbar, (width, height), position)?;
         let origin = position.origin((width, height), pill.column);
         let (along, across) = position.to_local(origin, x, y);
-        if let Some(strip) = color_strip(&pill, toolbar)
-            && let Some((index, _)) = strip.chips.iter().find(|(_, r)| {
-                along >= r.along
-                    && along < r.along + r.along_extent
-                    && across >= r.across
-                    && across < r.across + r.across_extent
-            })
+        if let Some(strip) = color_strip(&pill, toolbar, origin, position)
+            && let Some((index, _)) = strip.chips.iter().find(|(_, rect)| rect.contains(x, y))
         {
             return Some(ToolbarAction::Color(*index));
         }
@@ -3774,14 +3847,50 @@ fn draw_card_shadow(pixmap: &mut PixmapMut, rect: Rect, radius: f32, scale: f32)
     );
 }
 
-/// The other colours, beside the one swatch that stays on the rail.
+/// The other colours, beside the one swatch that stays on the rail. The row is always horizontal
+/// on screen, whichever edge the rail is docked to.
 #[derive(Clone)]
 struct ColorStrip {
-    plate: RailRect,
-    chips: Vec<(usize, RailRect)>,
+    plate: Rect,
+    chips: Vec<(usize, Rect)>,
 }
 
-fn color_strip(pill: &ToolbarPill, toolbar: &Toolbar) -> Option<ColorStrip> {
+fn color_strip_plate(active: Rect, position: ToolbarPosition, count: usize) -> Rect {
+    let row = count.saturating_sub(1) as f32 * (TOOLBAR_BLOCK + TOOLBAR_GAP) - TOOLBAR_GAP;
+    let plate_w = row + 2.0 * TOOLBAR_PAD;
+    let plate_h = TOOLBAR_BLOCK + 2.0 * TOOLBAR_PAD;
+    let (x, y) = match position {
+        ToolbarPosition::Left => (
+            active.x + TOOLBAR_BLOCK + TOOLBAR_PAD + TOOLBAR_GAP,
+            active.y - TOOLBAR_PAD,
+        ),
+        ToolbarPosition::Right => (
+            active.x - TOOLBAR_PAD - TOOLBAR_GAP - plate_w,
+            active.y - TOOLBAR_PAD,
+        ),
+        ToolbarPosition::Top => (
+            active.x - TOOLBAR_PAD,
+            active.y + TOOLBAR_BLOCK + TOOLBAR_PAD + TOOLBAR_GAP,
+        ),
+        ToolbarPosition::Bottom => (
+            active.x - TOOLBAR_PAD,
+            active.y - TOOLBAR_PAD - TOOLBAR_GAP - plate_h,
+        ),
+    };
+    Rect {
+        x: x.max(TOOLBAR_MARGIN),
+        y: y.max(TOOLBAR_MARGIN),
+        w: plate_w,
+        h: plate_h,
+    }
+}
+
+fn color_strip(
+    pill: &ToolbarPill,
+    toolbar: &Toolbar,
+    origin: (f32, f32),
+    position: ToolbarPosition,
+) -> Option<ColorStrip> {
     if !toolbar.colors_open {
         return None;
     }
@@ -3794,38 +3903,38 @@ fn color_strip(pill: &ToolbarPill, toolbar: &Toolbar) -> Option<ColorStrip> {
         .controls
         .iter()
         .find(|control| control.block.action == Some(ToolbarAction::Color(active)))?;
-    let across = control.across + TOOLBAR_BLOCK + TOOLBAR_GAP;
-    let mut along = control.along;
+    let active_rect = position.place(
+        origin,
+        RailRect {
+            along: control.along,
+            across: control.across,
+            along_extent: TOOLBAR_BLOCK,
+            across_extent: TOOLBAR_BLOCK,
+        },
+    );
+    let plate = color_strip_plate(active_rect, position, colors.len());
     let mut chips = Vec::new();
+    let mut chip_x = plate.x + TOOLBAR_PAD;
+    let chip_y = plate.y + TOOLBAR_PAD;
     for index in 0..colors.len() {
         if index == active {
             continue;
         }
         chips.push((
             index,
-            RailRect {
-                along,
-                across,
-                along_extent: TOOLBAR_BLOCK,
-                across_extent: TOOLBAR_BLOCK,
+            Rect {
+                x: chip_x,
+                y: chip_y,
+                w: TOOLBAR_BLOCK,
+                h: TOOLBAR_BLOCK,
             },
         ));
-        along += TOOLBAR_BLOCK + TOOLBAR_GAP;
+        chip_x += TOOLBAR_BLOCK + TOOLBAR_GAP;
     }
-    let along_extent =
-        chips.len() as f32 * (TOOLBAR_BLOCK + TOOLBAR_GAP) - TOOLBAR_GAP + 2.0 * TOOLBAR_PAD;
-    Some(ColorStrip {
-        plate: RailRect {
-            along: control.along - TOOLBAR_PAD,
-            across: across - TOOLBAR_PAD,
-            along_extent,
-            across_extent: TOOLBAR_BLOCK + 2.0 * TOOLBAR_PAD,
-        },
-        chips,
-    })
+    Some(ColorStrip { plate, chips })
 }
 
-/// The room a stretched block may take, from the rail's own edge: bounded by the output's width and by the
+/// The room a stretched block may take/// The room a stretched block may take, from the rail's own edge: bounded by the output's width and by the
 /// reserve the damage accounting holds, so nothing the rail draws reaches past the box it declares.
 fn toolbar_ceiling(surface: f32) -> f32 {
     (surface - 2.0 * TOOLBAR_MARGIN).min(TOOLBAR_RESERVE)
@@ -3913,13 +4022,24 @@ pub fn cards_bounds(surface: (f32, f32), position: CardPosition) -> Rect {
 /// so its position is fixed and this can be measured without a renderer.
 pub fn color_strip_bounds(position: ToolbarPosition, surface: (f32, f32), column: f32) -> Rect {
     let origin = position.origin(surface, column);
-    let plate = RailRect {
-        along: 0.0,
-        across: TOOLBAR_BLOCK + TOOLBAR_GAP - TOOLBAR_PAD,
-        along_extent: 4.0 * (TOOLBAR_BLOCK + TOOLBAR_GAP) - TOOLBAR_GAP + 2.0 * TOOLBAR_PAD,
-        across_extent: TOOLBAR_BLOCK + 2.0 * TOOLBAR_PAD,
-    };
-    position.place(origin, plate)
+    let active = position.place(
+        origin,
+        RailRect {
+            along: TOOLBAR_PAD,
+            across: 0.0,
+            along_extent: TOOLBAR_BLOCK,
+            across_extent: TOOLBAR_BLOCK,
+        },
+    );
+    let plate = color_strip_plate(active, position, config::current().colors.len());
+    // The spring overshoots a little and the hover label may sit on either side; reserve both so a
+    // closing strip leaves no pixels behind.
+    plate.union(Rect {
+        x: plate.x - 210.0,
+        y: plate.y,
+        w: plate.w + 420.0,
+        h: plate.h,
+    })
 }
 
 /// Everything the rail paints. A stretched block's width depends on the font, so the damage
@@ -6364,6 +6484,7 @@ mod tests {
             can_undo: false,
             can_redo: false,
             colors_open: false,
+            colors_grow: 1.0,
         }
     }
 
@@ -6664,6 +6785,7 @@ mod tests {
                 can_undo: false,
                 can_redo: false,
                 colors_open: false,
+                colors_grow: 1.0,
             }),
             ..Default::default()
         };
@@ -7017,6 +7139,7 @@ mod tests {
             can_undo: false,
             can_redo: false,
             colors_open: false,
+            colors_grow: 1.0,
         }
     }
 
@@ -7507,11 +7630,18 @@ mod tests {
 
         toolbar.colors_open = true;
         let open = renderer.toolbar_pill(&toolbar, surface, ToolbarPosition::Left);
-        let strip = color_strip(&open, &toolbar).expect("the opened strip is missing");
-        assert_eq!(strip.chips.len(), 4);
         let origin = ToolbarPosition::Left.origin(surface, open.column);
-        for (index, rail) in &strip.chips {
-            let rect = ToolbarPosition::Left.place(origin, *rail);
+        let strip = color_strip(&open, &toolbar, origin, ToolbarPosition::Left)
+            .expect("the opened strip is missing");
+        assert_eq!(strip.chips.len(), 4);
+        let first = strip.chips[0].1;
+        assert!(
+            strip.plate.x >= origin.0 + TOOLBAR_BLOCK + TOOLBAR_PAD,
+            "the strip overlaps the rail plate"
+        );
+        for (index, rect) in &strip.chips {
+            assert_eq!(rect.y, first.y, "the colours are not one horizontal row");
+            assert!(rect.x > first.x || *index == strip.chips[0].0);
             let x = rect.x + rect.w / 2.0;
             let y = rect.y + rect.h / 2.0;
             assert_eq!(
