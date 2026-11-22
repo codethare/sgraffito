@@ -128,6 +128,9 @@ pub struct Config {
     pub toolbar: ToolbarPosition,
     /// Where the zoom and undo/redo cards sit.
     pub cards: CardPosition,
+    /// The system font family used for canvas text. Empty means the system's default sans-serif;
+    /// the format (TTC/TTF/OTF) and availability are whatever the user's font system provides.
+    pub font: String,
 }
 
 impl Default for Config {
@@ -137,6 +140,7 @@ impl Default for Config {
             colors: DEFAULT_COLORS.map(str::to_string),
             toolbar: ToolbarPosition::default(),
             cards: CardPosition::default(),
+            font: String::new(),
         }
     }
 }
@@ -246,6 +250,9 @@ pub fn load_from(path: &Path) -> Config {
             }
         }
     }
+    if let Some(font) = file.font {
+        config.font = font.trim().to_string();
+    }
     if let Some(toolbar) = file.toolbar {
         match parse_toolbar_position(&toolbar) {
             Some(position) => config.toolbar = position,
@@ -268,6 +275,8 @@ struct File {
     toolbar: Option<String>,
     #[serde(default)]
     cards: Option<String>,
+    #[serde(default)]
+    font: Option<String>,
 }
 
 /// TOML has separate integer and float types, and `border = 2` must mean the same as `2.0`.

@@ -16,7 +16,7 @@ fn config_paints_the_palette_and_the_note_border() {
     fs::create_dir_all(dir.join("sgraffito")).unwrap();
     fs::write(
         dir.join("sgraffito/config.toml"),
-        "border = 4\ncards = \"top left\"\ncolors = [\"#010203\", \"#0a0b0c\", \"#0d0e0f\", \"#101112\", \"#131415\"]\n",
+        "border = 4\ncards = \"top left\"\nfont = \"  DejaVu Serif  \"\ncolors = [\"#010203\", \"#0a0b0c\", \"#0d0e0f\", \"#101112\", \"#131415\"]\n",
     )
     .unwrap();
     // SAFETY: this test binary has no other test and no other thread that reads the environment.
@@ -26,6 +26,10 @@ fn config_paints_the_palette_and_the_note_border() {
     assert_eq!(config.border, 4.0);
     assert_eq!(config.colors[0], "#010203", "the file was not loaded");
     assert_eq!(config.cards, sgraffito::config::CardPosition::TopLeft);
+    assert_eq!(
+        config.font, "DejaVu Serif",
+        "the font family was not trimmed"
+    );
 
     // The rail's first chip is filled with the configured colour.
     let (w, h) = (500u32, 400u32);
