@@ -628,7 +628,7 @@ fn a_hovered_block_stretches_to_say_what_it_does() {
     let rail = rail();
     let mut renderer = Renderer::new();
     let band = toolbar_bounds(&rail, fw, fh);
-    let painted = band.union(cards_bounds((fw, fh), sgraffito::config::current().toolbar));
+    let painted = band.union(cards_bounds((fw, fh), sgraffito::config::current().cards));
     // The top block is the first colour. `inside` is on the square, `beyond` in the room the
     // capsule it unfurls would take, both on that block's own row.
     let row = band.y + 20.0;
@@ -1639,7 +1639,7 @@ fn a_cached_frame_keeps_the_scrim_after_a_document_change() {
         None,
     );
     assert_eq!(second, fresh);
-    let (x, y) = (w - 20, h - 20);
+    let (x, y) = (w / 2, h / 2);
     assert_eq!(
         alpha(&second, w, x, y),
         SCRIM,
@@ -1940,8 +1940,9 @@ fn the_backdrop_can_be_switched_off_and_on() {
         buf
     };
     let (with, without) = (render(&on), render(&off));
-    // Away from the rail, the frame with it is the scrim and the frame without it is transparent.
-    let (x, y) = (w - 20, h - 20);
+    // Away from the rail and the floating cards, the frame with it is the scrim and the frame
+    // without it is transparent.
+    let (x, y) = (w / 2, h / 2);
     assert_eq!(alpha(&with, w, x, y), SCRIM, "the backdrop is not painted");
     assert_eq!(
         alpha(&without, w, x, y),
@@ -2394,7 +2395,7 @@ fn switching_the_backdrop_repaints_the_whole_surface() {
     // The dim backdrop is black at 90%, so a pixel on it is nearly opaque everywhere, well away from the rail.
     assert!(alpha(&buf, 400, 400) > 200, "the backdrop is not painted");
     draw(&mut buf, &mut cache, Backdrop::Transparent);
-    for (x, y) in [(400, 400), (400, 100), (550, 480), (200, 250)] {
+    for (x, y) in [(300, 250), (300, 100), (350, 400), (200, 250)] {
         assert_eq!(
             alpha(&buf, x, y),
             0,

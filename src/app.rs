@@ -3656,7 +3656,7 @@ impl App {
             {
                 let surface = (w as f32, h as f32);
                 box_ = box_.union(toolbar_bounds(toolbar, surface.0, surface.1));
-                box_ = box_.union(cards_bounds(surface, crate::config::current().toolbar));
+                box_ = box_.union(cards_bounds(surface, crate::config::current().cards));
             }
             Some(box_)
         } else if let Some(text_damage) = text_damage {
@@ -3672,13 +3672,8 @@ impl App {
                     .map(|toolbar| toolbar_bounds(toolbar, surface.0, surface.1)),
             );
             let mut box_ = transient_damage(out.last_transient, transient, rail);
-            if let Some(toolbar) = out
-                .toolbar_dirty
-                .then_some(())
-                .and(out.overlay.toolbar.as_ref())
-            {
-                let _ = toolbar;
-                box_ = box_.union(cards_bounds(surface, crate::config::current().toolbar));
+            if out.toolbar_dirty {
+                box_ = box_.union(cards_bounds(surface, crate::config::current().cards));
             }
             Some(box_)
         } else {

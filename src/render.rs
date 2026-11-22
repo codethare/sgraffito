@@ -18,7 +18,7 @@ use crate::canvas::{
     selection_frame_with,
 };
 use crate::config;
-use crate::config::ToolbarPosition;
+use crate::config::{CardPosition, ToolbarPosition};
 use crate::sketch::{self, Seg};
 /// Radius of the eraser marker circle, in logical pixels.
 const ERASER_MARKER_RADIUS: f32 = 8.0;
@@ -337,14 +337,14 @@ fn label_origin(
     }
 }
 
-/// A half-block rule between the rail's families: colour chips, the tools, and the two foot controls.
-const RAIL_SEPARATOR: f32 = TOOLBAR_BLOCK / 2.0;
+/// A three-quarter-block rule between the rail's families: colour chips, the tools, and `more tools`.
+const RAIL_SEPARATOR: f32 = TOOLBAR_BLOCK * 0.75;
 
 fn separates(previous: Option<ToolbarAction>, current: Option<ToolbarAction>) -> bool {
     matches!(
         (previous, current),
         (Some(ToolbarAction::Color(_)), Some(action)) if !matches!(action, ToolbarAction::Color(_))
-    ) || matches!(current, Some(ToolbarAction::More | ToolbarAction::Lock))
+    ) || matches!(current, Some(ToolbarAction::More))
 }
 
 fn draw_rail_separators(
@@ -363,7 +363,7 @@ fn draw_rail_separators(
                 let across = TOOLBAR_BLOCK / 2.0;
                 let (x, y) = position.point(origin, along, across);
                 let (x, y) = (x * scale, y * scale);
-                let c = parse_hex(TOOLBAR_BLOCK_EDGE);
+                let c = parse_hex(TOOLBAR_CARD_EDGE);
                 let color = Color::rgba(c[0], c[1], c[2], c[3]);
                 let thin = scale.max(1.0);
                 if position.horizontal() {
@@ -1605,15 +1605,9 @@ impl Renderer {
             if damage.is_none_or(|d| box_.intersects(d)) {
                 self.draw_toolbar(&mut pixmap, toolbar, scale);
             }
-            let cards = cards_bounds((w, h), config::current().toolbar);
+            let cards = cards_bounds((w, h), config::current().cards);
             if damage.is_none_or(|d| cards.intersects(d)) {
-                self.draw_cards(
-                    &mut pixmap,
-                    toolbar,
-                    (w, h),
-                    scale,
-                    config::current().toolbar,
-                );
+                self.draw_cards(&mut pixmap, toolbar, (w, h), scale, config::current().cards);
             }
         }
         // Interface on the canvas: only while something is held, so a press on it can be told from
@@ -2328,10 +2322,9 @@ impl Renderer {
         toolbar: &Toolbar,
         surface: (f32, f32),
         scale: f32,
-        rail: ToolbarPosition,
+        position: CardPosition,
     ) {
-        let cards = cards_layout(surface, rail);
-        let edge = rail.opposite();
+        let cards = cards_layout(surface, position);
         let square = |r: Rect| Rect {
             x: r.x * scale,
             y: r.y * scale,
@@ -2426,19 +2419,12 @@ impl Renderer {
         };
         if let Some((rect, label)) = hint {
             let width = self.text_width(label, TOOLBAR_TEXT_SIZE) + 2.0 * TOOLBAR_LABEL_PAD;
-            let (x, y) = match edge {
-                ToolbarPosition::Right => (rect.x - TOOLBAR_GAP - width, rect.y),
-                ToolbarPosition::Left => (rect.x + rect.w + TOOLBAR_GAP, rect.y),
-                ToolbarPosition::Bottom => (
-                    (rect.x + rect.w / 2.0 - width / 2.0)
-                        .clamp(TOOLBAR_MARGIN, surface.0 - width - TOOLBAR_MARGIN),
-                    rect.y - TOOLBAR_GAP - TOOLBAR_BLOCK,
-                ),
-                ToolbarPosition::Top => (
-                    (rect.x + rect.w / 2.0 - width / 2.0)
-                        .clamp(TOOLBAR_MARGIN, surface.0 - width - TOOLBAR_MARGIN),
-                    rect.y + rect.h + TOOLBAR_GAP,
-                ),
+            let x = (rect.x + rect.w / 2.0 - width / 2.0)
+                .clamp(TOOLBAR_MARGIN, surface.0 - width - TOOLBAR_MARGIN);
+            let y = if cards.position.top() {
+                rect.y + rect.h + TOOLBAR_GAP
+            } else {
+                rect.y - TOOLBAR_GAP - TOOLBAR_BLOCK
             };
             let capsule = Rect {
                 x: x * scale,
@@ -2500,7 +2486,7 @@ impl Renderer {
         x: f32,
         y: f32,
     ) -> Option<ToolbarAction> {
-        let cards = cards_layout((width, height), position);
+        let cards = cards_layout((width, height), config::current().cards);
         if let Some(action) = [
             (cards.undo, ToolbarAction::Undo, toolbar.can_undo),
             (cards.redo, ToolbarAction::Redo, toolbar.can_redo),
@@ -3712,110 +3698,73 @@ struct CardsLayout {
     history: Rect,
     undo: Rect,
     redo: Rect,
-    edge: ToolbarPosition,
+    position: CardPosition,
 }
 
 const CARD_W: f32 = 64.0;
 const CARD_H: f32 = TOOLBAR_BLOCK;
 
-fn cards_layout(surface: (f32, f32), rail: ToolbarPosition) -> CardsLayout {
-    let edge = rail.opposite();
+fn cards_layout(surface: (f32, f32), position: CardPosition) -> CardsLayout {
     let gap = TOOLBAR_GAP;
-    let zero = Rect {
-        x: 0.0,
-        y: 0.0,
-        w: 0.0,
-        h: 0.0,
-    };
-    let mut cards = CardsLayout {
-        zoom: zero,
-        history: zero,
-        undo: zero,
-        redo: zero,
-        edge,
-    };
-    if edge.horizontal() {
-        let total = 2.0 * CARD_W + gap;
-        // Right-aligned: the bottom-centre move-to-board button owns the middle of a top/bottom
-        // screen, and the cards must not sit under it.
-        let x = (surface.0 - TOOLBAR_MARGIN - total).max(TOOLBAR_MARGIN);
-        let y = if edge == ToolbarPosition::Bottom {
-            (surface.1 - TOOLBAR_MARGIN - CARD_H).max(0.0)
-        } else {
-            TOOLBAR_MARGIN
-        };
-        cards.zoom = Rect {
-            x,
-            y,
-            w: CARD_W,
-            h: CARD_H,
-        };
-        cards.history = Rect {
-            x: x + CARD_W + gap,
-            y,
-            w: CARD_W,
-            h: CARD_H,
-        };
+    let total = 2.0 * CARD_W + gap;
+    let x = if position.left() {
+        TOOLBAR_MARGIN
+    } else if position.centre() {
+        ((surface.0 - total) / 2.0).max(TOOLBAR_MARGIN)
     } else {
-        let total = 2.0 * CARD_H + gap;
-        let y = ((surface.1 - total) / 2.0).max(TOOLBAR_MARGIN);
-        let x = if edge == ToolbarPosition::Right {
-            (surface.0 - TOOLBAR_MARGIN - CARD_W).max(0.0)
-        } else {
-            TOOLBAR_MARGIN
-        };
-        cards.zoom = Rect {
+        (surface.0 - TOOLBAR_MARGIN - total).max(TOOLBAR_MARGIN)
+    };
+    let y = if position.top() {
+        TOOLBAR_MARGIN
+    } else {
+        (surface.1 - TOOLBAR_MARGIN - CARD_H).max(0.0)
+    };
+    let history = Rect {
+        x: x + CARD_W + gap,
+        y,
+        w: CARD_W,
+        h: CARD_H,
+    };
+    let half = CARD_W / 2.0;
+    CardsLayout {
+        zoom: Rect {
             x,
             y,
             w: CARD_W,
             h: CARD_H,
-        };
-        cards.history = Rect {
-            x,
-            y: y + CARD_H + gap,
-            w: CARD_W,
+        },
+        history,
+        undo: Rect {
+            x: history.x,
+            y,
+            w: half,
             h: CARD_H,
-        };
+        },
+        redo: Rect {
+            x: history.x + half,
+            y,
+            w: half,
+            h: CARD_H,
+        },
+        position,
     }
-    let half = CARD_W / 2.0;
-    cards.undo = Rect {
-        x: cards.history.x,
-        y: cards.history.y,
-        w: half,
-        h: CARD_H,
-    };
-    cards.redo = Rect {
-        x: cards.history.x + half,
-        y: cards.history.y,
-        w: half,
-        h: CARD_H,
-    };
-    cards
 }
 
-/// The area the cards and a hover hint can paint. The hint opens toward the screen interior.
-pub fn cards_bounds(surface: (f32, f32), rail: ToolbarPosition) -> Rect {
-    let cards = cards_layout(surface, rail);
+/// The area the cards and a hover hint can paint. The hint opens away from the nearest screen edge.
+pub fn cards_bounds(surface: (f32, f32), position: CardPosition) -> Rect {
+    let cards = cards_layout(surface, position);
     let cards_box = cards.zoom.union(cards.history);
-    match cards.edge {
-        ToolbarPosition::Right => Rect {
-            x: cards_box.x - 190.0,
-            w: cards_box.w + 190.0,
-            ..cards_box
-        },
-        ToolbarPosition::Left => Rect {
-            w: cards_box.w + 190.0,
-            ..cards_box
-        },
-        ToolbarPosition::Top => Rect {
+    if position.top() {
+        Rect {
             h: cards_box.h + TOOLBAR_BLOCK + TOOLBAR_GAP,
             ..cards_box
-        },
-        ToolbarPosition::Bottom => Rect {
+        }
+    } else {
+        Rect {
             y: cards_box.y - TOOLBAR_BLOCK - TOOLBAR_GAP,
             h: cards_box.h + TOOLBAR_BLOCK + TOOLBAR_GAP,
             ..cards_box
-        },
+        }
     }
 }
 
@@ -4308,23 +4257,31 @@ fn draw_icon(
         }
         Icon::Undo | Icon::Redo => {
             let undo = icon == Icon::Undo;
-            let (cx, cy) = (x + w / 2.0, y + h * 0.48);
-            let r = w * 0.34;
-            let k = r * 4.0 / 3.0;
-            // Half-circle with the arrowhead on the tangent: a C over the top, ending downward on
-            // the undo side or the redo side.
-            let (start, end, c1, c2) = if undo {
-                (cx + r, cx - r, cx + r, cx - r)
+            let cy = y + h * 0.4;
+            let (tip, base, shaft, tail, far) = if undo {
+                (
+                    x + w * 0.1,
+                    x + w * 0.3,
+                    x + w * 0.62,
+                    x + w * 0.55,
+                    x + w * 0.96,
+                )
             } else {
-                (cx - r, cx + r, cx - r, cx + r)
+                (
+                    x + w * 0.9,
+                    x + w * 0.7,
+                    x + w * 0.38,
+                    x + w * 0.45,
+                    x + w * 0.04,
+                )
             };
-            path.move_to(start, cy);
-            path.cubic_to(c1, cy - k, c2, cy - k, end, cy);
+            path.move_to(base, cy);
+            path.line_to(shaft, cy);
+            path.cubic_to(far, cy, far, y + h * 0.85, tail, y + h * 0.85);
             let mut head = PathBuilder::new();
-            let tip = [end, cy + h * 0.25];
-            head.move_to(tip[0], tip[1]);
-            head.line_to(end - w * 0.15, cy + h * 0.02);
-            head.line_to(end + w * 0.15, cy + h * 0.02);
+            head.move_to(tip, cy);
+            head.line_to(base, cy - h * 0.2);
+            head.line_to(base, cy + h * 0.2);
             head.close();
             if let Some(head) = head.finish() {
                 filled.push(head);
@@ -7291,27 +7248,30 @@ mod tests {
     }
 
     #[test]
-    fn cards_sit_on_the_edge_opposite_the_rail_and_stay_on_screen() {
+    fn cards_sit_in_each_configured_slot_and_stay_on_screen() {
         let surface = (900.0, 1000.0);
-        for rail in [
-            ToolbarPosition::Left,
-            ToolbarPosition::Right,
-            ToolbarPosition::Top,
-            ToolbarPosition::Bottom,
+        for position in [
+            CardPosition::TopLeft,
+            CardPosition::TopRight,
+            CardPosition::TopCenter,
+            CardPosition::BottomLeft,
+            CardPosition::BottomRight,
+            CardPosition::BottomCenter,
         ] {
-            let cards = cards_layout(surface, rail);
-            assert_eq!(cards.edge, rail.opposite());
-            for rect in [cards.zoom, cards.undo, cards.redo] {
+            let cards = cards_layout(surface, position);
+            assert_eq!(cards.position, position);
+            for rect in [cards.zoom, cards.history, cards.undo, cards.redo] {
                 assert!(rect.x >= 0.0 && rect.y >= 0.0);
                 assert!(rect.x + rect.w <= surface.0);
                 assert!(rect.y + rect.h <= surface.1);
             }
-            let gap = if cards.edge.horizontal() {
-                cards.undo.x - (cards.zoom.x + cards.zoom.w)
-            } else {
-                cards.undo.y - (cards.zoom.y + cards.zoom.h)
-            };
-            assert_eq!(gap, TOOLBAR_GAP);
+            assert_eq!(cards.history.x - (cards.zoom.x + cards.zoom.w), TOOLBAR_GAP);
+            if position.left() {
+                assert_eq!(cards.zoom.x, TOOLBAR_MARGIN);
+            }
+            if position.top() {
+                assert_eq!(cards.zoom.y, TOOLBAR_MARGIN);
+            }
         }
     }
 
@@ -7322,32 +7282,24 @@ mod tests {
         toolbar.can_undo = true;
         toolbar.can_redo = true;
         let surface = (900.0, 1000.0);
-        for rail in [
-            ToolbarPosition::Left,
-            ToolbarPosition::Right,
-            ToolbarPosition::Top,
-            ToolbarPosition::Bottom,
-        ] {
-            let cards = cards_layout(surface, rail);
-            let centre = |r: Rect| (r.x + r.w / 2.0, r.y + r.h / 2.0);
-            let (x, y) = centre(cards.undo);
-            assert_eq!(
-                renderer.toolbar_hit_at(rail, &toolbar, surface.0, surface.1, x, y),
-                Some(ToolbarAction::Undo)
-            );
-            let (x, y) = centre(cards.redo);
-            assert_eq!(
-                renderer.toolbar_hit_at(rail, &toolbar, surface.0, surface.1, x, y),
-                Some(ToolbarAction::Redo)
-            );
-            toolbar.can_undo = false;
-            let (x, y) = centre(cards.undo);
-            assert_eq!(
-                renderer.toolbar_hit_at(rail, &toolbar, surface.0, surface.1, x, y),
-                None
-            );
-            toolbar.can_undo = true;
-        }
+        let cards = cards_layout(surface, CardPosition::BottomRight);
+        let centre = |r: Rect| (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        let (x, y) = centre(cards.undo);
+        assert_eq!(
+            renderer.toolbar_hit_at(ToolbarPosition::Left, &toolbar, surface.0, surface.1, x, y),
+            Some(ToolbarAction::Undo)
+        );
+        let (x, y) = centre(cards.redo);
+        assert_eq!(
+            renderer.toolbar_hit_at(ToolbarPosition::Left, &toolbar, surface.0, surface.1, x, y),
+            Some(ToolbarAction::Redo)
+        );
+        toolbar.can_undo = false;
+        let (x, y) = centre(cards.undo);
+        assert_eq!(
+            renderer.toolbar_hit_at(ToolbarPosition::Left, &toolbar, surface.0, surface.1, x, y),
+            None
+        );
     }
 
     #[test]
@@ -7368,7 +7320,7 @@ mod tests {
             Some(ToolbarAction::Boards),
             Some(ToolbarAction::More)
         ));
-        assert!(separates(
+        assert!(!separates(
             Some(ToolbarAction::More),
             Some(ToolbarAction::Lock)
         ));

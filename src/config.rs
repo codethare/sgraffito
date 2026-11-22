@@ -44,16 +44,6 @@ impl ToolbarPosition {
     pub const fn horizontal(self) -> bool {
         matches!(self, ToolbarPosition::Top | ToolbarPosition::Bottom)
     }
-
-    /// The edge across the screen from this one, where the zoom and history cards live.
-    pub const fn opposite(self) -> Self {
-        match self {
-            ToolbarPosition::Left => ToolbarPosition::Right,
-            ToolbarPosition::Right => ToolbarPosition::Left,
-            ToolbarPosition::Top => ToolbarPosition::Bottom,
-            ToolbarPosition::Bottom => ToolbarPosition::Top,
-        }
-    }
 }
 
 /// Parse a toolbar edge. The file's value is matched case-insensitively and without surrounding
@@ -68,6 +58,65 @@ pub fn parse_toolbar_position(input: &str) -> Option<ToolbarPosition> {
     }
 }
 
+/// Where the zoom and history cards sit. They are always a horizontal pair, anchored to one of the
+/// six corner/centre slots.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CardPosition {
+    TopLeft,
+    TopRight,
+    TopCenter,
+    BottomLeft,
+    #[default]
+    BottomRight,
+    BottomCenter,
+}
+
+impl CardPosition {
+    pub const fn name(self) -> &'static str {
+        match self {
+            CardPosition::TopLeft => "top left",
+            CardPosition::TopRight => "top right",
+            CardPosition::TopCenter => "top center",
+            CardPosition::BottomLeft => "bottom left",
+            CardPosition::BottomRight => "bottom right",
+            CardPosition::BottomCenter => "bottom center",
+        }
+    }
+
+    pub const fn top(self) -> bool {
+        matches!(
+            self,
+            CardPosition::TopLeft | CardPosition::TopRight | CardPosition::TopCenter
+        )
+    }
+
+    pub const fn left(self) -> bool {
+        matches!(self, CardPosition::TopLeft | CardPosition::BottomLeft)
+    }
+
+    pub const fn centre(self) -> bool {
+        matches!(self, CardPosition::TopCenter | CardPosition::BottomCenter)
+    }
+}
+
+pub fn parse_card_position(input: &str) -> Option<CardPosition> {
+    let value = input.trim().to_ascii_lowercase().replace(['-', '_'], " ");
+    match value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .as_str()
+    {
+        "top left" => Some(CardPosition::TopLeft),
+        "top right" => Some(CardPosition::TopRight),
+        "top center" | "top centre" => Some(CardPosition::TopCenter),
+        "bottom left" => Some(CardPosition::BottomLeft),
+        "bottom right" => Some(CardPosition::BottomRight),
+        "bottom center" | "bottom centre" => Some(CardPosition::BottomCenter),
+        _ => None,
+    }
+}
+
 /// The values the daemon reads once at startup.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
@@ -77,6 +126,8 @@ pub struct Config {
     pub colors: [String; COLOR_COUNT],
     /// The screen edge the edit-mode toolbar is docked to.
     pub toolbar: ToolbarPosition,
+    /// Where the zoom and undo/redo cards sit.
+    pub cards: CardPosition,
 }
 
 impl Default for Config {
@@ -85,6 +136,7 @@ impl Default for Config {
             border: DEFAULT_BORDER,
             colors: DEFAULT_COLORS.map(str::to_string),
             toolbar: ToolbarPosition::default(),
+            cards: CardPosition::default(),
         }
     }
 }
@@ -166,6 +218,15 @@ pub fn load_from(path: &Path) -> Config {
             ));
         }
     }
+    if let Some(cards) = file.cards {
+        match parse_card_position(&cards) {
+            Some(position) => config.cards = position,
+            None => crate::log::write(&format!(
+                "config: cards `{cards}` is not one of top/bottom left/right/center; using {}",
+                config.cards.name()
+            )),
+        }
+    }
     if let Some(colors) = file.colors {
         if colors.len() != COLOR_COUNT {
             crate::log::write(&format!(
@@ -205,6 +266,8 @@ struct File {
     colors: Option<Vec<String>>,
     #[serde(default)]
     toolbar: Option<String>,
+    #[serde(default)]
+    cards: Option<String>,
 }
 
 /// TOML has separate integer and float types, and `border = 2` must mean the same as `2.0`.
@@ -550,6 +613,36 @@ mod tests {
             config_in(&dir, "").toolbar,
             ToolbarPosition::Left,
             "an absent edge must keep the built-in default"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_card_slot_defaults_to_bottom_right_and_reads_spaces_or_dashes() {
+        let dir =
+            std::env::temp_dir().join(format!("sgraffito-config-cards-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for (value, expected) in [
+            ("top left", CardPosition::TopLeft),
+            ("Top-Right", CardPosition::TopRight),
+            ("TOP_CENTER", CardPosition::TopCenter),
+            ("bottom left", CardPosition::BottomLeft),
+            ("bottom-right", CardPosition::BottomRight),
+            ("bottom center", CardPosition::BottomCenter),
+        ] {
+            let config = config_in(&dir, &format!("cards = \"{value}\"\n"));
+            assert_eq!(config.cards, expected, "cards = {value:?}");
+        }
+        assert_eq!(
+            config_in(&dir, "").cards,
+            CardPosition::BottomRight,
+            "an absent slot must keep the built-in default"
+        );
+        assert_eq!(
+            config_in(&dir, "cards = \"middle\"\n").cards,
+            CardPosition::BottomRight,
+            "an invalid slot must keep the built-in default"
         );
         fs::remove_dir_all(&dir).unwrap();
     }
