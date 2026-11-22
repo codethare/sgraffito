@@ -336,6 +336,60 @@ fn label_origin(
     }
 }
 
+/// A short rule between the rail's families: colour chips, the tools, and the two foot controls.
+const RAIL_SEPARATOR: f32 = 6.0;
+
+fn separates(previous: Option<ToolbarAction>, current: Option<ToolbarAction>) -> bool {
+    matches!(
+        (previous, current),
+        (Some(ToolbarAction::Color(_)), Some(action)) if !matches!(action, ToolbarAction::Color(_))
+    ) || matches!(current, Some(ToolbarAction::More | ToolbarAction::Lock))
+}
+
+fn draw_rail_separators(
+    pixmap: &mut PixmapMut,
+    pill: &ToolbarPill,
+    origin: (f32, f32),
+    position: ToolbarPosition,
+    scale: f32,
+) {
+    let mut previous: Option<(Option<ToolbarAction>, f32)> = None;
+    for control in pill.controls.iter().filter(|c| c.block.column == 0) {
+        if let Some((previous_action, previous_along)) = previous {
+            let boundary = separates(previous_action, control.block.action);
+            if boundary {
+                let along = (previous_along + TOOLBAR_BLOCK + control.along) / 2.0;
+                let across = TOOLBAR_BLOCK / 2.0;
+                let (x, y) = position.point(origin, along, across);
+                let (x, y) = (x * scale, y * scale);
+                let c = parse_hex(TOOLBAR_BLOCK_EDGE);
+                let color = Color::rgba(c[0], c[1], c[2], c[3]);
+                let thin = scale.max(1.0);
+                if position.horizontal() {
+                    fill(
+                        pixmap,
+                        x - thin / 2.0,
+                        y - RAIL_SEPARATOR * scale / 2.0,
+                        thin,
+                        RAIL_SEPARATOR * scale,
+                        color,
+                    );
+                } else {
+                    fill(
+                        pixmap,
+                        x - RAIL_SEPARATOR * scale / 2.0,
+                        y - thin / 2.0,
+                        RAIL_SEPARATOR * scale,
+                        thin,
+                        color,
+                    );
+                }
+            }
+        }
+        previous = Some((control.block.action, control.along));
+    }
+}
+
 /// The controls that fill the rail from the top and fold into the drawer when there is no room for them: the
 /// palette, the tools and the size group, in their own order.
 fn rail_candidates(toolbar: &Toolbar) -> Vec<Block> {
@@ -1860,6 +1914,7 @@ impl Renderer {
                 Color::rgba(c[0], c[1], c[2], c[3]),
             );
         }
+        draw_rail_separators(pixmap, &pill, origin, position, scale);
         // How far the block under the pointer has opened. The layout is settled, so a frame of the
         // transition only moves the capsule's trailing edge and the text that edge uncovers.
         let grow = toolbar.grow.clamp(0.0, 1.0);
@@ -1968,18 +2023,27 @@ impl Renderer {
                         }
                     }
                     mark => {
-                        let (fill, edge) = if control.block.active {
-                            (TOOLBAR_ACCENT, TOOLBAR_ACCENT)
-                        } else {
-                            (TOOLBAR_BLOCK_FILL, TOOLBAR_BLOCK_EDGE)
-                        };
-                        round_rect(
-                            pixmap,
-                            block,
-                            radius,
-                            parse_hex(fill),
-                            Some((parse_hex(edge), TOOLBAR_HAIRLINE * scale)),
-                        );
+                        // The rail is one card: its buttons share the plate and paint no square of
+                        // their own. A pop-out still needs a surface over the plate, and an active
+                        // tool still needs its accent. Panel rows keep their own capsules.
+                        if control.block.column != 0 {
+                            let (fill, edge) = if control.block.active {
+                                (TOOLBAR_ACCENT, TOOLBAR_ACCENT)
+                            } else {
+                                (TOOLBAR_BLOCK_FILL, TOOLBAR_BLOCK_EDGE)
+                            };
+                            round_rect(
+                                pixmap,
+                                block,
+                                radius,
+                                parse_hex(fill),
+                                Some((parse_hex(edge), TOOLBAR_HAIRLINE * scale)),
+                            );
+                        } else if control.stretched {
+                            round_rect(pixmap, block, radius, parse_hex(TOOLBAR_BLOCK_FILL), None);
+                        } else if control.block.active {
+                            round_rect(pixmap, block, radius, parse_hex(TOOLBAR_ACCENT), None);
+                        }
                         // What the block draws stays where it is and the capsule grows to its right,
                         // so the block reads as the same square, stretched. An icon or the readout's
                         // number is centred in the square, never in the stretched rectangle.
@@ -7264,5 +7328,33 @@ mod tests {
             );
             toolbar.can_undo = true;
         }
+    }
+
+    #[test]
+    fn short_rules_mark_the_rail_families() {
+        assert!(separates(
+            Some(ToolbarAction::Color(0)),
+            Some(ToolbarAction::Tool(Tool::Pen))
+        ));
+        assert!(!separates(
+            Some(ToolbarAction::Color(0)),
+            Some(ToolbarAction::Color(1))
+        ));
+        assert!(!separates(
+            Some(ToolbarAction::Tool(Tool::Pen)),
+            Some(ToolbarAction::Tool(Tool::Eraser))
+        ));
+        assert!(separates(
+            Some(ToolbarAction::Boards),
+            Some(ToolbarAction::More)
+        ));
+        assert!(separates(
+            Some(ToolbarAction::More),
+            Some(ToolbarAction::Lock)
+        ));
+        assert!(!separates(
+            Some(ToolbarAction::Tool(Tool::Pen)),
+            Some(ToolbarAction::Size)
+        ));
     }
 }
