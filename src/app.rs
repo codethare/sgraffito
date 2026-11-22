@@ -3036,6 +3036,35 @@ impl App {
         self.last_text_press = None;
     }
 
+    /// Fill the topmost closed shape under the pointer with the colour in hand. Lines and arrows are
+    /// not containers, so a press on one does nothing; a press outside every closed shape does too.
+    pub(crate) fn bucket_fill(&mut self, key: u32, point: [f32; 2]) {
+        let Some(board_name) = self.outputs.get(&key).map(|out| out.board().to_string()) else {
+            return;
+        };
+        let Some((index, box_)) = self.doc.boards.get(&board_name).and_then(|ann| {
+            ann.shapes
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, shape)| shape.contains(point))
+                .map(|(index, shape)| (index, shape.paint_bounds()))
+        }) else {
+            return;
+        };
+        let color = crate::config::current().colors[self.color_idx].clone();
+        let before = self.doc.clone();
+        let shape = &mut self.doc.boards.get_mut(&board_name).unwrap().shapes[index];
+        if shape.fill.as_deref() == Some(color.as_str()) {
+            return;
+        }
+        shape.fill = Some(color);
+        self.undo.record(before, &self.doc);
+        self.doc_changed_at(key, box_);
+        log(&format!("fill shape {index}"));
+        self.dirty = true;
+    }
+
     /// A select press on text: the first click selects and can drag the box; a quick second click on
     /// the same box opens it for writing. A press that misses text clears the pending second click.
     pub(crate) fn select_text_press(&mut self, key: u32, x: f32, y: f32) {
@@ -3162,6 +3191,7 @@ impl App {
             rotate: 0.0,
             id: 0,
             attach,
+            fill: None,
         });
     }
 
@@ -4001,9 +4031,13 @@ pub fn read_selection(reader: impl Read) -> String {
 pub fn tool_cursor(tool: Tool) -> CursorShape {
     match tool {
         // Every tool that draws where the pointer is gets the crosshair, the shape tools included.
-        Tool::Pen | Tool::Circle | Tool::Rect | Tool::Diamond | Tool::Line | Tool::Arrow => {
-            CursorShape::Crosshair
-        }
+        Tool::Pen
+        | Tool::Bucket
+        | Tool::Circle
+        | Tool::Rect
+        | Tool::Diamond
+        | Tool::Line
+        | Tool::Arrow => CursorShape::Crosshair,
         Tool::Eraser => CursorShape::Cell,
         Tool::Text => CursorShape::Text,
         // The hand tool's gesture is a pan, and the grab shapes say exactly that.

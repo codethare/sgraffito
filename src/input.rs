@@ -224,6 +224,7 @@ pub fn tool_for_keysym(keysym: Keysym) -> Option<Tool> {
     match keysym {
         Keysym::p | Keysym::P => Some(Tool::Pen),
         Keysym::e | Keysym::E => Some(Tool::Eraser),
+        Keysym::g | Keysym::G => Some(Tool::Bucket),
         Keysym::t | Keysym::T => Some(Tool::Text),
         Keysym::v | Keysym::V => Some(Tool::Selection),
         Keysym::o | Keysym::O => Some(Tool::Circle),
@@ -1037,6 +1038,7 @@ impl App {
                     out.overlay.eraser = Some(canvas);
                 }
             }
+            Tool::Bucket => self.bucket_fill(*key, canvas),
             Tool::Text => self.begin_text_edit(key, canvas[0], canvas[1]),
             Tool::Selection => {
                 // One click selects and can drag a text box; a quick second click on the same glyphs
@@ -1153,7 +1155,7 @@ impl App {
                 self.drag_note(key, canvas[0], canvas[1]);
                 return;
             }
-            Tool::Text | Tool::Selection | Tool::Hand => return,
+            Tool::Text | Tool::Selection | Tool::Hand | Tool::Bucket => return,
         }
         // Only the transient overlay moved, so the next frame can damage just its box.
         out.transient_dirty = true;

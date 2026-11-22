@@ -567,6 +567,7 @@ fn every_block_of_the_rail_is_reachable_and_no_row_is_a_gap() {
     for tool in [
         Tool::Pen,
         Tool::Eraser,
+        Tool::Bucket,
         Tool::Text,
         Tool::Selection,
         Tool::Circle,
@@ -596,9 +597,9 @@ fn every_block_of_the_rail_is_reachable_and_no_row_is_a_gap() {
         ToolbarAction::Lock,
         "Esc is not last"
     );
-    // Sixteen clickable blocks: the active colour, eleven tools, the width readout that opens the
+    // Seventeen clickable blocks: the active colour, twelve tools, the width readout that opens the
     // steps' list, the boards' block, the drawer's block and `Esc`.
-    assert_eq!(actions.len(), 16, "a drawn block cannot be hit");
+    assert_eq!(actions.len(), 17, "a drawn block cannot be hit");
     // Outside the rail the toolbar takes nothing: those presses are drawing gestures.
     let band = toolbar_bounds(&rail, w, h);
     assert_eq!(
@@ -1724,6 +1725,7 @@ fn the_default_view_draws_what_no_view_drew() {
             rotate: 0.0,
             id: 0,
             attach: [None, None],
+            fill: None,
         }],
         notes: vec![],
     };
@@ -2569,6 +2571,7 @@ fn a_shape_is_drawn_as_a_hand_drawn_outline() {
             rotate: 0.0,
             id: 0,
             attach: [None, None],
+            fill: None,
         }],
         notes: vec![],
     };
@@ -2606,6 +2609,7 @@ fn rect_shape(from: [f32; 2], to: [f32; 2]) -> Shape {
         rotate: 0.0,
         id: 0,
         attach: [None, None],
+        fill: None,
     }
 }
 
@@ -2630,6 +2634,7 @@ fn sketched_ink_stays_inside_the_paint_box() {
     ] {
         let shape = Shape {
             kind,
+            fill: None,
             ..rect_shape([80.0, 80.0], [220.0, 200.0])
         };
         let bounds = shape.paint_bounds();
@@ -2754,6 +2759,7 @@ fn a_moved_sketched_shape_leaves_no_trail() {
     // the point is the ink that only the style puts past the box.
     let heavy = |from: [f32; 2], to: [f32; 2]| Shape {
         width: 8.0,
+        fill: None,
         ..rect_shape(from, to)
     };
     let before = heavy([60.0, 60.0], [200.0, 160.0]);
@@ -2915,6 +2921,7 @@ fn the_interface_over_a_sketched_document_is_exact() {
     let (w, h) = (400u32, 300u32);
     let shape = Shape {
         color: "#e01b24".into(),
+        fill: None,
         ..rect_shape([80.0, 90.0], [240.0, 200.0])
     };
     let marked = |bare: bool| {
@@ -2923,6 +2930,7 @@ fn the_interface_over_a_sketched_document_is_exact() {
             doc.strokes = vec![line(40.0, 260.0, 360.0)];
             doc.shapes.push(Shape {
                 kind: ShapeKind::Circle,
+                fill: None,
                 ..rect_shape([260.0, 40.0], [370.0, 140.0])
             });
         }
@@ -3050,6 +3058,7 @@ fn every_shape_kind_puts_ink_outside_its_own_outline() {
         let shape = Shape {
             kind,
             width: 3.0,
+            fill: None,
             ..rect_shape([70.0, 70.0], [290.0, 230.0])
         };
         let reach = shape.width / 2.0 + 1.0;
@@ -4016,4 +4025,35 @@ fn a_selected_texts_frame_is_measured_not_estimated() {
         "the frame is wider than the glyphs: {}",
         measured.w
     );
+}
+
+/// A filled closed shape paints its inside with the fill colour, while the outline still paints the
+/// stroke on top and nothing leaks outside the shape's box.
+#[test]
+fn a_bucket_fill_paints_the_inside_of_a_closed_shape() {
+    let (w, h) = (260u32, 260u32);
+    let mut shape = rect_shape([40.0, 40.0], [220.0, 220.0]);
+    shape.fill = Some("#3584e4".into());
+    let doc = sole_shape(shape);
+    let mut buf = buffer(w, h);
+    Renderer::new().render(
+        &mut buf,
+        w,
+        h,
+        1.0,
+        View::default(),
+        &doc,
+        &Overlay::default(),
+        None,
+    );
+    let centre = ((130 * w + 130) * 4) as usize;
+    assert!(buf[centre + 3] > 0, "the inside is empty");
+    let px = &buf[centre..centre + 4];
+    assert!(
+        [0x35, 0x84, 0xe4]
+            .into_iter()
+            .all(|channel| px[..3].contains(&channel)),
+        "the inside is not the fill colour: {px:?}"
+    );
+    assert_eq!(alpha(&buf, w, 20, 20), 0, "the fill leaked outside");
 }

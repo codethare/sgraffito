@@ -43,6 +43,7 @@ fn sample() -> Doc {
                 rotate: 0.0,
                 id: 1,
                 attach: [None, None],
+                fill: None,
             }],
             notes: vec![],
         },
@@ -462,6 +463,7 @@ fn stepping_a_selection_steps_its_widths_and_text_sizes() {
             rotate: 0.0,
             id: 0,
             attach: [None, None],
+            fill: None,
         }],
         notes: vec![Note {
             x: 10.0,
@@ -907,6 +909,7 @@ fn connector_attachments_survive_the_round_trip() {
         rotate: 0.0,
         id: 0,
         attach: [None, None],
+        fill: None,
     });
     let target = board.shapes[0].id;
     board.add_shape(Shape {
@@ -924,6 +927,7 @@ fn connector_attachments_survive_the_round_trip() {
             }),
             None,
         ],
+        fill: None,
     });
     doc.boards.insert("a".into(), board);
     store::save(&path, &doc).unwrap();

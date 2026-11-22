@@ -140,6 +140,8 @@ pub enum Tool {
     #[default]
     Pen,
     Eraser,
+    /// Fills the inside of a closed shape with the colour in hand.
+    Bucket,
     Text,
     Selection,
     Circle,
@@ -258,7 +260,7 @@ impl Tool {
     /// Whether the tool strokes with the pen width. Every tool that draws does, except the text
     /// tool, which has a size of its own.
     pub fn uses_pen_width(self) -> bool {
-        !matches!(self, Tool::Text)
+        !matches!(self, Tool::Text | Tool::Bucket)
     }
 
     /// Whether a completed mark with this tool hands the pointer back to `select`. One-shot drawing
@@ -282,6 +284,7 @@ impl Tool {
         match self {
             Tool::Pen => "P",
             Tool::Eraser => "E",
+            Tool::Bucket => "G",
             Tool::Text => "T",
             Tool::Selection => "V",
             Tool::Circle => "O",
@@ -523,6 +526,9 @@ pub struct Shape {
     /// For a line or arrow, the closed shapes its two ends stick to.
     #[serde(default)]
     pub attach: [Option<Attachment>; 2],
+    /// The colour inside a closed shape, set by the bucket. `None` leaves the inside clear.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill: Option<String>,
 }
 
 /// An item the eraser hit.
@@ -1270,6 +1276,27 @@ impl Shape {
             self.rotate
         } else {
             0.0
+        }
+    }
+
+    /// Whether a point lies inside a closed shape, in the shape's own turned frame. Lines and
+    /// arrows have no inside; a zero-width box contains nothing.
+    pub fn contains(&self, p: [f32; 2]) -> bool {
+        if !self.kind.is_closed() {
+            return false;
+        }
+        let box_ = rect_of(self.from, self.to);
+        if box_.w <= f32::EPSILON || box_.h <= f32::EPSILON {
+            return false;
+        }
+        let p = self.to_local(p);
+        let (cx, cy) = (box_.x + box_.w / 2.0, box_.y + box_.h / 2.0);
+        let (dx, dy) = ((p[0] - cx) / (box_.w / 2.0), (p[1] - cy) / (box_.h / 2.0));
+        match self.kind {
+            ShapeKind::Circle => dx * dx + dy * dy <= 1.0,
+            ShapeKind::Rect => box_.contains(p[0], p[1]),
+            ShapeKind::Diamond => dx.abs() + dy.abs() <= 1.0,
+            ShapeKind::Line | ShapeKind::Arrow => false,
         }
     }
 

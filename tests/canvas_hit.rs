@@ -595,6 +595,7 @@ fn shape(kind: ShapeKind, from: [f32; 2], to: [f32; 2]) -> Shape {
         rotate: 0.0,
         id: 0,
         attach: [None, None],
+        fill: None,
     }
 }
 
@@ -661,6 +662,7 @@ fn an_arrow_keeps_its_direction_and_carries_a_head_at_the_end() {
     // A hairline arrow still gets a head big enough to read.
     let thin = Shape {
         width: 1.0,
+        fill: None,
         ..arrow.clone()
     };
     assert!(thin.head_len() >= 9.0);
@@ -936,6 +938,7 @@ fn a_connector_follows_a_turned_shape_and_keeps_its_local_attachment() {
             }),
             None,
         ],
+        fill: None,
     });
     assert_eq!(board.shapes[1].from, [50.0, 0.0]);
 
@@ -1676,6 +1679,7 @@ fn the_selection_walk_visits_every_kind_in_document_order() {
             rotate: 0.0,
             id: 0,
             attach: [None, None],
+            fill: None,
         }],
         notes: vec![sgraffito::canvas::Note::new(
             0.0,
@@ -1729,6 +1733,7 @@ fn the_walk_wraps_backwards_and_steps_from_a_marquee() {
             rotate: 0.0,
             id: 0,
             attach: [None, None],
+            fill: None,
         }],
         notes: vec![Note::new(0.0, 0.0, "#ffffff", "2026/01/01".into())],
     };
@@ -2042,6 +2047,7 @@ fn a_connector_snaps_to_a_shape_and_follows_both_endpoints() {
         rotate: 0.0,
         id: 0,
         attach: [Some(left), Some(right)],
+        fill: None,
     };
     board.add_shape(connector);
     let connector_id = board.shapes[2].id;
@@ -2099,6 +2105,7 @@ fn a_shape_id_is_unique_and_connectors_are_remapped_on_a_copy() {
             }),
             None,
         ],
+        fill: None,
     });
     let items = [ItemId::Shape(0), ItemId::Shape(1)];
     let (copies, _) = board.duplicate(&items);
@@ -2145,6 +2152,7 @@ fn a_moved_shape_snaps_to_a_free_connector_end() {
         rotate: 0.0,
         id: 0,
         attach: [None, None],
+        fill: None,
     });
     // The free end sits on the rect's right edge. A 10 px drag puts the end just inside the
     // outline, within the magnetic radius: the shape is pulled back onto the end and the link is
@@ -2300,4 +2308,20 @@ fn the_text_frame_moves_with_a_live_translation() {
         },
         "the measured frame stayed at the document origin"
     );
+}
+
+/// The bucket's hit test is the shape's inside, not its outline: a circle misses a corner of its
+/// box, a diamond misses the same corner too, while a rectangle keeps it.
+#[test]
+fn a_closed_shape_contains_its_interior() {
+    let circle = shape(ShapeKind::Circle, [100.0, 100.0], [200.0, 200.0]);
+    assert!(circle.contains([150.0, 150.0]));
+    assert!(!circle.contains([102.0, 102.0]));
+    let rect = shape(ShapeKind::Rect, [100.0, 100.0], [200.0, 200.0]);
+    assert!(rect.contains([102.0, 102.0]));
+    let diamond = shape(ShapeKind::Diamond, [100.0, 100.0], [200.0, 200.0]);
+    assert!(diamond.contains([150.0, 150.0]));
+    assert!(!diamond.contains([110.0, 110.0]));
+    let line = shape(ShapeKind::Line, [100.0, 100.0], [200.0, 200.0]);
+    assert!(!line.contains([150.0, 150.0]));
 }

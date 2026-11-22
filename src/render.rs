@@ -151,6 +151,7 @@ enum Mark {
 enum Icon {
     Pen,
     Eraser,
+    Bucket,
     Text,
     Selection,
     Circle,
@@ -420,6 +421,7 @@ fn rail_candidates(toolbar: &Toolbar) -> Vec<Block> {
     for (tool, icon, label) in [
         (Tool::Pen, Icon::Pen, "pen"),
         (Tool::Eraser, Icon::Eraser, "eraser"),
+        (Tool::Bucket, Icon::Bucket, "bucket fill: click a shape"),
         (Tool::Text, Icon::Text, "text: click to place"),
         (Tool::Selection, Icon::Selection, "select: drag to move"),
         (Tool::Circle, Icon::Circle, "circle"),
@@ -4503,6 +4505,7 @@ fn draw_icon(
                 rotate: 0.0,
                 id: 0,
                 attach: [None, None],
+                fill: None,
             },
             icon_screen,
             Ink::Precise,
@@ -4651,6 +4654,25 @@ fn draw_icon(
     let mut path = PathBuilder::new();
     let mut filled: Vec<tiny_skia::Path> = Vec::new();
     match icon {
+        Icon::Bucket => {
+            // A tilted pail with a drip: a filled interior is the one thing this tool changes.
+            path.move_to(x + w * 0.22, y + h * 0.34);
+            path.line_to(x + w * 0.78, y + h * 0.22);
+            path.line_to(x + w * 0.86, y + h * 0.66);
+            path.line_to(x + w * 0.4, y + h * 0.82);
+            path.close();
+            path.move_to(x + w * 0.32, y + h * 0.33);
+            path.quad_to(x + w * 0.5, y + h * 0.02, x + w * 0.74, y + h * 0.25);
+            if let Some(drop) = PathBuilder::from_circle(x + w * 0.14, y + h * 0.72, w * 0.08)
+                .or_else(|| {
+                    let mut pb = PathBuilder::new();
+                    pb.push_circle(x + w * 0.14, y + h * 0.72, w * 0.08);
+                    pb.finish()
+                })
+            {
+                filled.push(drop);
+            }
+        }
         Icon::Eraser => {
             let (corners, band) = eraser_icon(box_);
             path.move_to(corners[0][0], corners[0][1]);
@@ -5022,6 +5044,23 @@ fn draw_shape(pixmap: &mut PixmapMut, s: &Shape, screen: Screen, ink: Ink) {
         line_join: LineJoin::Round,
         ..Default::default()
     };
+    // The fill is the exact interior behind the outline, so the hand-drawn border can wobble over
+    // it without the colour spilling outside the shape the user drew.
+    if let Some(fill) = s.fill.as_deref()
+        && let Some(path) = closed_shape_path(s, screen)
+    {
+        let c = parse_hex(fill);
+        let mut inside = Paint::default();
+        inside.set_color_rgba8(c[0], c[1], c[2], c[3]);
+        inside.anti_alias = true;
+        pixmap.fill_path(
+            &path,
+            &inside,
+            tiny_skia::FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+    }
     let Ink::Sketch(seed) = ink else {
         draw_exact_shape(pixmap, s, screen, &paint, &stroke);
         return;
@@ -5062,6 +5101,42 @@ fn fill_arrow_head(pixmap: &mut PixmapMut, s: &Shape, screen: Screen, paint: &Pa
     }
 }
 
+/// The exact closed path of a circle, rectangle or diamond, turned about its centre. `None` for a
+/// line or arrow, and for a box too small to have an inside.
+fn closed_shape_path(s: &Shape, screen: Screen) -> Option<tiny_skia::Path> {
+    if !s.kind.is_closed() {
+        return None;
+    }
+    let from = screen.point(s.from);
+    let to = screen.point(s.to);
+    let box_ = rect_of(from, to);
+    let rect = sk_rect(box_)?;
+    let mut pb = PathBuilder::new();
+    match s.kind {
+        ShapeKind::Circle => pb.push_oval(rect),
+        ShapeKind::Rect => pb.push_rect(rect),
+        _ => {
+            let (cx, cy) = (box_.x + box_.w / 2.0, box_.y + box_.h / 2.0);
+            pb.move_to(cx, box_.y);
+            pb.line_to(box_.x + box_.w, cy);
+            pb.line_to(cx, box_.y + box_.h);
+            pb.line_to(box_.x, cy);
+            pb.close();
+        }
+    }
+    let path = pb.finish()?;
+    if s.turn_angle() != 0.0 {
+        let centre = screen.point(s.centre());
+        path.transform(Transform::from_rotate_at(
+            s.turn_angle().to_degrees(),
+            centre[0],
+            centre[1],
+        ))
+    } else {
+        Some(path)
+    }
+}
+
 /// The exact outline of a shape: today's geometry, unchanged, for the rail's icons and for anything
 /// that has to be a figure rather than a mark.
 fn draw_exact_shape(
@@ -5073,39 +5148,10 @@ fn draw_exact_shape(
 ) {
     let from = screen.point(s.from);
     let to = screen.point(s.to);
-    let box_ = rect_of(from, to);
     match s.kind {
         ShapeKind::Circle | ShapeKind::Rect | ShapeKind::Diamond => {
-            let Some(rect) = sk_rect(box_) else {
-                return;
-            };
-            let mut pb = PathBuilder::new();
-            match s.kind {
-                ShapeKind::Circle => pb.push_oval(rect),
-                ShapeKind::Rect => pb.push_rect(rect),
-                _ => {
-                    let (cx, cy) = (box_.x + box_.w / 2.0, box_.y + box_.h / 2.0);
-                    pb.move_to(cx, box_.y);
-                    pb.line_to(box_.x + box_.w, cy);
-                    pb.line_to(cx, box_.y + box_.h);
-                    pb.line_to(box_.x, cy);
-                    pb.close();
-                }
-            }
-            if let Some(path) = pb.finish() {
-                let path = if s.turn_angle() != 0.0 {
-                    let centre = screen.point(s.centre());
-                    path.transform(Transform::from_rotate_at(
-                        s.turn_angle().to_degrees(),
-                        centre[0],
-                        centre[1],
-                    ))
-                } else {
-                    Some(path)
-                };
-                if let Some(path) = path {
-                    pixmap.stroke_path(&path, paint, stroke, Transform::identity(), None);
-                }
+            if let Some(path) = closed_shape_path(s, screen) {
+                pixmap.stroke_path(&path, paint, stroke, Transform::identity(), None);
             }
         }
         ShapeKind::Line | ShapeKind::Arrow => {
@@ -5966,6 +6012,7 @@ mod tests {
             rotate: 0.0,
             id: 7,
             attach: [None, None],
+            fill: None,
         };
         let mut ann = Board::default();
         ann.add_shape(target.clone());
@@ -5985,6 +6032,7 @@ mod tests {
                     }),
                     None,
                 ],
+                fill: None,
             }),
             ..Default::default()
         };
@@ -6036,6 +6084,7 @@ mod tests {
                 }),
                 None,
             ],
+            fill: None,
         };
         let overlay = Overlay {
             connectors: vec![LiveConnector::Shape(ItemId::Shape(0), connector.clone())],
@@ -7228,6 +7277,7 @@ mod tests {
             rotate: 0.0,
             id: 0,
             attach: [None, None],
+            fill: None,
         };
         let mut renderer = Renderer::new();
         let stored = Board {
@@ -7386,7 +7436,7 @@ mod tests {
                 assert!(ink > 0, "{icon:?} drew nothing at scale {scale}");
             }
             assert_eq!(
-                icons, 14,
+                icons, 15,
                 "every function has an icon, and only functions do"
             );
         }
@@ -7496,6 +7546,7 @@ mod tests {
             "Esc" => Some(Keysym::Escape),
             "P" => Some(Keysym::P),
             "E" => Some(Keysym::E),
+            "G" => Some(Keysym::G),
             "T" => Some(Keysym::T),
             "V" => Some(Keysym::V),
             "O" => Some(Keysym::O),
@@ -7511,7 +7562,7 @@ mod tests {
             _ => None,
         };
         let blocks = toolbar_blocks(&rail_state(), 1000.0);
-        assert_eq!(blocks.len(), 16);
+        assert_eq!(blocks.len(), 17);
         let mut stated = 0;
         for block in &blocks {
             let Some(action) = block.action else {
@@ -7574,10 +7625,10 @@ mod tests {
             };
             assert!(applies, "'{}' names a key that does not do it", block.label);
         }
-        // Fifteen blocks apply something: the active colour, eleven tools, boards, the drawer's control
+        // Sixteen blocks apply something: the active colour, twelve tools, boards, the drawer's control
         // and lock. Both panel switches are in the drawer, which is closed in this rail, and the width
         // readout applies nothing of its own.
-        assert_eq!(stated, 15);
+        assert_eq!(stated, 16);
     }
 
     /// A face mark is a lone key. The capsule names the full key, a chord and any alternate included.

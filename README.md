@@ -67,8 +67,9 @@ Every mark on the canvas is drawn as a **hand-drawn** one: a stroke is a pen tha
 | drag with the left button held | freehand drawing (motion with no button held draws nothing) |
 | `P` | pen |
 | `E` | eraser (deletes whole strokes, shapes or text boxes; hit radius 8 logical pixels) |
+| `G` | bucket fill: click inside a circle, rectangle or diamond to fill its background with the current colour; clicking a line or arrow does nothing |
 | `T` | text tool: click to place a text box with that point as its top-left corner |
-| `V` | selection tool: click an element, or drag a marquee on empty space, then drag to move, grab a handle to resize, grab the handle above the frame to rotate — circles, rectangles and diamonds turn as a whole, while lines and arrows turn their endpoints. Picking a circle, rectangle or diamond takes every stroke, text, note and shape wholly inside it, so dragging the container drags the group; picking an element inside it directly selects that element alone; a plain click on text opens that box for editing |
+| `V` | selection tool: click an element, or drag a marquee on empty space, then drag to move, grab a handle to resize, grab the handle above the frame to rotate — circles, rectangles and diamonds turn as a whole, while lines and arrows turn their endpoints. Picking a circle, rectangle or diamond takes every stroke, text, note and shape wholly inside it, so dragging the container drags the group; picking an element inside it directly selects that element alone; a single click on text selects and can drag it, and a quick double-click opens that box for editing |
 | `O` `R` `D` `L` `A` | circle, rectangle, diamond, line, arrow: drag to draw the shape between the press point and the pointer |
 | `H` | hand: drag to pan the canvas |
 | `N` | sticky note: drag out the square to create one and start typing; click an existing one to write in it |
