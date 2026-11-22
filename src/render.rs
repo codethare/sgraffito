@@ -39,6 +39,9 @@ const TOOLBAR_CENTRE: f32 = 0.45;
 /// The handwritten face Excalidraw made famous for its text. It is bundled under the OFL; the
 /// rail's own labels keep the system interface font.
 const TEXT_FONT: &str = "Excalifont";
+/// Excalidraw falls back to Xiaolai for CJK; the same face is bundled here so Chinese text keeps
+/// the hand-drawn look instead of dropping to a system serif.
+const CJK_TEXT_FONT: &str = "Xiaolai SC";
 
 const TOOLBAR_BLOCK: f32 = 30.0;
 /// Between two blocks of the same group.
@@ -1401,6 +1404,9 @@ impl Renderer {
                 fonts
                     .db_mut()
                     .load_font_data(include_bytes!("../assets/Excalifont-Regular.ttf").to_vec());
+                fonts
+                    .db_mut()
+                    .load_font_data(include_bytes!("../assets/XiaolaiSC.ttf").to_vec());
                 fonts
             },
             cache: SwashCache::new(),
@@ -3318,12 +3324,33 @@ impl Renderer {
             }
             None => buffer.set_size(None, None),
         }
-        buffer.set_text(
-            text,
-            &Attrs::new().family(Family::Name(TEXT_FONT)),
-            Shaping::Advanced,
-            None,
-        );
+        let latin = Attrs::new().family(Family::Name(TEXT_FONT));
+        let cjk = Attrs::new().family(Family::Name(CJK_TEXT_FONT));
+        let mut spans: Vec<(&str, Attrs)> = Vec::new();
+        let mut start = 0;
+        let mut run: Option<bool> = None;
+        for (index, ch) in text.char_indices() {
+            let cjk_char = is_cjk(ch);
+            match run {
+                Some(previous) if previous == cjk_char => {}
+                Some(previous) => {
+                    spans.push((
+                        &text[start..index],
+                        if previous { cjk.clone() } else { latin.clone() },
+                    ));
+                    start = index;
+                    run = Some(cjk_char);
+                }
+                None => run = Some(cjk_char),
+            }
+        }
+        if let Some(previous) = run {
+            spans.push((
+                &text[start..],
+                if previous { cjk.clone() } else { latin.clone() },
+            ));
+        }
+        buffer.set_rich_text(spans, &latin, Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut self.font_system, false);
 
         let mut line_w = 0.0;
@@ -3976,6 +4003,17 @@ struct ToolbarPill {
     reach: f32,
     /// The controls the rail had no room for: the drawer lists them after its own rows.
     overflow: Vec<Block>,
+}
+
+/// Whether a character belongs to the CJK runs that Excalidraw hands to Xiaolai: Han ideographs and
+/// their radicals, kana, CJK punctuation, compatibility ideographs and fullwidth forms. Latin and
+/// symbols stay in Excalifont.
+fn is_cjk(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x2E80..=0x9FFF | 0xF900..=0xFAFF | 0xFE30..=0xFE4F | 0xFF00..=0xFFEF
+            | 0x20000..=0x2FA1F
+    )
 }
 
 /// A label vertically centred in a `height`-tall box whose top edge is `top`.
@@ -7881,6 +7919,18 @@ mod tests {
             Some(ToolbarAction::Tool(Tool::Pen)),
             Some(ToolbarAction::Size)
         ));
+    }
+
+    /// Excalidraw hands Han text to Xiaolai; Latin and symbols stay in Excalifont. The routing is
+    /// decided per character, including Chinese punctuation and fullwidth forms.
+    #[test]
+    fn only_cjk_characters_take_the_xiaolai_run() {
+        for ch in ['中', '文', '，', '。', '「', '（', '：', 'あ', 'ア'] {
+            assert!(is_cjk(ch), "{ch:?} should use Xiaolai");
+        }
+        for ch in ['A', 'z', '0', ' ', '!', 'é', '—', '😀'] {
+            assert!(!is_cjk(ch), "{ch:?} should stay in Excalifont");
+        }
     }
 
     #[test]
