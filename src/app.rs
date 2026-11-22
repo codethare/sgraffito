@@ -88,6 +88,34 @@ const MAX_BUFFERS: usize = 2;
 /// How long the pop-out of a hovered block takes, one frame of it, and the relaxed poll the
 /// event loop uses when nothing is moving.
 const TOOLBAR_ANIM: Duration = Duration::from_millis(140);
+/// The interval and travel that turn two select presses on the same text box into an edit.
+const TEXT_DOUBLE_CLICK: Duration = Duration::from_millis(400);
+const TEXT_DOUBLE_CLICK_SLOP: f32 = 6.0;
+
+/// The previous select press on a text box, kept only to recognise a quick second one.
+#[derive(Clone, Copy)]
+struct TextPress {
+    at: Instant,
+    point: [f32; 2],
+    index: usize,
+}
+
+/// Whether `previous` and a press now on `index` at `point` are a double click rather than two
+/// separate selections. The same box, a short interval and little travel, so a click followed by a
+/// drag toward another box does not open the first one for writing.
+fn is_text_double_click(
+    previous: Option<TextPress>,
+    index: usize,
+    point: [f32; 2],
+    now: Instant,
+) -> bool {
+    previous.is_some_and(|previous| {
+        previous.index == index
+            && now.saturating_duration_since(previous.at) <= TEXT_DOUBLE_CLICK
+            && (point[0] - previous.point[0]).hypot(point[1] - previous.point[1])
+                <= TEXT_DOUBLE_CLICK_SLOP
+    })
+}
 /// How long the caret stays on, and then off. Slow enough not to pull the eye off the name.
 const CARET_BLINK: Duration = Duration::from_millis(530);
 const FRAME_WAIT: Duration = Duration::from_millis(16);
@@ -382,6 +410,8 @@ pub struct App {
     pub(crate) colors_open: bool,
     /// When a shortcut-opened colour strip closes itself; `None` while the pointer keeps it open.
     colors_until: Option<Instant>,
+    /// The last select press on a text box, for the quick second press that starts editing.
+    last_text_press: Option<TextPress>,
     /// When the colour strip started unfurling.
     colors_since: Option<Instant>,
     /// The in-app clipboard history, newest first. Session state: it is never written to the file.
@@ -634,6 +664,7 @@ impl App {
             colors_open: false,
             colors_until: None,
             colors_since: None,
+            last_text_press: None,
             clips: Vec::new(),
             rename: None,
             delete_confirm: None,
@@ -2999,8 +3030,37 @@ impl App {
         }
     }
 
+    /// Forget a pending second click when the next press cannot be one: a modifier click, or a press
+    /// with another tool.
+    pub(crate) fn clear_text_press(&mut self) {
+        self.last_text_press = None;
+    }
+
+    /// A select press on text: the first click selects and can drag the box; a quick second click on
+    /// the same box opens it for writing. A press that misses text clears the pending second click.
+    pub(crate) fn select_text_press(&mut self, key: u32, x: f32, y: f32) {
+        let Some(index) = self.text_index_at(&key, x, y) else {
+            self.last_text_press = None;
+            self.select_press(key, x, y);
+            return;
+        };
+        let now = Instant::now();
+        if is_text_double_click(self.last_text_press, index, [x, y], now) {
+            self.last_text_press = None;
+            self.begin_text_edit(&key, x, y);
+        } else {
+            self.last_text_press = Some(TextPress {
+                at: now,
+                point: [x, y],
+                index,
+            });
+            self.select_press(key, x, y);
+        }
+    }
+
     /// The text box whose measured glyphs are under a canvas point. The select tool uses this to
-    /// turn a click on text into an edit, without creating a box when the click misses.
+    /// tell a single selection click from the quick second click that edits, without creating a box
+    /// when the click misses.
     pub(crate) fn text_index_at(&mut self, key: &u32, x: f32, y: f32) -> Option<usize> {
         let out = self.outputs.get(key)?;
         let board_name = out.board();
@@ -3018,6 +3078,7 @@ impl App {
     }
 
     pub(crate) fn begin_text_edit(&mut self, key: &u32, x: f32, y: f32) {
+        self.last_text_press = None;
         let Some(board_name) = self.outputs.get(key).map(|out| out.board().to_string()) else {
             return;
         };
@@ -4267,6 +4328,43 @@ mod tests {
         assert!(!caret_visible(CARET_BLINK));
         assert!(!caret_visible(CARET_BLINK * 2 - Duration::from_millis(1)));
         assert!(caret_visible(CARET_BLINK * 2));
+    }
+
+    /// A second select press on the same text is an edit only when it is quick and lands close:
+    /// a slow click, another box, or a drag to elsewhere stays a selection.
+    #[test]
+    fn only_a_quick_close_second_text_press_opens_editing() {
+        let now = Instant::now();
+        let first = TextPress {
+            at: now,
+            point: [100.0, 120.0],
+            index: 2,
+        };
+        assert!(is_text_double_click(
+            Some(first),
+            2,
+            [103.0, 123.0],
+            now + Duration::from_millis(250)
+        ));
+        assert!(!is_text_double_click(
+            Some(first),
+            2,
+            [103.0, 123.0],
+            now + Duration::from_millis(500)
+        ));
+        assert!(!is_text_double_click(
+            Some(first),
+            2,
+            [140.0, 123.0],
+            now + Duration::from_millis(100)
+        ));
+        assert!(!is_text_double_click(
+            Some(first),
+            3,
+            [103.0, 123.0],
+            now + Duration::from_millis(100)
+        ));
+        assert!(!is_text_double_click(None, 2, [103.0, 123.0], now));
     }
 
     /// The loop comes back for a zoom's next frame only while one is in flight: this predicate is

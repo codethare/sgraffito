@@ -956,6 +956,7 @@ impl App {
             if press_dismisses_panel(Some(action), self.panel_owner()) {
                 self.close_panels();
             }
+            self.clear_text_press();
             self.apply_toolbar_action_on(Some(*key), action, board);
             return;
         }
@@ -974,6 +975,7 @@ impl App {
             && let Some((board, centre)) = self.linked_text_at(key, x, y)
             && self.doc.boards.contains_key(&board)
         {
+            self.clear_text_press();
             self.follow_link(key, &board, centre);
             return;
         }
@@ -1011,6 +1013,9 @@ impl App {
         } else {
             None
         };
+        if self.tool != Tool::Selection {
+            self.clear_text_press();
+        }
         match self.tool {
             Tool::Pen => {
                 if let Some(out) = self.outputs.get_mut(key) {
@@ -1034,15 +1039,13 @@ impl App {
             }
             Tool::Text => self.begin_text_edit(key, canvas[0], canvas[1]),
             Tool::Selection => {
-                // Text is content before it is an object: a plain select press on measured glyphs
-                // opens the box at that point. Shift still toggles membership and Alt still copies.
-                if !self.shift
-                    && !self.alt
-                    && self.text_index_at(key, canvas[0], canvas[1]).is_some()
-                {
-                    self.begin_text_edit(key, canvas[0], canvas[1]);
-                } else {
+                // One click selects and can drag a text box; a quick second click on the same glyphs
+                // opens it for writing. Shift still toggles membership and Alt still copies.
+                if self.shift || self.alt {
+                    self.clear_text_press();
                     self.select_press(*key, x, y);
+                } else {
+                    self.select_text_press(*key, x, y);
                 }
             }
             Tool::Circle => self.begin_shape(key, canvas[0], canvas[1], ShapeKind::Circle),

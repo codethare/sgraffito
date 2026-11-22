@@ -89,6 +89,7 @@ Every mark on the canvas is drawn as a **hand-drawn** one: a stroke is a pen tha
 | `+` / `=` / `-` | zoom the view in / out by one step, about the centre of the output |
 | `0` | put the view back at 1:1 from the canvas origin |
 | `Enter` | open the selected text box or note for writing, with the caret at its end |
+| double-click a text box with `V` armed | open it for writing; a single click selects and can drag it |
 | hold `Shift` while dragging | constrain the drag: a line or an arrow snaps to the nearest 15°, a circle, rectangle, diamond or note comes out with equal sides, and a resize of a selection keeps its proportions |
 | hold `Shift` and click an element | add it to the selection, or take it out when it is already held |
 | hold `Alt` when a selection drag starts | copy what the selection holds and drag the copy, leaving the original where it was |
