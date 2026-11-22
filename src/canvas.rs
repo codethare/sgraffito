@@ -2562,6 +2562,30 @@ fn text_box(text: &TextItem, index: usize, texts: &[(usize, Rect)]) -> Rect {
         .map_or_else(|| text.paint_bounds(), |(_, box_)| *box_)
 }
 
+/// The measured box a text box is framed by while a gesture is live. The cached box is the one at
+/// the document origin, so it has to move with the text and follow a size step; treating it as fixed
+/// was what left the frame behind while the glyphs moved.
+fn transformed_text_box(
+    text: &TextItem,
+    index: usize,
+    texts: &[(usize, Rect)],
+    transform: Transform,
+) -> Rect {
+    let original = text_box(text, index, texts);
+    let moved = transform.text(text);
+    let scale = if text.size > f32::EPSILON {
+        moved.size / text.size
+    } else {
+        1.0
+    };
+    Rect {
+        x: moved.x + (original.x - text.x) * scale,
+        y: moved.y + (original.y - text.y) * scale,
+        w: original.w * scale,
+        h: original.h * scale,
+    }
+}
+
 /// Most elements one clipboard entry may hold, and most bytes of JSON it may be. A clip is memory,
 /// not the file: these bound the one case where a copy is a whole busy board.
 pub const MAX_CLIP_ITEMS: usize = 200;
@@ -2737,7 +2761,7 @@ pub fn selection_frame_with(
                 ItemId::Text(i) => ann
                     .texts
                     .get(*i)
-                    .map(|text| text_box(&t.text(text), *i, texts)),
+                    .map(|text| transformed_text_box(text, *i, texts, t)),
                 ItemId::Shape(i) => ann.shapes.get(*i).map(|s| t.shape(s).bounds()),
                 ItemId::Note(i) => ann.notes.get(*i).map(|n| t.note(n).bounds()),
             },

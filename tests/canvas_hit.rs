@@ -2268,3 +2268,36 @@ fn an_empty_press_inside_a_closed_shape_picks_that_shape() {
     );
     assert_eq!(press, Press::Element(ItemId::Shape(0)));
 }
+
+#[test]
+fn the_text_frame_moves_with_a_live_translation() {
+    use sgraffito::canvas::selection_frame_with;
+    let mut board = Board::default();
+    board.texts.push(text(10.0, 20.0, "hi"));
+    let measured = [(
+        0usize,
+        Rect {
+            x: 8.0,
+            y: 18.0,
+            w: 30.0,
+            h: 20.0,
+        },
+    )];
+    let frame = selection_frame_with(
+        &board,
+        &[ItemId::Text(0)],
+        Some(Transform::Translate { dx: 40.0, dy: 50.0 }),
+        &measured,
+    )
+    .expect("the text has a frame");
+    assert_eq!(
+        frame,
+        Rect {
+            x: 48.0,
+            y: 68.0,
+            w: 30.0,
+            h: 20.0
+        },
+        "the measured frame stayed at the document origin"
+    );
+}

@@ -31,7 +31,7 @@ const ERASER_MARKER_RADIUS: f32 = 8.0;
 /// opens across the rail toward the interior. The default is the left edge (the side measured
 /// fastest for toolbar targets), with its vertical centre at the optical centre, roughly 5% above
 /// the geometric centre, where the gaze rests.
-const TOOLBAR_MARGIN: f32 = 8.0;
+const TOOLBAR_MARGIN: f32 = 14.0;
 const TOOLBAR_CENTRE: f32 = 0.45;
 /// Side of one block: the rail is a column or row of these, above the HIG's minimum pointer target.
 const TOOLBAR_BLOCK: f32 = 30.0;
@@ -119,6 +119,8 @@ const TOOLBAR_SWATCH_EDGE: &str = "#ffffff4d";
 /// board this screen shows the capsule is accent-filled, and an accent ring there is invisible.
 const TOOLBAR_HOVER_FILL: &str = "#ffffff3d";
 const TOOLBAR_CARD_EDGE: &str = "#ffffff59";
+const TOOLBAR_CARD_SHADOW: &str = "#00000073";
+const TOOLBAR_SHADOW_REACH: f32 = 2.0;
 /// How far inside its cell a hovered button's outline sits, so it never touches the row's edge.
 const TOOLBAR_HOVER_INSET: f32 = 2.0;
 const UNDERLINE_HEIGHT: f32 = 1.5;
@@ -1848,18 +1850,20 @@ impl Renderer {
         // that padding at each end. Its width is the block column and not the room a stretched capsule
         // may take, so a capsule reaching past it is drawn over the wallpaper as its own block, rather
         // than the plate appearing to grow.
+        let plate = device(RailRect {
+            along: 0.0,
+            across: -TOOLBAR_PAD,
+            along_extent: pill.column,
+            across_extent: TOOLBAR_BLOCK + 2.0 * TOOLBAR_PAD,
+        });
         round_rect(
             pixmap,
-            device(RailRect {
-                along: 0.0,
-                across: -TOOLBAR_PAD,
-                along_extent: pill.column,
-                across_extent: TOOLBAR_BLOCK + 2.0 * TOOLBAR_PAD,
-            }),
+            plate,
             TOOLBAR_RADIUS * scale,
             parse_hex(TOOLBAR_PLATE_FILL),
             Some((parse_hex(TOOLBAR_CARD_EDGE), TOOLBAR_HAIRLINE * scale)),
         );
+        draw_card_shadow(pixmap, plate, TOOLBAR_RADIUS * scale, scale);
         // The line through the middle of the backdrop options: the four modes are one family, and
         // the line says so without a second plate. It is drawn behind the buttons.
         if toolbar.more
@@ -2339,6 +2343,7 @@ impl Renderer {
             parse_hex(TOOLBAR_BLOCK_FILL),
             Some((parse_hex(TOOLBAR_CARD_EDGE), TOOLBAR_HAIRLINE * scale)),
         );
+        draw_card_shadow(pixmap, zoom, TOOLBAR_RADIUS * scale, scale);
         let percent = format!("{}%", (toolbar.zoom * 100.0).round() as i32);
         let text_w = self.text_width(&percent, TOOLBAR_TEXT_SIZE);
         let text = toolbar_text(
@@ -3684,6 +3689,19 @@ fn toolbar_text(x: f32, top: f32, height: f32, size: f32, color: &str, text: &st
     }
 }
 
+/// A soft inner shadow along the card edge. It stays inside the card's own box, so the damage
+/// accounting and the hit box remain exactly the card's geometry.
+fn draw_card_shadow(pixmap: &mut PixmapMut, rect: Rect, radius: f32, scale: f32) {
+    let inset = TOOLBAR_SHADOW_REACH * scale;
+    round_rect(
+        pixmap,
+        rect.grown(-inset),
+        (radius - inset).max(0.0),
+        [0, 0, 0, 0],
+        Some((parse_hex(TOOLBAR_CARD_SHADOW), 2.0 * inset)),
+    );
+}
+
 /// The room a stretched block may take, from the rail's own edge: bounded by the output's width and by the
 /// reserve the damage accounting holds, so nothing the rail draws reaches past the box it declares.
 fn toolbar_ceiling(surface: f32) -> f32 {
@@ -3753,7 +3771,7 @@ fn cards_layout(surface: (f32, f32), position: CardPosition) -> CardsLayout {
 /// The area the cards and a hover hint can paint. The hint opens away from the nearest screen edge.
 pub fn cards_bounds(surface: (f32, f32), position: CardPosition) -> Rect {
     let cards = cards_layout(surface, position);
-    let cards_box = cards.zoom.union(cards.history);
+    let cards_box = cards.zoom.union(cards.history).grown(TOOLBAR_SHADOW_REACH);
     if position.top() {
         Rect {
             h: cards_box.h + TOOLBAR_BLOCK + TOOLBAR_GAP,

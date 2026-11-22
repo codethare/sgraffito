@@ -1381,7 +1381,7 @@ fn the_rail_folds_to_fit_a_short_output_and_is_pinned_only_below_the_foot() {
     let pinned = toolbar_bounds(&rail, tiny_w as f32, tiny_h as f32);
     assert_eq!(
         pinned.y,
-        8.0 + 6.0 - 1.0,
+        14.0 + 6.0 - 1.0,
         "the top is the margin and pad, hairline included"
     );
     assert!(
@@ -3641,7 +3641,7 @@ fn a_panel_eases_open_from_squares_to_rows() {
     // Beyond the 30 pt square a row paints nothing until its capsule opens, so the closed panel is the
     // reference for both ends of the transition.
     let beyond_square = |a: &[u8], b: &[u8]| {
-        (80..260)
+        (92..260)
             .flat_map(|x| (0..h).map(move |y| (x, y)))
             .filter(|(x, y)| {
                 let i = ((y * w + x) * 4) as usize;
@@ -3814,7 +3814,7 @@ fn a_panel_draws_only_rows_that_are_inside_the_output_and_clickable() {
     // floating plate puts between the bounds and the first block.
     let column_x = band.x + 7.0 + 40.0;
     let painted: Vec<u32> = (0..h)
-        .filter(|y| (55..300).any(|x| alpha(&buf, w, x, *y) > 0))
+        .filter(|y| (62..300).any(|x| alpha(&buf, w, x, *y) > 0))
         .collect();
     let (first, last) = (
         *painted.first().expect("the drawer drew nothing") as f32,
