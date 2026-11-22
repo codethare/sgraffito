@@ -4,7 +4,9 @@
 
 use std::borrow::Cow;
 
-use cosmic_text::{Attrs, Buffer, Color, Cursor, FontSystem, Metrics, Shaping, SwashCache, Wrap};
+use cosmic_text::{
+    Attrs, Buffer, Color, Cursor, Family, FontSystem, Metrics, Shaping, SwashCache, Wrap,
+};
 use tiny_skia::{
     Color as SkColor, LineCap, LineJoin, Paint, PathBuilder, Pixmap, PixmapMut,
     PremultipliedColorU8, Stroke as SkStroke, Transform,
@@ -34,6 +36,10 @@ const ERASER_MARKER_RADIUS: f32 = 8.0;
 const TOOLBAR_MARGIN: f32 = 18.0;
 const TOOLBAR_CENTRE: f32 = 0.45;
 /// Side of one block: the rail is a column or row of these, above the HIG's minimum pointer target.
+/// The handwritten face Excalidraw made famous for its text. It is bundled under the OFL; the
+/// rail's own labels keep the system interface font.
+const TEXT_FONT: &str = "Excalifont";
+
 const TOOLBAR_BLOCK: f32 = 30.0;
 /// Between two blocks of the same group.
 const TOOLBAR_GAP: f32 = 4.0;
@@ -421,7 +427,6 @@ fn rail_candidates(toolbar: &Toolbar) -> Vec<Block> {
     for (tool, icon, label) in [
         (Tool::Pen, Icon::Pen, "pen"),
         (Tool::Eraser, Icon::Eraser, "eraser"),
-        (Tool::Bucket, Icon::Bucket, "bucket fill: click a shape"),
         (Tool::Text, Icon::Text, "text: click to place"),
         (Tool::Selection, Icon::Selection, "select: drag to move"),
         (Tool::Circle, Icon::Circle, "circle"),
@@ -783,10 +788,12 @@ fn toolbar_blocks(toolbar: &Toolbar, surface: f32) -> Vec<Block> {
     blocks
 }
 
-/// The controls the drawer holds: the rail has no room for them, so they live in the list the `more`
-/// block opens. This is the one list of who they are — `drawer_blocks` is what they look like — so the
-/// rules that open and close the drawer cannot disagree with what it shows.
-pub const DRAWER: [ToolbarAction; 4] = [
+/// The controls the drawer holds: the rail has no room for them, and the bucket is kept off the rail
+/// by choice, so they live in the list the `more` block opens. This is the one list of who they are —
+/// `drawer_blocks` is what they look like — so the rules that open and close the drawer cannot
+/// disagree with what it shows.
+pub const DRAWER: [ToolbarAction; 5] = [
+    ToolbarAction::Tool(Tool::Bucket),
     ToolbarAction::Scrim,
     ToolbarAction::Shared,
     ToolbarAction::Link,
@@ -897,6 +904,14 @@ fn drawer_blocks(toolbar: &Toolbar, overflow: &[Block]) -> Vec<Block> {
     let mut rows: Vec<Block> = DRAWER
         .iter()
         .filter_map(|action| match action {
+            ToolbarAction::Tool(tool) => Some(Block {
+                mark: Mark::Icon(Icon::Bucket),
+                column: 1,
+                label: labelled(*action, "bucket fill: click a shape"),
+                action: Some(*action),
+                active: toolbar.tool == *tool,
+                gap: TOOLBAR_GAP,
+            }),
             ToolbarAction::Scrim => Some(Block {
                 mark: Mark::Icon(Icon::Scrim),
                 column: 1,
@@ -1106,6 +1121,7 @@ fn drawer_legend(toolbar: &Toolbar, overflow: &[Block]) -> Option<String> {
 /// the full label and key; the legend only has the one line under the capsule and has to fit it.
 fn drawer_caption(action: ToolbarAction) -> Option<&'static str> {
     Some(match action {
+        ToolbarAction::Tool(Tool::Bucket) => "fill",
         ToolbarAction::Scrim => "backdrop",
         ToolbarAction::Shared => "boards",
         ToolbarAction::Link => "link",
@@ -1380,7 +1396,13 @@ impl Default for Renderer {
 impl Renderer {
     pub fn new() -> Self {
         Self {
-            font_system: FontSystem::new(),
+            font_system: {
+                let mut fonts = FontSystem::new();
+                fonts
+                    .db_mut()
+                    .load_font_data(include_bytes!("../assets/Excalifont-Regular.ttf").to_vec());
+                fonts
+            },
             cache: SwashCache::new(),
             toolbar_cache: Vec::new(),
         }
@@ -3296,7 +3318,12 @@ impl Renderer {
             }
             None => buffer.set_size(None, None),
         }
-        buffer.set_text(text, &Attrs::new(), Shaping::Advanced, None);
+        buffer.set_text(
+            text,
+            &Attrs::new().family(Family::Name(TEXT_FONT)),
+            Shaping::Advanced,
+            None,
+        );
         buffer.shape_until_scroll(&mut self.font_system, false);
 
         let mut line_w = 0.0;
@@ -7436,7 +7463,7 @@ mod tests {
                 assert!(ink > 0, "{icon:?} drew nothing at scale {scale}");
             }
             assert_eq!(
-                icons, 15,
+                icons, 14,
                 "every function has an icon, and only functions do"
             );
         }
@@ -7562,7 +7589,7 @@ mod tests {
             _ => None,
         };
         let blocks = toolbar_blocks(&rail_state(), 1000.0);
-        assert_eq!(blocks.len(), 17);
+        assert_eq!(blocks.len(), 16);
         let mut stated = 0;
         for block in &blocks {
             let Some(action) = block.action else {
@@ -7625,10 +7652,10 @@ mod tests {
             };
             assert!(applies, "'{}' names a key that does not do it", block.label);
         }
-        // Sixteen blocks apply something: the active colour, twelve tools, boards, the drawer's control
+        // Fifteen blocks apply something: the active colour, eleven tools, boards, the drawer's control
         // and lock. Both panel switches are in the drawer, which is closed in this rail, and the width
         // readout applies nothing of its own.
-        assert_eq!(stated, 16);
+        assert_eq!(stated, 15);
     }
 
     /// A face mark is a lone key. The capsule names the full key, a chord and any alternate included.

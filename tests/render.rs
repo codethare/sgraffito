@@ -567,7 +567,6 @@ fn every_block_of_the_rail_is_reachable_and_no_row_is_a_gap() {
     for tool in [
         Tool::Pen,
         Tool::Eraser,
-        Tool::Bucket,
         Tool::Text,
         Tool::Selection,
         Tool::Circle,
@@ -580,6 +579,10 @@ fn every_block_of_the_rail_is_reachable_and_no_row_is_a_gap() {
     ] {
         assert!(actions.contains(&ToolbarAction::Tool(tool)), "{tool:?}");
     }
+    assert!(
+        !actions.contains(&ToolbarAction::Tool(Tool::Bucket)),
+        "the bucket belongs in the more-tools drawer, not on the rail"
+    );
     // The rail carries the colour in hand; the other four live in its opened flyout, covered by
     // the colour-strip test.
     assert!(actions.contains(&ToolbarAction::Color(0)));
@@ -597,9 +600,9 @@ fn every_block_of_the_rail_is_reachable_and_no_row_is_a_gap() {
         ToolbarAction::Lock,
         "Esc is not last"
     );
-    // Seventeen clickable blocks: the active colour, twelve tools, the width readout that opens the
+    // Sixteen clickable blocks: the active colour, eleven tools, the width readout that opens the
     // steps' list, the boards' block, the drawer's block and `Esc`.
-    assert_eq!(actions.len(), 17, "a drawn block cannot be hit");
+    assert_eq!(actions.len(), 16, "a drawn block cannot be hit");
     // Outside the rail the toolbar takes nothing: those presses are drawing gestures.
     let band = toolbar_bounds(&rail, w, h);
     assert_eq!(
@@ -1875,8 +1878,11 @@ fn the_drawer_opens_beside_the_rail_without_moving_it() {
     let more_row = more_row.expect("the more block is on the rail");
     let panel_row = (1..band.h as u32)
         .map(|step| band.y + step as f32)
-        .find(|y| renderer.toolbar_hit(&open, fw, fh, column_x, *y) == Some(ToolbarAction::Scrim))
+        .find(|y| renderer.toolbar_hit(&open, fw, fh, column_x, *y).is_some())
         .expect("the panel's row is not reachable at all");
+    let panel_action = renderer
+        .toolbar_hit(&open, fw, fh, column_x, panel_row)
+        .expect("the panel row vanished");
     assert!(
         (more_row..more_row + 30.0).contains(&panel_row),
         "the panel's row {panel_row} is not level with the block's {more_row}"
@@ -1886,7 +1892,7 @@ fn the_drawer_opens_beside_the_rail_without_moving_it() {
     // crossing a gap that owns nothing and would close it. Both ends come from the same layout.
     let panel_left = (1..band.w as u32)
         .map(|step| band.x + step as f32)
-        .find(|x| renderer.toolbar_hit(&open, fw, fh, *x, panel_row) == Some(ToolbarAction::Scrim))
+        .find(|x| renderer.toolbar_hit(&open, fw, fh, *x, panel_row) == Some(panel_action))
         .expect("the panel's left edge");
     assert_eq!(
         renderer.toolbar_hit(&open, fw, fh, panel_left - 1.0, more_row + 5.0),
