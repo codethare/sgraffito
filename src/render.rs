@@ -420,21 +420,21 @@ fn rail_candidates(toolbar: &Toolbar) -> Vec<Block> {
         active: true,
         gap: TOOLBAR_GROUP_GAP,
     }];
-    for (tool, icon, label) in [
-        (Tool::Pen, Icon::Pen, "pen"),
-        (Tool::Eraser, Icon::Eraser, "eraser"),
-        (Tool::Text, Icon::Text, "text: click to place"),
-        (Tool::Selection, Icon::Selection, "select: drag to move"),
-        (Tool::Circle, Icon::Circle, "circle"),
-        (Tool::Rect, Icon::Rect, "rectangle"),
-        (Tool::Diamond, Icon::Diamond, "diamond"),
-        (Tool::Line, Icon::Line, "line"),
-        (Tool::Arrow, Icon::Arrow, "arrow"),
-        (Tool::Hand, Icon::Hand, "hand: drag to pan"),
-        (Tool::Note, Icon::Note, "note"),
+    for (tool, label) in [
+        (Tool::Pen, "pen"),
+        (Tool::Eraser, "eraser"),
+        (Tool::Text, "text: click to place"),
+        (Tool::Selection, "select: drag to move"),
+        (Tool::Circle, "circle"),
+        (Tool::Rect, "rectangle"),
+        (Tool::Diamond, "diamond"),
+        (Tool::Line, "line"),
+        (Tool::Arrow, "arrow"),
+        (Tool::Hand, "hand: drag to pan"),
+        (Tool::Note, "note"),
     ] {
         blocks.push(Block {
-            mark: Mark::Icon(icon),
+            mark: Mark::Icon(tool_icon(tool).expect("every rail tool has an icon")),
             column: 0,
             label: labelled(ToolbarAction::Tool(tool), label),
             action: Some(ToolbarAction::Tool(tool)),
@@ -528,7 +528,48 @@ fn fitted_blocks(toolbar: &Toolbar, surface: f32) -> (Vec<Block>, Vec<Block>) {
         }
     }
     rail.extend(foot);
+    // A drawer tool that is armed is the rail's `more` block for the moment: its icon replaces the
+    // ellipsis and the block takes the same accent an armed tool would. Choosing any other tool
+    // puts the ellipsis back because this is recomputed from the current toolbar every frame.
+    if let Some(icon) = drawer_tool_icon(toolbar, &overflow)
+        && let Some(block) = rail
+            .iter_mut()
+            .find(|block| block.action == Some(ToolbarAction::More))
+    {
+        block.mark = Mark::Icon(icon);
+        block.active = true;
+    }
     (rail, overflow)
+}
+
+/// The icon a drawer tool shows on the `more` block while it is armed. Overflow tools are real
+/// tools on a short output, and the bucket lives in the drawer on every output; both count.
+fn drawer_tool_icon(toolbar: &Toolbar, overflow: &[Block]) -> Option<Icon> {
+    let action = ToolbarAction::Tool(toolbar.tool);
+    if overflow.iter().any(|block| block.action == Some(action)) || DRAWER.contains(&action) {
+        tool_icon(toolbar.tool)
+    } else {
+        None
+    }
+}
+
+/// The rail icon for a tool. The bucket is the only tool that does not sit on the rail by default,
+/// but the same table lets an overflowed tool keep its face on the `more` block.
+fn tool_icon(tool: Tool) -> Option<Icon> {
+    Some(match tool {
+        Tool::Pen => Icon::Pen,
+        Tool::Eraser => Icon::Eraser,
+        Tool::Bucket => Icon::Bucket,
+        Tool::Text => Icon::Text,
+        Tool::Selection => Icon::Selection,
+        Tool::Circle => Icon::Circle,
+        Tool::Rect => Icon::Rect,
+        Tool::Diamond => Icon::Diamond,
+        Tool::Line => Icon::Line,
+        Tool::Arrow => Icon::Arrow,
+        Tool::Hand => Icon::Hand,
+        Tool::Note => Icon::Note,
+    })
 }
 
 /// How many rows of a panel fit an output. A row past the edge can be neither clicked nor repainted, and a
@@ -7412,6 +7453,30 @@ mod tests {
             colors_open: false,
             colors_grow: 1.0,
         }
+    }
+
+    /// A drawer tool is still the rail's state: while it is armed the `more` block wears its icon
+    /// and accent, and choosing a rail tool puts the ellipsis back.
+    #[test]
+    fn an_armed_drawer_tool_takes_over_the_more_icon() {
+        let mut rail = rail_for_legend();
+        rail.tool = Tool::Bucket;
+        let more = |rail: &Toolbar| {
+            toolbar_blocks(rail, 1000.0)
+                .into_iter()
+                .find(|block| block.action == Some(ToolbarAction::More))
+                .expect("the more block")
+        };
+        let armed = more(&rail);
+        assert!(matches!(armed.mark, Mark::Icon(Icon::Bucket)));
+        assert!(
+            armed.active,
+            "the drawer block does not show its armed tool"
+        );
+        rail.tool = Tool::Pen;
+        let rest = more(&rail);
+        assert!(matches!(rest.mark, Mark::Icon(Icon::More)));
+        assert!(!rest.active);
     }
 
     #[test]
