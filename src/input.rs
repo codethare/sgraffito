@@ -37,8 +37,8 @@ use crate::canvas::{
     ZOOM_STEP, constrained_drag, grab_at, selected_linear, selection_frame_with,
 };
 use crate::render::{
-    action_card_bounds, action_card_edit_bounds, action_card_move_bounds, closes_panel_on_pick,
-    panel_stays_open, press_dismisses_panel,
+    action_card_bounds, action_card_duplicate_bounds, action_card_edit_bounds,
+    action_card_move_bounds, closes_panel_on_pick, panel_stays_open, press_dismisses_panel,
 };
 
 /// The input method's own log, off unless `SGRAFFITO_IM_TRACE` is set: a commit that does not appear is a
@@ -1002,6 +1002,8 @@ impl App {
         {
             if action_card_edit_bounds(size).contains(x, y) {
                 self.toggle_linear_edit(*key);
+            } else if action_card_duplicate_bounds(size).contains(x, y) {
+                self.duplicate_on(*key);
             } else if action_card_move_bounds(size).contains(x, y) {
                 self.open_target(Some(*key), Target::Move);
             }
@@ -1261,11 +1263,6 @@ impl App {
             }
             ToolbarAction::Redo => {
                 self.redo();
-            }
-            ToolbarAction::Duplicate => {
-                if let Some(key) = acting.or(self.keyboard_focus) {
-                    self.duplicate_on(key);
-                }
             }
             ToolbarAction::Scrim => self.cycle_backdrop(),
             ToolbarAction::Backdrop(mode) => self.set_backdrop(mode),

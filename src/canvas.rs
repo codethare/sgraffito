@@ -177,8 +177,6 @@ pub enum ToolbarAction {
     Undo,
     /// Step the document forward again, like `Ctrl+Shift+Z`. No block shows this one yet.
     Redo,
-    /// Clone the held elements in place, like `Ctrl+D`.
-    Duplicate,
     /// Open or close the drawer of controls that are not used often.
     More,
     /// Switch the edit-mode backdrop off and on.

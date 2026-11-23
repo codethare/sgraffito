@@ -5,8 +5,8 @@ use sgraffito::canvas::{
 };
 use sgraffito::render::{
     DAMAGE_SLACK, DamageRegion, FrameCache, Renderer, Screen, action_card_bounds,
-    action_card_edit_bounds, action_card_move_bounds, buffer_format, cards_bounds, rail_column,
-    toolbar_bounds, transient_bounds, transient_damage,
+    action_card_duplicate_bounds, action_card_edit_bounds, action_card_move_bounds, buffer_format,
+    cards_bounds, rail_column, toolbar_bounds, transient_bounds, transient_damage,
 };
 use wayland_client::protocol::wl_shm::Format;
 
@@ -4000,13 +4000,18 @@ fn a_link_draws_an_underline_and_the_action_card_is_bottom_centred() {
     for size in [(640.0, 480.0), (1920.0, 1080.0)] {
         let card = action_card_bounds(size);
         let edit = action_card_edit_bounds(size);
+        let duplicate = action_card_duplicate_bounds(size);
         let move_ = action_card_move_bounds(size);
         assert!((card.x + card.w / 2.0 - size.0 / 2.0).abs() < 1.0);
         assert!(card.y > size.1 / 2.0);
         assert!((card.y + card.h - (size.1 - 18.0)).abs() < 0.01);
         assert!(card.contains(edit.x + edit.w / 2.0, edit.y + edit.h / 2.0));
+        assert!(card.contains(
+            duplicate.x + duplicate.w / 2.0,
+            duplicate.y + duplicate.h / 2.0
+        ));
         assert!(card.contains(move_.x + move_.w / 2.0, move_.y + move_.h / 2.0));
-        assert!(edit.x < move_.x);
+        assert!(edit.x < duplicate.x && duplicate.x < move_.x);
     }
 }
 
