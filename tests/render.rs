@@ -4063,3 +4063,393 @@ fn a_bucket_fill_paints_the_inside_of_a_closed_shape() {
     );
     assert_eq!(alpha(&buf, w, 20, 20), 0, "the fill leaked outside");
 }
+
+// --- culling and reusable layers ---------------------------------------------------------------
+
+#[test]
+fn off_screen_elements_leave_the_frame_empty() {
+    // Everything is far outside a 200x100 surface. The frame must still clear to the backdrop and
+    // must not paint any of it; a viewport cull is what makes that a cheap no-op.
+    let doc = Board {
+        strokes: vec![line(40_000.0, 20.0, 180.0)],
+        texts: vec![TextItem {
+            x: 50_000.0,
+            y: 50_000.0,
+            color: "#ffffff".into(),
+            size: 18.0,
+            text: "nowhere".into(),
+            link: None,
+        }],
+        shapes: vec![rect_shape([60_000.0, 60_000.0], [60_100.0, 60_100.0])],
+        notes: vec![Note::new(
+            70_000.0,
+            70_000.0,
+            PALETTE[0],
+            "2026/01/01".into(),
+        )],
+    };
+    let (w, h) = (W, H);
+    let mut renderer = Renderer::new();
+    let mut cache = FrameCache::default();
+    let mut buf = buffer(w, h);
+    cached(
+        &mut renderer,
+        &mut cache,
+        &mut buf,
+        w,
+        h,
+        View::default(),
+        &doc,
+        None,
+    );
+    assert_eq!(ink(&buf), 0, "an off-screen document painted the surface");
+}
+
+#[test]
+fn a_partially_visible_element_keeps_its_visible_part() {
+    // The stroke starts five thousand pixels left of the surface and ends inside it, so its paint
+    // box straddles the viewport. Culling must keep it, not discard it as "not fully visible".
+    let doc = ann(vec![line(50.0, -5_000.0, 60.0)], vec![]);
+    let (w, h) = (W, H);
+    let mut renderer = Renderer::new();
+    let mut cache = FrameCache::default();
+    let mut buf = buffer(w, h);
+    cached(
+        &mut renderer,
+        &mut cache,
+        &mut buf,
+        w,
+        h,
+        View::default(),
+        &doc,
+        None,
+    );
+    assert!(
+        (0..60).any(|x| alpha(&buf, w, x, 50) > 0),
+        "the visible tail of the stroke was culled"
+    );
+    assert_eq!(
+        alpha(&buf, w, 100, 50),
+        0,
+        "the stroke reached past its end"
+    );
+
+    // The same stroke shifted the other way: only its left part is on screen.
+    let doc = ann(vec![line(50.0, 140.0, 5_000.0)], vec![]);
+    let mut buf = buffer(w, h);
+    cached(
+        &mut renderer,
+        &mut cache,
+        &mut buf,
+        w,
+        h,
+        View::default(),
+        &doc,
+        None,
+    );
+    assert!(
+        (140..w).any(|x| alpha(&buf, w, x, 50) > 0),
+        "the visible head of the stroke was culled"
+    );
+}
+
+#[test]
+fn an_element_moved_off_screen_leaves_no_stale_ink() {
+    let (w, h) = (W, H);
+    let mut renderer = Renderer::new();
+    let mut cache = FrameCache::default();
+    let mut visible = ann(vec![line(50.0, 20.0, 180.0)], vec![]);
+    let mut buf = buffer(w, h);
+    cached(
+        &mut renderer,
+        &mut cache,
+        &mut buf,
+        w,
+        h,
+        View::default(),
+        &visible,
+        None,
+    );
+    assert!(ink(&buf) > 0);
+
+    visible.strokes[0].points = vec![[20.0, 40_000.0], [180.0, 40_000.0]];
+    let mut moved = buffer(w, h);
+    cached(
+        &mut renderer,
+        &mut cache,
+        &mut moved,
+        w,
+        h,
+        View::default(),
+        &visible,
+        None,
+    );
+    assert_eq!(ink(&moved), 0, "the old position survived in a warm cache");
+}
+
+#[test]
+fn changing_only_a_strokes_endpoint_rerolls_the_same_mark() {
+    // The seed anchors on the first sample, so moving only the last one keeps the seed. A cache
+    // keyed by seed and index would keep drawing the old path; the content key must not.
+    let (w, h) = (W, H);
+    let mut renderer = Renderer::new();
+    let mut cache = FrameCache::default();
+    let mut doc = ann(vec![line(50.0, 20.0, 180.0)], vec![]);
+    let mut first = buffer(w, h);
+    cached(
+        &mut renderer,
+        &mut cache,
+        &mut first,
+        w,
+        h,
+        View::default(),
+        &doc,
+        None,
+    );
+
+    doc.strokes[0].points[1] = [180.0, 85.0];
+    let mut warmed = buffer(w, h);
+    cached(
+        &mut renderer,
+        &mut cache,
+        &mut warmed,
+        w,
+        h,
+        View::default(),
+        &doc,
+        None,
+    );
+
+    let mut cold_cache = FrameCache::default();
+    let mut cold = buffer(w, h);
+    cached(
+        &mut renderer,
+        &mut cold_cache,
+        &mut cold,
+        w,
+        h,
+        View::default(),
+        &doc,
+        None,
+    );
+    assert_ne!(first, warmed, "the cache ignored the new endpoint");
+    assert_eq!(
+        warmed, cold,
+        "a warm sketch cache drew the old endpoint differently"
+    );
+}
+
+#[test]
+fn rotating_a_shape_rerolls_its_mark_from_the_cache() {
+    let (w, h) = (240u32, 200u32);
+    let mut renderer = Renderer::new();
+    let mut cache = FrameCache::default();
+    let mut doc = sole_shape(rect_shape([60.0, 50.0], [180.0, 140.0]));
+    let mut flat = buffer(w, h);
+    cached(
+        &mut renderer,
+        &mut cache,
+        &mut flat,
+        w,
+        h,
+        View::default(),
+        &doc,
+        None,
+    );
+
+    doc.shapes[0].rotate = 0.6;
+    let mut turned = buffer(w, h);
+    cached(
+        &mut renderer,
+        &mut cache,
+        &mut turned,
+        w,
+        h,
+        View::default(),
+        &doc,
+        None,
+    );
+
+    let mut cold_cache = FrameCache::default();
+    let mut cold = buffer(w, h);
+    cached(
+        &mut renderer,
+        &mut cold_cache,
+        &mut cold,
+        w,
+        h,
+        View::default(),
+        &doc,
+        None,
+    );
+    assert_ne!(flat, turned, "the cache ignored the rotation");
+    assert_eq!(
+        turned, cold,
+        "the cached turned mark disagrees with a cold draw"
+    );
+}
+
+#[test]
+fn a_zoomed_frame_reuses_the_marks_without_moving_them() {
+    // The sketch cache holds canvas-space commands, so the view applies at emit time. A warm cache
+    // must therefore agree with a cold one at a different zoom and pan.
+    let (w, h) = (W, H);
+    let mut renderer = Renderer::new();
+    let mut cache = FrameCache::default();
+    let doc = ann(vec![line(50.0, 20.0, 180.0)], vec![]);
+    let mut first = buffer(w, h);
+    cached(
+        &mut renderer,
+        &mut cache,
+        &mut first,
+        w,
+        h,
+        View::default(),
+        &doc,
+        None,
+    );
+
+    let view = View {
+        zoom: 2.0,
+        offset: [-70.0, -35.0],
+    };
+    let mut warm = buffer(w, h);
+    cached(&mut renderer, &mut cache, &mut warm, w, h, view, &doc, None);
+
+    let mut cold_cache = FrameCache::default();
+    let mut cold = buffer(w, h);
+    cached(
+        &mut renderer,
+        &mut cold_cache,
+        &mut cold,
+        w,
+        h,
+        view,
+        &doc,
+        None,
+    );
+    assert_eq!(warm, cold, "the cached mark ignored the zoom");
+}
+
+#[test]
+fn a_reused_backdrop_layer_lays_the_same_wallpaper_under_a_new_document() {
+    // The backdrop is its own layer, so a document change rebuilds the base by copying it. The
+    // result must equal a cold frame that paints the grid from scratch.
+    let (w, h) = (W, H);
+    let mut overlay = Overlay::default();
+    let mut bar = rail();
+    bar.backdrop = Backdrop::Grid;
+    overlay.toolbar = Some(bar);
+
+    let mut renderer = Renderer::new();
+    let mut cache = FrameCache::default();
+    let first = cached_document();
+    let mut primed = buffer(w, h);
+    renderer.render_with_cache(
+        &mut primed,
+        w,
+        h,
+        1.0,
+        1.0,
+        View::default(),
+        &first,
+        &overlay,
+        None,
+        &mut cache,
+        &[],
+    );
+
+    let second = Board {
+        strokes: vec![line(50.0, 40.0, 160.0)],
+        texts: vec![],
+        shapes: vec![],
+        notes: vec![],
+    };
+    let mut warm = buffer(w, h);
+    renderer.render_with_cache(
+        &mut warm,
+        w,
+        h,
+        1.0,
+        1.0,
+        View::default(),
+        &second,
+        &overlay,
+        None,
+        &mut cache,
+        &[],
+    );
+
+    let mut cold_cache = FrameCache::default();
+    let mut cold = buffer(w, h);
+    renderer.render_with_cache(
+        &mut cold,
+        w,
+        h,
+        1.0,
+        1.0,
+        View::default(),
+        &second,
+        &overlay,
+        None,
+        &mut cold_cache,
+        &[],
+    );
+    assert_eq!(
+        warm, cold,
+        "the reused backdrop layer differs from a fresh one"
+    );
+}
+
+#[test]
+fn a_localized_rebuild_with_an_off_screen_element_matches_a_cold_frame() {
+    // The raster is rebuilt with the viewport cull in force. Inside the damaged box it must still
+    // equal a frame drawn from nothing, including the backdrop.
+    let (w, h) = (W, H);
+    let doc = Board {
+        strokes: vec![line(50.0, 20.0, 180.0), line(40_000.0, 20.0, 180.0)],
+        texts: vec![],
+        shapes: vec![],
+        notes: vec![],
+    };
+    let mut renderer = Renderer::new();
+    let mut cache = FrameCache::default();
+    let mut whole = buffer(w, h);
+    cached(
+        &mut renderer,
+        &mut cache,
+        &mut whole,
+        w,
+        h,
+        View::default(),
+        &doc,
+        None,
+    );
+
+    let damage = Rect {
+        x: 10.0,
+        y: 10.0,
+        w: 180.0,
+        h: 80.0,
+    };
+    let mut localized = buffer(w, h);
+    cached(
+        &mut renderer,
+        &mut cache,
+        &mut localized,
+        w,
+        h,
+        View::default(),
+        &doc,
+        Some(damage),
+    );
+    for y in damage.y as u32..(damage.y + damage.h) as u32 {
+        for x in damage.x as u32..(damage.x + damage.w) as u32 {
+            assert_eq!(
+                alpha(&whole, w, x, y),
+                alpha(&localized, w, x, y),
+                "culling changed the rebuilt raster at {x},{y}"
+            );
+        }
+    }
+}

@@ -298,9 +298,11 @@ impl Tool {
     }
 }
 
-/// A connector endpoint bound to a closed shape. `at` is the point on the shape in local
-/// coordinates, where the shape's centre is `(0, 0)` and its half-extents are `1`: the point stays
-/// on that edge when the shape moves, resizes or turns.
+/// A connector endpoint bound to a closed shape. `at` is a point on the shape in local coordinates,
+/// where the shape's centre is `(0, 0)` and its half-extents are `1`: its direction from the centre
+/// is what fixes the point, so the binding stays on the visible outline when the shape moves,
+/// resizes or turns. `Shape::attachment_point` routes that direction onto the real curve or edge,
+/// which keeps a circle's or diamond's binding on the outline rather than at a box corner.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Attachment {
     /// The target shape's stable id. Zero is never a target.
@@ -1399,15 +1401,34 @@ impl Shape {
     /// The point on this shape's outline nearest to `p`, for a closed shape. Lines and arrows have
     /// no interior to attach to. The search runs in the outline's own unrotated frame and the result
     /// is turned back, so a rotated shape is attached to and hit on the outline the user sees.
+    ///
+    /// A box collapsed to a point or a segment has an outline too: its centre, or the point of the
+    /// segment nearest `p`. Without that a zero-height rectangle would report a centre no edge
+    /// passes through.
     pub fn nearest_boundary(&self, p: [f32; 2]) -> Option<[f32; 2]> {
         if !self.kind.is_closed() {
             return None;
         }
         let (centre, half) = self.box_geometry();
-        if half[0] <= f32::EPSILON || half[1] <= f32::EPSILON {
+        if half[0] <= f32::EPSILON && half[1] <= f32::EPSILON {
             return Some(centre);
         }
         let p = self.to_local(p);
+        if half[0] <= f32::EPSILON || half[1] <= f32::EPSILON {
+            // One axis has no extent: the outline is the segment the box still spans.
+            let on = if half[0] <= f32::EPSILON {
+                [
+                    centre[0],
+                    p[1].clamp(centre[1] - half[1], centre[1] + half[1]),
+                ]
+            } else {
+                [
+                    p[0].clamp(centre[0] - half[0], centre[0] + half[0]),
+                    centre[1],
+                ]
+            };
+            return Some(self.to_world(on));
+        }
         let box_ = rect_of(self.from, self.to);
         let hit = match self.kind {
             ShapeKind::Circle => {
@@ -1444,8 +1465,81 @@ impl Shape {
         Some(self.to_world(hit))
     }
 
+    /// The point where the ray from this shape's centre through `aim` meets the outline the user
+    /// sees: a circle or ellipse's curve, a diamond's slanted edge, or a rectangle's side. `None`
+    /// for lines and arrows, which have no outline to bind to.
+    ///
+    /// This is the route a connector end takes when it should leave a shape toward the other end of
+    /// its line: the stored [`Attachment`] keeps only a local direction, so the visible boundary is
+    /// found from it rather than assumed to be the corner of its box.
+    pub fn boundary_toward(&self, aim: [f32; 2]) -> Option<[f32; 2]> {
+        if !self.kind.is_closed() {
+            return None;
+        }
+        let local = self.to_local(aim);
+        Some(self.to_world(self.local_boundary_toward(local)))
+    }
+
+    /// The attachment naming the boundary point on the ray from this shape's centre through `aim`.
+    /// Aim it at a connector's other end to bind an end so the line leaves the shape head-on.
+    pub fn attachment_toward(&self, aim: [f32; 2]) -> Option<Attachment> {
+        self.boundary_toward(aim)
+            .map(|point| self.attachment_at(point))
+    }
+
+    /// The outline point in the unrotated local frame on the ray from the centre through `local`.
+    /// A point at the centre has no direction, so the route falls back to the +x side, the same
+    /// convention `nearest_boundary` uses.
+    fn local_boundary_toward(&self, local: [f32; 2]) -> [f32; 2] {
+        let (centre, half) = self.box_geometry();
+        if half[0] <= f32::EPSILON && half[1] <= f32::EPSILON {
+            return centre;
+        }
+        let d = [local[0] - centre[0], local[1] - centre[1]];
+        if half[0] <= f32::EPSILON || half[1] <= f32::EPSILON {
+            // Collapsed along one axis: the outline is a segment, so aim along its length.
+            return if half[0] <= f32::EPSILON {
+                [
+                    centre[0],
+                    (centre[1] + d[1]).clamp(centre[1] - half[1], centre[1] + half[1]),
+                ]
+            } else {
+                [
+                    (centre[0] + d[0]).clamp(centre[0] - half[0], centre[0] + half[0]),
+                    centre[1],
+                ]
+            };
+        }
+        let (u, v) = (d[0] / half[0], d[1] / half[1]);
+        let (u, v) = if u.abs() <= f32::EPSILON && v.abs() <= f32::EPSILON {
+            (1.0, 0.0)
+        } else {
+            match self.kind {
+                ShapeKind::Circle => {
+                    let len = (u * u + v * v).sqrt();
+                    (u / len, v / len)
+                }
+                // Scale the direction until its larger component reaches the box side: the point
+                // where the ray leaves a rectangle is the first side it crosses.
+                ShapeKind::Rect => {
+                    let t = 1.0 / u.abs().max(v.abs());
+                    (u * t, v * t)
+                }
+                // A diamond's sides are where `|u| + |v| == 1`.
+                ShapeKind::Diamond => {
+                    let t = 1.0 / (u.abs() + v.abs());
+                    (u * t, v * t)
+                }
+                ShapeKind::Line | ShapeKind::Arrow => (1.0, 0.0),
+            }
+        };
+        [centre[0] + u * half[0], centre[1] + v * half[1]]
+    }
+
     /// The attachment that keeps `p`, a point on this shape's outline, on the same local point after
-    /// the shape moves, is resized or is turned.
+    /// the shape moves, is resized or is turned. A point on a rotated outline is mapped back through
+    /// the shape's own angle first, and a box with no extent on an axis stores zero there, which is
+    /// what keeps a collapse from producing an infinite local coordinate.
     pub fn attachment_at(&self, p: [f32; 2]) -> Attachment {
         let p = self.to_local(p);
         let (centre, half) = self.box_geometry();
@@ -1464,13 +1558,21 @@ impl Shape {
         Attachment { shape: self.id, at }
     }
 
-    /// The world point an attachment names: the same local point, on the rotated outline.
+    /// The world point an attachment names: the same local point, on the rotated outline the user
+    /// sees. The stored local point is a direction from the centre, so it is routed onto the real
+    /// outline rather than through the corner of the box: an attachment at a circle's box corner
+    /// lands on the circle, not outside it.
     pub fn attachment_point(&self, attachment: Attachment) -> [f32; 2] {
         let (centre, half) = self.box_geometry();
-        self.to_world([
+        let local = [
             centre[0] + attachment.at[0] * half[0],
             centre[1] + attachment.at[1] * half[1],
-        ])
+        ];
+        if self.kind.is_closed() {
+            self.to_world(self.local_boundary_toward(local))
+        } else {
+            self.to_world(local)
+        }
     }
 
     /// Length of the arrowhead, from the pen width with a floor so a hairline arrow still reads as
@@ -2181,6 +2283,145 @@ impl Gesture {
     }
 }
 
+/// A two-dimensional affine map, stored as the six meaningful entries of a homogeneous 3×3 matrix:
+///
+/// ```text
+/// | m00 m01 m02 |   | x |   | m00*x + m01*y + m02 |
+/// | m10 m11 m12 | * | y | = | m10*x + m11*y + m12 |
+/// |  0   0   1  |   | 1 |   |          1          |
+/// ```
+///
+/// `Transform` is the small, tagged vocabulary a gesture speaks; this is the arithmetic every
+/// mapping goes through, and the value a composed transform becomes. Composition order is
+/// explicit: [`Affine::then`] applies `self` first and its argument second, while `a * b` is the
+/// ordinary matrix product and therefore applies `b` first, then `a`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Affine {
+    /// Row-major 2×3 entries. The hidden third row is always `[0, 0, 1]`.
+    pub m: [[f32; 3]; 3],
+}
+
+impl Affine {
+    /// The map that leaves every point where it is.
+    pub const IDENTITY: Affine = Affine {
+        m: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+    };
+
+    /// A pure translation by `(dx, dy)`.
+    pub fn translation(dx: f32, dy: f32) -> Affine {
+        Affine {
+            m: [[1.0, 0.0, dx], [0.0, 1.0, dy], [0.0, 0.0, 1.0]],
+        }
+    }
+
+    /// Scaling by `(sx, sy)` about `anchor`, which is the point that does not move.
+    pub fn scaling(anchor: [f32; 2], sx: f32, sy: f32) -> Affine {
+        Affine {
+            m: [
+                [sx, 0.0, anchor[0] - anchor[0] * sx],
+                [0.0, sy, anchor[1] - anchor[1] * sy],
+                [0.0, 0.0, 1.0],
+            ],
+        }
+    }
+
+    /// A rotation by `radians` about `pivot`, counter-clockwise in the canvas' y-down frame exactly
+    /// as [`rotate_about`] and the shape outline have always done it.
+    pub fn rotation(pivot: [f32; 2], radians: f32) -> Affine {
+        let (sin, cos) = radians.sin_cos();
+        Affine {
+            m: [
+                [cos, -sin, pivot[0] - pivot[0] * cos + pivot[1] * sin],
+                [sin, cos, pivot[1] - pivot[0] * sin - pivot[1] * cos],
+                [0.0, 0.0, 1.0],
+            ],
+        }
+    }
+
+    /// Where this map sends `p`.
+    pub fn apply(self, p: [f32; 2]) -> [f32; 2] {
+        let m = self.m;
+        [
+            m[0][0] * p[0] + m[0][1] * p[1] + m[0][2],
+            m[1][0] * p[0] + m[1][1] * p[1] + m[1][2],
+        ]
+    }
+
+    /// The map that applies `self` first and `next` second. Read left to right, unlike [`Mul`],
+    /// which is the matrix product: `self.then(next) == next * self`.
+    pub fn then(self, next: Affine) -> Affine {
+        next * self
+    }
+
+    /// The determinant of the linear part: zero for a map that collapses the plane and cannot be
+    /// undone.
+    pub fn determinant(self) -> f32 {
+        self.m[0][0] * self.m[1][1] - self.m[0][1] * self.m[1][0]
+    }
+
+    /// The inverse map, when `self` is invertible. A determinant at or below the float epsilon is
+    /// treated as collapsed, so a near-zero scale does not produce infinities that poison geometry.
+    pub fn inverse(self) -> Option<Affine> {
+        let det = self.determinant();
+        if !det.is_finite() || det.abs() <= f32::EPSILON {
+            return None;
+        }
+        let inv = 1.0 / det;
+        let m = self.m;
+        let a = m[1][1] * inv;
+        let b = -m[0][1] * inv;
+        let c = -m[1][0] * inv;
+        let d = m[0][0] * inv;
+        Some(Affine {
+            m: [
+                [a, b, -(a * m[0][2] + b * m[1][2])],
+                [c, d, -(c * m[0][2] + d * m[1][2])],
+                [0.0, 0.0, 1.0],
+            ],
+        })
+    }
+
+    /// Whether this maps every point to itself, exactly. A rotation by a whole turn is not the
+    /// identity here: its sine is not zero, and the tiny residual is a real (if invisible) move.
+    pub fn is_identity(self) -> bool {
+        let m = self.m;
+        m[0][0] == 1.0
+            && m[0][1] == 0.0
+            && m[0][2] == 0.0
+            && m[1][0] == 0.0
+            && m[1][1] == 1.0
+            && m[1][2] == 0.0
+            && m[2] == [0.0, 0.0, 1.0]
+    }
+}
+
+impl std::ops::Mul for Affine {
+    type Output = Affine;
+
+    /// The matrix product: the map that applies `rhs` first, then `self`. This is the convention
+    /// [`Affine::then`] documents from the other side.
+    fn mul(self, rhs: Affine) -> Affine {
+        let (a, b) = (self.m, rhs.m);
+        // Only the six meaningful entries are computed; the hidden row stays `[0, 0, 1]`, so a
+        // composed map is always a well-formed affine one.
+        Affine {
+            m: [
+                [
+                    a[0][0] * b[0][0] + a[0][1] * b[1][0],
+                    a[0][0] * b[0][1] + a[0][1] * b[1][1],
+                    a[0][0] * b[0][2] + a[0][1] * b[1][2] + a[0][2],
+                ],
+                [
+                    a[1][0] * b[0][0] + a[1][1] * b[1][0],
+                    a[1][0] * b[0][1] + a[1][1] * b[1][1],
+                    a[1][0] * b[0][2] + a[1][1] * b[1][2] + a[1][2],
+                ],
+                [0.0, 0.0, 1.0],
+            ],
+        }
+    }
+}
+
 /// What a gesture does to the geometry it holds. Applied live while the gesture runs and once more
 /// when it is written into the document, so the preview and the commit are the same arithmetic on
 /// the same data and cannot disagree.
@@ -2202,29 +2443,33 @@ impl Transform {
         }
     }
 
-    pub fn point(self, p: [f32; 2]) -> [f32; 2] {
+    /// The affine map this transform applies. Every point mapping goes through it, so a composed
+    /// transform and a single gesture agree by construction.
+    pub fn matrix(self) -> Affine {
         match self {
-            Transform::Translate { dx, dy } => [p[0] + dx, p[1] + dy],
-            Transform::Scale { anchor, sx, sy } => [
-                anchor[0] + (p[0] - anchor[0]) * sx,
-                anchor[1] + (p[1] - anchor[1]) * sy,
-            ],
-            Transform::Turn { pivot, radians } => {
-                let (sin, cos) = radians.sin_cos();
-                let (dx, dy) = (p[0] - pivot[0], p[1] - pivot[1]);
-                [
-                    pivot[0] + dx * cos - dy * sin,
-                    pivot[1] + dx * sin + dy * cos,
-                ]
-            }
+            Transform::Translate { dx, dy } => Affine::translation(dx, dy),
+            Transform::Scale { anchor, sx, sy } => Affine::scaling(anchor, sx, sy),
+            Transform::Turn { pivot, radians } => Affine::rotation(pivot, radians),
         }
+    }
+
+    /// A composed map that applies this transform first and `next` second. The result is an
+    /// [`Affine`] rather than a `Transform` because the tagged enum cannot hold a rotation and a
+    /// scale together; the order is the same as `self.matrix().then(next.matrix())`.
+    pub fn then(self, next: Transform) -> Affine {
+        self.matrix().then(next.matrix())
+    }
+
+    pub fn point(self, p: [f32; 2]) -> [f32; 2] {
+        self.matrix().apply(p)
     }
 
     /// The stroke this makes of one the document holds. The live preview draws this copy and the
     /// commit writes it, so a turned stroke is an ordinary stroke the moment it lands.
     pub fn stroke(self, s: &Stroke) -> Stroke {
+        let matrix = self.matrix();
         Stroke {
-            points: s.points.iter().map(|p| self.point(*p)).collect(),
+            points: s.points.iter().map(|p| matrix.apply(*p)).collect(),
             ..s.clone()
         }
     }
@@ -2266,16 +2511,17 @@ impl Transform {
     /// of being squashed into a new axis-aligned box. Lines and arrows have no such state: turning
     /// their two points is the whole of their turn.
     pub fn shape(self, s: &Shape) -> Shape {
+        let matrix = self.matrix();
         let mut out = Shape {
-            from: self.point(s.from),
-            to: self.point(s.to),
+            from: matrix.apply(s.from),
+            to: matrix.apply(s.to),
             ..s.clone()
         };
-        if let Transform::Turn { pivot, radians } = self
+        if let Transform::Turn { radians, .. } = self
             && s.kind.is_closed()
         {
             let centre = s.centre();
-            let turned = rotate_about(centre, pivot, radians);
+            let turned = matrix.apply(centre);
             out.from = [
                 s.from[0] + turned[0] - centre[0],
                 s.from[1] + turned[1] - centre[1],

@@ -3,6 +3,9 @@
 //! `buf` is a tiny-skia premultiplied RGBA buffer already sized as logical size x scale.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 use cosmic_text::{
     Attrs, Buffer, Color, Cursor, Family, FontSystem, Metrics, Shaping, SwashCache, Wrap,
@@ -1245,11 +1248,65 @@ pub(crate) struct TextLayoutCache {
 #[derive(Default)]
 pub struct FrameCache {
     text: TextLayoutCache,
+    /// The wallpaper behind the document, rasterised once per view and mode. It is independent of
+    /// the document, so a document change rebuilds the base by copying this layer rather than
+    /// repainting the grid or the scrim.
+    backdrop: BackdropLayer,
     base: BaseLayer,
+    /// The hand-drawn path commands of the committed elements, keyed by their full geometry and
+    /// style. A raster rebuild after a pan or a zoom reuses the marks instead of re-rolling them.
+    sketch: SketchCache,
     /// What a frame drawn at a coarser rung is rasterised into before it is blitted up. It is reused
     /// across a gesture rather than allocated per frame, and it is never the cached raster: a soft
     /// document is only ever produced by a frame that repaints the whole surface anyway.
     coarse: Option<Pixmap>,
+}
+
+/// How many distinct hand-drawn elements are remembered, and how many path commands that may add
+/// up to. A mark is a handful of commands per sample, so the budget is the real bound; the entry
+/// cap keeps a whole board of tiny elements from adding a map slot each.
+const SKETCH_CACHE_ENTRIES: usize = 512;
+const SKETCH_CACHE_SEGMENTS: usize = 131_072;
+
+/// The deterministic path commands of hand-drawn elements, keyed by their content. The key is a
+/// *pair* of hashes over the geometry, style and seed: a cache hit can never serve a mark that
+/// another element or an edited endpoint would have produced, and two independent 64-bit hashes
+/// make an accidental collision out of the question. The commands are canvas-space, so the view's
+/// zoom and pan are applied when they are emitted and cannot leave a scaled mark behind.
+#[derive(Default)]
+pub(crate) struct SketchCache {
+    entries: HashMap<SketchKey, SketchEntry>,
+    segments: usize,
+    tick: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct SketchKey {
+    first: u64,
+    second: u64,
+}
+
+struct SketchEntry {
+    segs: Vec<Seg>,
+    /// The request that last used the entry; the smallest is the one evicted first.
+    used: u64,
+}
+
+/// The wallpaper of one surface: the pattern the document is drawn on. Its key is the surface it
+/// was cut for, so a resize, a rescale, a pan or a mode switch refills it and nothing else does.
+#[derive(Default)]
+pub(crate) struct BackdropLayer {
+    pixmap: Option<Pixmap>,
+    key: Option<BackdropKey>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct BackdropKey {
+    width: u32,
+    height: u32,
+    scale: f32,
+    view: View,
+    mode: Backdrop,
 }
 
 /// The committed document of one output, rasterised into a pixmap that every frame fills from.
@@ -1304,6 +1361,153 @@ struct CachedToolbar {
     pill: ToolbarPill,
 }
 
+impl SketchCache {
+    /// The commands for one committed stroke. The key covers every input `sketch::stroke` reads:
+    /// the seed, the width, and each sample. A stroke that gains a sample therefore has a new key,
+    /// which is what keeps a live edit from reusing the mark it grew out of.
+    fn stroke(&mut self, points: &[[f32; 2]], width: f32, seed: u64) -> &[Seg] {
+        let key = sketch_key(|hash| {
+            seed.hash(hash);
+            width.to_bits().hash(hash);
+            points.len().hash(hash);
+            for p in points {
+                p[0].to_bits().hash(hash);
+                p[1].to_bits().hash(hash);
+            }
+        });
+        self.entry(key, || sketch::stroke(points, width, seed))
+    }
+
+    /// The commands for one committed shape. Rotation is part of the key because `sketched_shape`
+    /// turns the commands after generating them; the colour is folded into `seed` and stated again
+    /// so a change of ink cannot ride on a same-seeded mark.
+    fn shape(&mut self, s: &Shape, seed: u64) -> &[Seg] {
+        let key = sketch_key(|hash| {
+            (s.kind as u8).hash(hash);
+            seed.hash(hash);
+            s.color.hash(hash);
+            s.width.to_bits().hash(hash);
+            s.from[0].to_bits().hash(hash);
+            s.from[1].to_bits().hash(hash);
+            s.to[0].to_bits().hash(hash);
+            s.to[1].to_bits().hash(hash);
+            s.rotate.to_bits().hash(hash);
+        });
+        self.entry(key, || sketched_shape(s, seed))
+    }
+
+    fn entry(&mut self, key: SketchKey, build: impl FnOnce() -> Vec<Seg>) -> &[Seg] {
+        self.tick = self.tick.wrapping_add(1);
+        let tick = self.tick;
+        if self.entries.contains_key(&key) {
+            if let Some(entry) = self.entries.get_mut(&key) {
+                entry.used = tick;
+            }
+        } else {
+            let segs = build();
+            let len = segs.len();
+            self.evict_for(len);
+            self.segments = self.segments.saturating_add(len);
+            self.entries.insert(key, SketchEntry { segs, used: tick });
+        }
+        self.entries
+            .get(&key)
+            .map(|entry| entry.segs.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Make room for one more entry, oldest use first. A single mark larger than the whole budget is
+    /// still kept: refusing it would re-roll it on every frame, which is the cost the cache exists to
+    /// avoid.
+    fn evict_for(&mut self, incoming: usize) {
+        while !self.entries.is_empty()
+            && (self.entries.len() >= SKETCH_CACHE_ENTRIES
+                || self.segments.saturating_add(incoming) > SKETCH_CACHE_SEGMENTS)
+        {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.used)
+                .map(|(key, _)| *key)
+            else {
+                break;
+            };
+            if let Some(entry) = self.entries.remove(&oldest) {
+                self.segments = self.segments.saturating_sub(entry.segs.len());
+            }
+        }
+    }
+}
+
+/// Hash the same content into two independent keys. `DefaultHasher` is seeded with fixed keys, so a
+/// key is deterministic for the life of the process, which is all an in-memory cache needs.
+fn sketch_key(content: impl Fn(&mut DefaultHasher)) -> SketchKey {
+    let mut first = DefaultHasher::new();
+    0u8.hash(&mut first);
+    content(&mut first);
+    let mut second = DefaultHasher::new();
+    1u8.hash(&mut second);
+    content(&mut second);
+    SketchKey {
+        first: first.finish(),
+        second: second.finish(),
+    }
+}
+
+impl BackdropLayer {
+    /// Clear `target` and lay the wallpaper on it, copying the cached layer when this surface has
+    /// painted the same view and mode before. `target` and the layer are always the same size: the
+    /// key states it, and a resize refills the layer.
+    fn fill_into(&mut self, target: &mut PixmapMut, scale: f32, view: View, mode: Backdrop) {
+        // A transparent or solid backdrop is one memset: a cached copy costs the same memory
+        // bandwidth while holding a whole surface, so only the periodic patterns are layered. A
+        // switch away from a pattern also releases the layer.
+        if matches!(mode, Backdrop::Transparent | Backdrop::Black) {
+            self.pixmap = None;
+            self.key = None;
+            paint_backdrop(target, mode, scale, view);
+            return;
+        }
+        let (width, height) = (target.width(), target.height());
+        let key = BackdropKey {
+            width,
+            height,
+            scale,
+            view,
+            mode,
+        };
+        if self.key.as_ref() != Some(&key) {
+            let reuse = self
+                .pixmap
+                .as_ref()
+                .is_some_and(|pm| pm.width() == width && pm.height() == height);
+            if !reuse {
+                self.pixmap = Pixmap::new(width, height);
+            }
+            match self.pixmap.as_mut() {
+                Some(pixmap) => {
+                    paint_backdrop(&mut pixmap.as_mut(), mode, scale, view);
+                    self.key = Some(key);
+                }
+                None => {
+                    // No layer to spare: paint the frame's own pixmap, as the uncached path did.
+                    self.key = None;
+                    paint_backdrop(target, mode, scale, view);
+                    return;
+                }
+            }
+        }
+        match self.pixmap.as_ref() {
+            Some(pixmap) if pixmap.width() == width && pixmap.height() == height => {
+                // Both are tightly packed RGBA rows of the same size, so the whole backdrop is one
+                // copy and the document drawing starts from a known background.
+                target.data_mut().copy_from_slice(pixmap.data());
+            }
+            _ => paint_backdrop(target, mode, scale, view),
+        }
+    }
+}
+
 impl TextLayoutCache {
     pub(crate) fn invalidate(&mut self) {
         self.scale = 0.0;
@@ -1349,9 +1553,11 @@ impl TextLayoutCache {
 }
 
 impl FrameCache {
-    /// Drop both caches; the next frame rebuilds them from the document. The daemon calls this
-    /// whenever the document changes, an output is resized or rescaled, or the output's bucket
-    /// changes.
+    /// Drop the caches derived from the document; the next frame rebuilds them. The daemon calls
+    /// this whenever the document changes, an output is resized or rescaled, or the output's bucket
+    /// changes. The backdrop and sketch layers stay: both are keyed by their own content, so they
+    /// cannot serve a stale pixel or mark, and keeping them is what lets a rebuilt document reuse
+    /// the wallpaper and the hand-drawn paths it already paid for.
     pub fn invalidate(&mut self) {
         self.text.invalidate();
         self.base.invalidate();
@@ -1489,7 +1695,13 @@ impl Renderer {
         cache: &mut FrameCache,
         skip: &[ItemId],
     ) {
-        let FrameCache { text, base, coarse } = cache;
+        let FrameCache {
+            text,
+            backdrop: backdrop_layer,
+            base,
+            sketch,
+            coarse,
+        } = cache;
         let screen = Screen { scale, view };
         text.sync(ann.texts.len(), screen.len(1.0));
         let region = match damage {
@@ -1527,7 +1739,16 @@ impl Renderer {
         } else {
             let renderer = &mut *self;
             let built = base.rasterise(key, |target| {
-                renderer.draw_document(target, ann, screen, text, skip, backdrop)
+                renderer.draw_document(
+                    target,
+                    ann,
+                    screen,
+                    &mut *text,
+                    &mut *sketch,
+                    Some(&mut *backdrop_layer),
+                    skip,
+                    backdrop,
+                )
             });
             if built {
                 base.fill(buf, region, width, height);
@@ -1547,29 +1768,55 @@ impl Renderer {
                     ann,
                     screen,
                     text,
+                    sketch,
                     skip,
                     backdrop,
                     quality,
                 );
             } else {
-                self.draw_document(&mut pixmap, ann, screen, text, skip, backdrop);
+                self.draw_document(
+                    &mut pixmap,
+                    ann,
+                    screen,
+                    text,
+                    sketch,
+                    Some(backdrop_layer),
+                    skip,
+                    backdrop,
+                );
             }
         }
-        if let Some(s) = &overlay.stroke {
+        let surface = (width, height);
+        if let Some(s) = &overlay.stroke
+            && s.paint_bounds()
+                .is_some_and(|bounds| Self::in_view(screen, bounds, surface))
+        {
             draw_stroke(&mut pixmap, s, screen, Ink::Sketch(s.seed()));
         }
-        if let Some(s) = &overlay.shape {
+        if let Some(s) = &overlay.shape
+            && Self::in_view(screen, s.paint_bounds(), surface)
+        {
             draw_shape(&mut pixmap, s, screen, Ink::Sketch(s.seed()));
         }
-        if let Some(note) = &overlay.note {
+        if let Some(note) = &overlay.note
+            && Self::in_view(screen, note.bounds().grown(2.0), surface)
+        {
             self.draw_note(&mut pixmap, note, screen, None);
         }
         if let Some(t) = &overlay.text {
             match t.note.and_then(|i| ann.notes.get(i)) {
                 // A note being typed in: its square and its date are content, so the whole note is
                 // drawn with the live text on it rather than the text alone.
-                Some(note) => self.draw_note(&mut pixmap, note, screen, Some(t)),
-                None => self.draw_text(&mut pixmap, &t.item, screen, Some(t), None, None),
+                Some(note) => {
+                    if Self::in_view(screen, note.bounds().grown(2.0), surface) {
+                        self.draw_note(&mut pixmap, note, screen, Some(t));
+                    }
+                }
+                None => {
+                    if Self::in_view(screen, t.item.paint_bounds(), surface) {
+                        self.draw_text(&mut pixmap, &t.item, screen, Some(t), None, None);
+                    }
+                }
             }
         }
         // The elements a live gesture is dragging, at the position the gesture puts them. They are
@@ -1581,41 +1828,39 @@ impl Renderer {
                 match id {
                     ItemId::Stroke(i) => {
                         if let Some(s) = ann.strokes.get(*i) {
+                            let copy = transform.stroke(s);
                             // The seed is the held element's, not the transformed copy's: a mark
                             // that re-rolled as the pointer moved would shimmer under the drag.
-                            draw_stroke(
-                                &mut pixmap,
-                                &transform.stroke(s),
-                                screen,
-                                Ink::Sketch(s.seed()),
-                            );
+                            if copy
+                                .paint_bounds()
+                                .is_some_and(|bounds| Self::in_view(screen, bounds, surface))
+                            {
+                                draw_stroke(&mut pixmap, &copy, screen, Ink::Sketch(s.seed()));
+                            }
                         }
                     }
                     ItemId::Text(i) => {
                         if let Some(item) = ann.texts.get(*i) {
-                            self.draw_text(
-                                &mut pixmap,
-                                &transform.text(item),
-                                screen,
-                                None,
-                                None,
-                                None,
-                            );
+                            let copy = transform.text(item);
+                            if Self::in_view(screen, copy.paint_bounds(), surface) {
+                                self.draw_text(&mut pixmap, &copy, screen, None, None, None);
+                            }
                         }
                     }
                     ItemId::Shape(i) => {
                         if let Some(s) = ann.shapes.get(*i) {
-                            draw_shape(
-                                &mut pixmap,
-                                &transform.shape(s),
-                                screen,
-                                Ink::Sketch(s.seed()),
-                            );
+                            let copy = transform.shape(s);
+                            if Self::in_view(screen, copy.paint_bounds(), surface) {
+                                draw_shape(&mut pixmap, &copy, screen, Ink::Sketch(s.seed()));
+                            }
                         }
                     }
                     ItemId::Note(i) => {
                         if let Some(n) = ann.notes.get(*i) {
-                            self.draw_note(&mut pixmap, &transform.note(n), screen, None);
+                            let copy = transform.note(n);
+                            if Self::in_view(screen, copy.bounds().grown(2.0), surface) {
+                                self.draw_note(&mut pixmap, &copy, screen, None);
+                            }
                         }
                     }
                 }
@@ -1624,10 +1869,17 @@ impl Renderer {
         for connector in &overlay.connectors {
             match connector {
                 LiveConnector::Stroke(_, stroke) => {
-                    draw_stroke(&mut pixmap, stroke, screen, Ink::Sketch(stroke.seed()));
+                    if stroke
+                        .paint_bounds()
+                        .is_some_and(|bounds| Self::in_view(screen, bounds, surface))
+                    {
+                        draw_stroke(&mut pixmap, stroke, screen, Ink::Sketch(stroke.seed()));
+                    }
                 }
                 LiveConnector::Shape(_, shape) => {
-                    draw_shape(&mut pixmap, shape, screen, Ink::Sketch(shape.seed()));
+                    if Self::in_view(screen, shape.paint_bounds(), surface) {
+                        draw_shape(&mut pixmap, shape, screen, Ink::Sketch(shape.seed()));
+                    }
                 }
             }
         }
@@ -1725,27 +1977,45 @@ impl Renderer {
     /// document change, so a frame that reuses the raster shapes no text at all. `backdrop` is the
     /// background the document is drawn on: the whole pixmap is cleared and the pattern painted
     /// first, so this is the one place a frame's background comes from.
+    #[allow(clippy::too_many_arguments)]
     fn draw_document(
         &mut self,
         pixmap: &mut PixmapMut,
         ann: &Board,
         screen: Screen,
         text: &mut TextLayoutCache,
+        sketch: &mut SketchCache,
+        backdrop_layer: Option<&mut BackdropLayer>,
         skip: &[ItemId],
         backdrop: Backdrop,
     ) {
-        paint_backdrop(pixmap, backdrop, screen.scale, screen.view);
+        // The backdrop is its own reusable layer. Without one (the coarse rung) it is painted here,
+        // which is what the uncached path always did.
+        match backdrop_layer {
+            Some(layer) => layer.fill_into(pixmap, screen.scale, screen.view, backdrop),
+            None => paint_backdrop(pixmap, backdrop, screen.scale, screen.view),
+        }
+        let surface = (pixmap.width(), pixmap.height());
         for (index, s) in ann.strokes.iter().enumerate() {
             if skip.contains(&ItemId::Stroke(index)) {
                 continue;
             }
-            draw_stroke(pixmap, s, screen, Ink::Sketch(s.seed()));
+            let Some(bounds) = s.paint_bounds() else {
+                continue;
+            };
+            if !Self::in_view(screen, bounds, surface) {
+                continue;
+            }
+            draw_stroke_cached(pixmap, s, screen, sketch);
         }
         for (index, s) in ann.shapes.iter().enumerate() {
             if skip.contains(&ItemId::Shape(index)) {
                 continue;
             }
-            draw_shape(pixmap, s, screen, Ink::Sketch(s.seed()));
+            if !Self::in_view(screen, s.paint_bounds(), surface) {
+                continue;
+            }
+            draw_shape_cached(pixmap, s, screen, sketch);
         }
         for (index, item) in ann.texts.iter().enumerate() {
             // The box under edit is the overlay's, and a box a gesture is dragging is drawn with
@@ -1753,6 +2023,9 @@ impl Renderer {
             // frame paints over it. A live text that has become shorter would otherwise leave the
             // committed glyphs behind.
             if skip.contains(&ItemId::Text(index)) {
+                continue;
+            }
+            if !Self::in_view(screen, item.paint_bounds(), surface) {
                 continue;
             }
             let size = screen.len(item.size);
@@ -1770,8 +2043,27 @@ impl Renderer {
             if skip.contains(&ItemId::Note(index)) {
                 continue;
             }
+            // The square is exact, but the border is stroked along it: a hairline may reach past.
+            if !Self::in_view(screen, note.bounds().grown(2.0), surface) {
+                continue;
+            }
             self.draw_note(pixmap, note, screen, None);
         }
+    }
+
+    /// Whether a canvas-space paint box can contribute a pixel to a surface of `surface` device
+    /// pixels. The margin covers anti-aliasing and the half-hairline a stroked edge may add, so a
+    /// box that only touches the surface still draws.
+    fn in_view(screen: Screen, bounds: Rect, surface: (u32, u32)) -> bool {
+        let viewport = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: surface.0 as f32,
+            h: surface.1 as f32,
+        };
+        screen
+            .rect(bounds)
+            .intersects(viewport.grown(2.0 * screen.scale))
     }
 
     /// Draw the document at a coarser rung and scale it up into `target`, which is what a moving
@@ -1792,6 +2084,7 @@ impl Renderer {
         ann: &Board,
         screen: Screen,
         text: &mut TextLayoutCache,
+        sketch: &mut SketchCache,
         skip: &[ItemId],
         backdrop: Backdrop,
         quality: f32,
@@ -1801,7 +2094,7 @@ impl Renderer {
         let factor = (1.0 / quality.max(f32::EPSILON)).round().max(1.0) as u32;
         let (tw, th) = (target.width(), target.height());
         if factor < 2 {
-            self.draw_document(target, ann, screen, text, skip, backdrop);
+            self.draw_document(target, ann, screen, text, sketch, None, skip, backdrop);
             return;
         }
         let (w, h) = (tw.div_ceil(factor), th.div_ceil(factor));
@@ -1813,7 +2106,7 @@ impl Renderer {
         }
         let Some(pixmap) = coarse.as_mut() else {
             // No pixmap to spare: the frame is drawn at full resolution rather than left stale.
-            self.draw_document(target, ann, screen, text, skip, backdrop);
+            self.draw_document(target, ann, screen, text, sketch, None, skip, backdrop);
             return;
         };
         // The same document on a smaller surface: the *view* is what shrinks, once — a device pixel is
@@ -1834,6 +2127,8 @@ impl Renderer {
             ann,
             coarse_screen,
             text,
+            sketch,
+            None,
             skip,
             backdrop,
         );
@@ -5102,6 +5397,22 @@ fn arrow_head(s: &Shape) -> Option<[[f32; 2]; 3]> {
 const HEAD_SALT: u64 = 0x9ddf_ea08_eb38_2d69;
 
 fn draw_shape(pixmap: &mut PixmapMut, s: &Shape, screen: Screen, ink: Ink) {
+    draw_shape_with(pixmap, s, screen, ink, None);
+}
+
+/// The committed path: the same drawing, with the hand-drawn commands taken from the frame's
+/// content-keyed cache instead of being generated again.
+fn draw_shape_cached(pixmap: &mut PixmapMut, s: &Shape, screen: Screen, sketch: &mut SketchCache) {
+    draw_shape_with(pixmap, s, screen, Ink::Sketch(s.seed()), Some(sketch));
+}
+
+fn draw_shape_with(
+    pixmap: &mut PixmapMut,
+    s: &Shape,
+    screen: Screen,
+    ink: Ink,
+    sketch: Option<&mut SketchCache>,
+) {
     if s.is_empty() {
         return;
     }
@@ -5141,7 +5452,11 @@ fn draw_shape(pixmap: &mut PixmapMut, s: &Shape, screen: Screen, ink: Ink) {
         // traced passes instead would fill six slivers rather than one head.
         fill_arrow_head(pixmap, s, screen, &paint);
     }
-    let Some(path) = sketch_path(&sketched_shape(s, seed), screen) else {
+    let path = match sketch {
+        Some(cache) => sketch_path(cache.shape(s, seed), screen),
+        None => sketch_path(&sketched_shape(s, seed), screen),
+    };
+    let Some(path) = path else {
         return;
     };
     pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
@@ -5240,6 +5555,27 @@ fn draw_exact_shape(
 }
 
 fn draw_stroke(pixmap: &mut PixmapMut, s: &Stroke, screen: Screen, ink: Ink) {
+    draw_stroke_with(pixmap, s, screen, ink, None);
+}
+
+/// The committed path: the same drawing, with the hand-drawn commands taken from the frame's
+/// content-keyed cache instead of being generated again.
+fn draw_stroke_cached(
+    pixmap: &mut PixmapMut,
+    s: &Stroke,
+    screen: Screen,
+    sketch: &mut SketchCache,
+) {
+    draw_stroke_with(pixmap, s, screen, Ink::Sketch(s.seed()), Some(sketch));
+}
+
+fn draw_stroke_with(
+    pixmap: &mut PixmapMut,
+    s: &Stroke,
+    screen: Screen,
+    ink: Ink,
+    sketch: Option<&mut SketchCache>,
+) {
     let c = parse_hex(&s.color);
     let mut paint = Paint::default();
     paint.set_color_rgba8(c[0], c[1], c[2], c[3]);
@@ -5267,7 +5603,10 @@ fn draw_stroke(pixmap: &mut PixmapMut, s: &Stroke, screen: Screen, ink: Ink) {
         points => {
             let path = match ink {
                 Ink::Precise => smoothed_path(points, screen),
-                Ink::Sketch(seed) => sketch_path(&sketch::stroke(points, s.width, seed), screen),
+                Ink::Sketch(seed) => match sketch {
+                    Some(cache) => sketch_path(cache.stroke(points, s.width, seed), screen),
+                    None => sketch_path(&sketch::stroke(points, s.width, seed), screen),
+                },
             };
             let Some(path) = path else {
                 return;

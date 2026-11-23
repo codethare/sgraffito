@@ -2393,3 +2393,334 @@ fn a_closed_shape_contains_its_interior() {
     let line = shape(ShapeKind::Line, [100.0, 100.0], [200.0, 200.0]);
     assert!(!line.contains([150.0, 150.0]));
 }
+
+// --- affine matrices and boundary bindings ---------------------------------------------------
+
+#[test]
+fn an_affine_matrix_maps_points_composes_and_inverts() {
+    use std::f32::consts::FRAC_PI_2;
+
+    use sgraffito::canvas::Affine;
+
+    let p = [3.0, 4.0];
+    assert!(Affine::IDENTITY.is_identity());
+    assert_eq!(Affine::IDENTITY.apply(p), p);
+    assert_eq!(Affine::IDENTITY.determinant(), 1.0);
+    assert!(Affine::IDENTITY.inverse().unwrap().is_identity());
+
+    let moved = Affine::translation(10.0, -5.0);
+    assert!(!moved.is_identity());
+    assert_eq!(moved.apply(p), [13.0, -1.0]);
+    assert_eq!(moved.determinant(), 1.0);
+    assert!(close(moved.inverse().unwrap().apply(moved.apply(p)), p));
+
+    let scaled = Affine::scaling([1.0, 2.0], 2.0, 4.0);
+    assert_eq!(scaled.apply([1.0, 2.0]), [1.0, 2.0]);
+    assert_eq!(scaled.apply([2.0, 3.0]), [3.0, 6.0]);
+    assert_eq!(scaled.determinant(), 8.0);
+    assert!(close(scaled.inverse().unwrap().apply(scaled.apply(p)), p));
+
+    let turned = Affine::rotation([0.0, 0.0], FRAC_PI_2);
+    assert!(close(turned.apply([2.0, 0.0]), [0.0, 2.0]));
+    assert_eq!(turned.determinant(), 1.0);
+
+    // Collapsing the plane has no inverse.
+    assert!(Affine::scaling([0.0, 0.0], 0.0, 1.0).inverse().is_none());
+    assert!(Affine::scaling([0.0, 0.0], 0.0, 1.0).determinant().abs() < f32::EPSILON);
+}
+
+#[test]
+fn composition_order_is_explicit_and_deterministic() {
+    use std::f32::consts::FRAC_PI_2;
+
+    use sgraffito::canvas::{Affine, Transform};
+
+    let p = [3.0, 4.0];
+    let turn = Affine::rotation([0.0, 0.0], FRAC_PI_2);
+    let scale = Affine::scaling([0.0, 0.0], 2.0, 3.0);
+
+    // `then` reads left to right: the receiver runs first.
+    let turn_then_scale = turn.then(scale);
+    assert!(close(turn_then_scale.apply(p), scale.apply(turn.apply(p))));
+    // The matrix product reads right to left, so `scale * turn` is the same map.
+    assert!(close((scale * turn).apply(p), turn_then_scale.apply(p)));
+    assert!(close((turn * scale).apply(p), scale.then(turn).apply(p)));
+    // The two orders are genuinely different maps.
+    assert!(!close(turn_then_scale.apply(p), scale.then(turn).apply(p)));
+    // The composed map has the product determinant and inverts as a whole.
+    assert!((turn_then_scale.determinant() - 6.0).abs() < 1e-4);
+    let back = turn_then_scale.inverse().unwrap();
+    assert!(close(back.apply(turn_then_scale.apply(p)), p));
+
+    // The enum's `then` follows the same order as its matrices.
+    let moved = Transform::Translate { dx: 10.0, dy: -2.0 };
+    let turned = Transform::Turn {
+        pivot: [1.0, 2.0],
+        radians: FRAC_PI_2,
+    };
+    let composed = moved.then(turned);
+    assert!(close(composed.apply(p), turned.point(moved.point(p))));
+    assert!(close(
+        composed.apply(p),
+        (turned.matrix() * moved.matrix()).apply(p)
+    ));
+    assert!(close(
+        composed.apply(p),
+        moved.matrix().then(turned.matrix()).apply(p)
+    ));
+}
+
+#[test]
+fn a_rotated_binding_stays_on_the_outline_it_draws() {
+    use std::f32::consts::FRAC_PI_3;
+
+    use sgraffito::canvas::{Attachment, Transform};
+
+    for kind in [ShapeKind::Circle, ShapeKind::Rect, ShapeKind::Diamond] {
+        let mut base = shape(kind, [40.0, -10.0], [240.0, 110.0]);
+        base.id = 9;
+        let turned = Transform::Turn {
+            pivot: [10.0, 20.0],
+            radians: FRAC_PI_3,
+        }
+        .shape(&base);
+        for at in [[1.0, 1.0], [-1.0, 0.4], [0.3, -1.0]] {
+            let point = turned.attachment_point(Attachment {
+                shape: turned.id,
+                at,
+            });
+            let on_outline = turned.nearest_boundary(point).expect("no outline");
+            assert!(
+                close(point, on_outline),
+                "{kind:?} at {at:?} landed at {point:?}, nearest outline point {on_outline:?}"
+            );
+            // Binding the world point back and mapping it again is a fixed point.
+            let again = turned.attachment_point(turned.attachment_at(point));
+            assert!(
+                close(point, again),
+                "{kind:?} at {at:?} drifted: {point:?} -> {again:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_box_corner_binding_is_pulled_onto_a_circle_or_diamond() {
+    use sgraffito::canvas::Attachment;
+
+    let circle = shape(ShapeKind::Circle, [0.0, 0.0], [100.0, 100.0]);
+    let corner = circle.attachment_point(Attachment {
+        shape: circle.id,
+        at: [1.0, 1.0],
+    });
+    let radius = (corner[0] - 50.0).hypot(corner[1] - 50.0);
+    assert!((radius - 50.0).abs() < 1e-3, "circle corner at {corner:?}");
+    assert!(close(circle.nearest_boundary(corner).unwrap(), corner));
+
+    let diamond = shape(ShapeKind::Diamond, [0.0, 0.0], [100.0, 100.0]);
+    let corner = diamond.attachment_point(Attachment {
+        shape: diamond.id,
+        at: [1.0, 1.0],
+    });
+    assert!(close(corner, [75.0, 75.0]), "diamond corner at {corner:?}");
+    assert!(close(diamond.nearest_boundary(corner).unwrap(), corner));
+}
+
+#[test]
+fn a_connector_end_can_route_toward_another_point() {
+    use std::f32::consts::FRAC_PI_2;
+
+    use sgraffito::canvas::Transform;
+
+    let circle = shape(ShapeKind::Circle, [0.0, 0.0], [100.0, 100.0]);
+    let right = circle.attachment_toward([500.0, 50.0]).unwrap();
+    assert!(close(right.at, [1.0, 0.0]), "aimed at {:?}", right.at);
+    assert!(close(circle.attachment_point(right), [100.0, 50.0]));
+
+    let down = circle.attachment_toward([50.0, 500.0]).unwrap();
+    assert!(close(circle.attachment_point(down), [50.0, 100.0]));
+
+    let turned = Transform::Turn {
+        pivot: [50.0, 50.0],
+        radians: FRAC_PI_2,
+    }
+    .shape(&circle);
+    let bound = turned.attachment_toward([50.0, 500.0]).unwrap();
+    // The aim is a world point, so the route still lands on the world-down side; only the stored
+    // local coordinates turn with the shape.
+    assert!(
+        close(turned.attachment_point(bound), [50.0, 100.0]),
+        "the route did not follow the world aim"
+    );
+
+    let line = shape(ShapeKind::Line, [0.0, 0.0], [10.0, 10.0]);
+    assert!(line.attachment_toward([1.0, 1.0]).is_none());
+}
+
+#[test]
+fn a_collapsed_box_keeps_its_binding_on_the_segment_it_draws() {
+    use sgraffito::canvas::Transform;
+
+    // Zero height: the outline is the segment from (0, 50) to (100, 50).
+    let flat = shape(ShapeKind::Rect, [0.0, 50.0], [100.0, 50.0]);
+    let nearest = flat.nearest_boundary([40.0, 90.0]).unwrap();
+    assert_eq!(nearest, [40.0, 50.0]);
+    let attachment = flat.attachment_at(nearest);
+    assert_eq!(attachment.at, [-0.2, 0.0]);
+    assert!(close(flat.attachment_point(attachment), nearest));
+
+    // Collapsed to a point: every route reports that point.
+    let dot = shape(ShapeKind::Circle, [10.0, 10.0], [10.0, 10.0]);
+    assert_eq!(dot.nearest_boundary([99.0, 99.0]).unwrap(), [10.0, 10.0]);
+    let attachment = dot.attachment_at([10.0, 10.0]);
+    assert_eq!(attachment.at, [0.0, 0.0]);
+    assert_eq!(dot.attachment_point(attachment), [10.0, 10.0]);
+
+    // A turned flat rectangle still lands on the segment it draws.
+    let turned = Transform::Turn {
+        pivot: [50.0, 50.0],
+        radians: std::f32::consts::FRAC_PI_2,
+    }
+    .shape(&flat);
+    assert!(close(
+        turned.nearest_boundary([100.0, 60.0]).unwrap(),
+        [50.0, 60.0]
+    ));
+    let attachment = turned.attachment_at([50.0, 60.0]);
+    assert!(close(turned.attachment_point(attachment), [50.0, 60.0]));
+}
+
+#[test]
+fn an_attached_connector_stays_on_the_outline_through_moves_scales_turns_and_copies() {
+    use sgraffito::canvas::{Attachment, Shape, Transform};
+
+    let mut board = Board::default();
+    board.add_shape(shape(ShapeKind::Circle, [0.0, 0.0], [100.0, 100.0]));
+    let target = board.shapes[0].id;
+    board.add_shape(Shape {
+        kind: ShapeKind::Line,
+        color: "#000000".into(),
+        width: 2.0,
+        from: [50.0, 50.0],
+        to: [300.0, 50.0],
+        rotate: 0.0,
+        id: 0,
+        attach: [
+            Some(Attachment {
+                shape: target,
+                at: [1.0, -1.0],
+            }),
+            None,
+        ],
+        fill: None,
+    });
+
+    let on_outline = |board: &Board| {
+        let (circle, line) = (&board.shapes[0], &board.shapes[1]);
+        let nearest = circle.nearest_boundary(line.from).expect("no outline");
+        assert!(
+            close(line.from, nearest),
+            "the connector end {:?} left the outline (nearest {nearest:?})",
+            line.from
+        );
+        let (centre, half) = circle.box_geometry();
+        assert!(
+            (half[0] - half[1]).abs() < 1e-3,
+            "the fixture stays a circle: {half:?}"
+        );
+        let (dx, dy) = (line.from[0] - centre[0], line.from[1] - centre[1]);
+        assert!(
+            (dx.hypot(dy) - half[0]).abs() < 1e-2,
+            "the end is not on the circle's rim"
+        );
+    };
+
+    board.sync_connectors();
+    on_outline(&board);
+    assert_eq!(
+        board.shapes[1].attach[0].unwrap().at,
+        [1.0, -1.0],
+        "sync keeps the local direction"
+    );
+
+    for transform in [
+        Transform::Translate {
+            dx: 40.0,
+            dy: -15.0,
+        },
+        Transform::Turn {
+            pivot: [0.0, 0.0],
+            radians: 0.7,
+        },
+        Transform::Scale {
+            anchor: [20.0, 30.0],
+            sx: 1.7,
+            sy: 1.7,
+        },
+    ] {
+        board.shapes[0] = transform.shape(&board.shapes[0]);
+        board.sync_connectors();
+        on_outline(&board);
+    }
+
+    // A copy gets a fresh shape id, a re-pointed attachment and the same rim binding.
+    let (copies, _) = board.duplicate(&[ItemId::Shape(0), ItemId::Shape(1)]);
+    board.sync_connectors();
+    let copied_circle = match copies[0] {
+        ItemId::Shape(index) => &board.shapes[index],
+        _ => unreachable!(),
+    };
+    let copied_line = match copies[1] {
+        ItemId::Shape(index) => &board.shapes[index],
+        _ => unreachable!(),
+    };
+    assert_eq!(
+        copied_line.attach[0].map(|attachment| attachment.shape),
+        Some(copied_circle.id),
+        "the copied connector still points at the original circle"
+    );
+    let nearest = copied_circle.nearest_boundary(copied_line.from).unwrap();
+    assert!(close(copied_line.from, nearest));
+}
+
+#[test]
+fn a_reverse_snap_to_a_circle_puts_the_joint_on_the_rim() {
+    use sgraffito::canvas::{Attachment, Shape, Transform};
+
+    let mut board = Board::default();
+    board.add_shape(shape(ShapeKind::Circle, [0.0, 0.0], [100.0, 100.0]));
+    let target = board.shapes[0].id;
+    board.add_shape(Shape {
+        kind: ShapeKind::Line,
+        color: "#000000".into(),
+        width: 2.0,
+        from: [100.0, 25.0],
+        to: [300.0, 25.0],
+        rotate: 0.0,
+        id: 0,
+        attach: [None, None],
+        fill: None,
+    });
+
+    let snap = board
+        .reverse_snap(
+            &[ItemId::Shape(0)],
+            Transform::Translate { dx: 2.0, dy: 0.0 },
+            12.0,
+        )
+        .expect("the free end did not attract the circle");
+    assert_eq!(snap.connector, ItemId::Shape(1));
+    assert_eq!(snap.end, 0);
+    assert_eq!(snap.attachment.shape, target);
+
+    // What the release does: move the shape, write the link, then seat both ends.
+    board.shapes[0] = snap.transform.shape(&board.shapes[0]);
+    board.shapes[1].attach[snap.end] = Some(Attachment {
+        shape: snap.attachment.shape,
+        at: snap.attachment.at,
+    });
+    board.sync_connectors();
+    let end = board.shapes[1].from;
+    let nearest = board.shapes[0].nearest_boundary(end).unwrap();
+    assert!(close(end, nearest), "the joint is not on the rim: {end:?}");
+}
