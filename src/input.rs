@@ -1023,7 +1023,7 @@ impl App {
                 if let Some(out) = self.outputs.get_mut(key) {
                     let width = self.pen_width;
                     let (first, attach) = match pen_snap {
-                        Some((attachment, point)) => (point, [Some(attachment), None]),
+                        Some((attachment, point)) => (point, [attachment, None]),
                         None => (canvas, [None, None]),
                     };
                     out.overlay.stroke = Some(Stroke {
@@ -1120,7 +1120,7 @@ impl App {
                     return;
                 };
                 let (point, attach) = match snap {
-                    Some((attachment, point)) => (point, Some(attachment)),
+                    Some((attachment, point)) => (point, attachment),
                     None => (canvas, None),
                 };
                 stroke.attach[1] = attach;
@@ -1143,7 +1143,7 @@ impl App {
                 if matches!(shape.kind, ShapeKind::Line | ShapeKind::Arrow) {
                     match snap {
                         Some((attachment, point)) => {
-                            shape.attach[1] = Some(attachment);
+                            shape.attach[1] = attachment;
                             to = point;
                         }
                         None => shape.attach[1] = None,

@@ -14,9 +14,9 @@ use tiny_skia::{
 use wayland_client::protocol::wl_shm::Format;
 
 use crate::canvas::{
-    Backdrop, Board, Handle, ItemId, LiveConnector, NOTE_DATE_SIZE, NOTE_RADIUS, Note, Overlay,
-    Rect, SELECT_HANDLE, SELECT_ROTATE_GAP, Shape, ShapeKind, Stroke, TextItem, TextOverlay, Tool,
-    Toolbar, ToolbarAction, View, note_ink, parse_hex, rect_of, rotate_handle,
+    Backdrop, Board, GRID_SPACING, Handle, ItemId, LiveConnector, NOTE_DATE_SIZE, NOTE_RADIUS,
+    Note, Overlay, Rect, SELECT_HANDLE, SELECT_ROTATE_GAP, Shape, ShapeKind, Stroke, TextItem,
+    TextOverlay, Tool, Toolbar, ToolbarAction, View, note_ink, parse_hex, rect_of, rotate_handle,
     selection_frame_with,
 };
 use crate::config;
@@ -104,8 +104,7 @@ const SCRIM_FILL: &str = "#000000e6";
 /// The scrim's alpha, for the tests that have to tell content from the scrim a frame is painted on.
 pub const SCRIM_ALPHA: u8 = 0xCC;
 /// A 24-point cell, the common dot-grid spacing in drawing and note products (and three 8-point
-/// steps); the line is one logical pixel, the dot two.
-const BACKDROP_SPACING: f32 = 24.0;
+/// steps); the line is one logical pixel, the dot two. The spacing itself is shared with the snap.
 const BACKDROP_LINE: f32 = 1.0;
 const BACKDROP_DOT: f32 = 2.0;
 /// Mid-grey at partial opacity: visible over a light wallpaper and over a dark one, without
@@ -1199,7 +1198,7 @@ fn paint_backdrop(pixmap: &mut PixmapMut, mode: Backdrop, scale: f32, view: View
             let c = parse_hex(BACKDROP_GRID_COLOR);
             let color = Color::rgba(c[0], c[1], c[2], c[3]);
             let (w, h) = (pixmap.width() as f32, pixmap.height() as f32);
-            let spacing = (BACKDROP_SPACING * view.zoom * scale).max(1.0);
+            let spacing = (GRID_SPACING * view.zoom * scale).max(1.0);
             let line = (BACKDROP_LINE * scale).max(1.0);
             let phase = |offset: f32| (offset * scale).rem_euclid(spacing);
             let mut x = phase(view.offset[0]);
@@ -1217,7 +1216,7 @@ fn paint_backdrop(pixmap: &mut PixmapMut, mode: Backdrop, scale: f32, view: View
             let c = parse_hex(BACKDROP_DOT_COLOR);
             let color = Color::rgba(c[0], c[1], c[2], c[3]);
             let (w, h) = (pixmap.width() as f32, pixmap.height() as f32);
-            let spacing = (BACKDROP_SPACING * view.zoom * scale).max(1.0);
+            let spacing = (GRID_SPACING * view.zoom * scale).max(1.0);
             let dot = (BACKDROP_DOT * scale).max(1.0);
             // A dot sits at the middle of each canvas cell, so its phase carries the half-cell.
             let phase = |offset: f32| (offset * scale + spacing / 2.0).rem_euclid(spacing);

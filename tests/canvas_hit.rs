@@ -2025,6 +2025,74 @@ fn a_shift_press_inside_the_frame_starts_nothing() {
     );
 }
 
+/// The drawing snap also follows freehand polylines and, as a last resort, the grid. Content wins
+/// over a grid intersection that is closer, and a closed shape still carries its attachment.
+#[test]
+fn drawing_snaps_to_polylines_grid_and_closed_shapes() {
+    use sgraffito::canvas::{GRID_SPACING, GridSnap, ShapeKind};
+    let grid = GridSnap {
+        step: GRID_SPACING,
+        offset: [0.0, 0.0],
+    };
+
+    let mut board = Board {
+        strokes: vec![Stroke {
+            color: "#e01b24".into(),
+            width: 3.0,
+            points: vec![[0.0, 0.0], [100.0, 0.0]],
+            attach: [None, None],
+        }],
+        ..Default::default()
+    };
+    let on_polyline = board
+        .snap_drawing([50.0, 5.0], 12.0, Some(grid))
+        .expect("the freehand polyline did not snap");
+    assert_eq!(on_polyline.point, [50.0, 0.0]);
+    assert_eq!(on_polyline.attachment, None);
+
+    // A three-sample stroke is drawn as a quadratic through its next midpoint; the snap follows
+    // that curve rather than the straight chord, so it lands above y=0.
+    let curved = Board {
+        strokes: vec![Stroke {
+            color: "#e01b24".into(),
+            width: 3.0,
+            points: vec![[0.0, 0.0], [100.0, 0.0], [100.0, 100.0]],
+            attach: [None, None],
+        }],
+        ..Default::default()
+    }
+    .snap_drawing([50.0, 5.0], 12.0, None)
+    .expect("the curved stroke did not snap");
+    assert!(curved.point[1] > 1.0 && curved.point[1] < 8.0);
+
+    let on_grid = Board::default()
+        .snap_drawing([25.0, 23.0], 12.0, Some(grid))
+        .expect("the grid did not snap");
+    assert_eq!(on_grid.point, [24.0, 24.0]);
+    assert_eq!(on_grid.attachment, None);
+    assert!(
+        Board::default()
+            .snap_drawing([25.0, 23.0], 12.0, None)
+            .is_none(),
+        "an empty board without a grid snapped to nothing"
+    );
+    let dots = GridSnap {
+        step: GRID_SPACING,
+        offset: [GRID_SPACING / 2.0; 2],
+    };
+    let on_dot = Board::default()
+        .snap_drawing([13.0, 11.0], 12.0, Some(dots))
+        .expect("the dot lattice did not snap");
+    assert_eq!(on_dot.point, [12.0, 12.0]);
+
+    board.add_shape(shape(ShapeKind::Rect, [200.0, 0.0], [300.0, 100.0]));
+    let on_shape = board
+        .snap_drawing([195.0, 5.0], 12.0, Some(grid))
+        .expect("the shape did not snap");
+    assert!(on_shape.attachment.is_some());
+    assert_eq!(on_shape.point, [200.0, 5.0]);
+}
+
 #[test]
 fn a_connector_snaps_to_a_shape_and_follows_both_endpoints() {
     use sgraffito::canvas::{Shape, ShapeKind};

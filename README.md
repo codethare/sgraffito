@@ -183,7 +183,7 @@ Errors and state changes go to stderr and to `$XDG_STATE_HOME/sgraffito/sgraffit
 ## Connectors
 
 - While a line, arrow or pen is snapped, every target shape's outline is repainted in the accent colour and each attached end gets a solid accent anchor dot. The feedback follows the connector while it is drawn and while an attached shape is dragged.
-- A `line`, `arrow` or `pen` end that comes within 12 logical pixels of a `circle`, `rectangle` or `diamond` snaps to the nearest point on that shape's outline while it is drawn.
+- A `line`, `arrow` or `pen` end that comes within 12 logical pixels of a `circle`, `rectangle` or `diamond` snaps to the nearest point on that shape's outline while it is drawn and stays attached. The same magnet follows the quad-through-midpoints curves of freehand strokes and the straight polylines of open lines/arrows; those snaps land exactly on the drawn path but carry no shape id, so they do not follow later moves. With the grid backdrop active its intersections are the fallback, and with the dot backdrop the dot centres are; neither competes with a drawing that is within reach.
 - The magnet also works the other way: dragging a circle, rectangle or diamond with `select` near a free `line`, `arrow` or `pen` end pulls the shape onto that end and leaves the connector attached when the drag is released.
 - With `select`, dragging a connected shape stretches every attached connector live, even when the connector is not selected. Both ends stay on their shapes, so a line between two shapes follows whichever end moved.
 - Attachments are saved with stable shape ids; deleting a shape clears the ends that pointed at it, and copying or moving shapes remaps their connectors to the copies.

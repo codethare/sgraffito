@@ -336,7 +336,26 @@ pub struct ReverseSnap {
 
 /// How close a pointer must come to a closed shape, in logical pixels, before a connector end
 /// sticks to it.
+/// One snap decision for a connector or pen end: the point it should land on, and the shape
+/// attachment when that point is on a closed shape. Strokes, open lines and the grid snap without
+/// an attachment because they have no stable shape id to follow.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DrawSnap {
+    pub point: [f32; 2],
+    pub attachment: Option<Attachment>,
+}
+
 pub const SNAP_RADIUS: f32 = 12.0;
+/// The repeating distance of the backdrop's grid and dot matrix, and therefore the grid snap.
+pub const GRID_SPACING: f32 = 24.0;
+
+/// A lattice for the fallback snap. The dots sit at the middle of each cell, so their lattice is
+/// the grid shifted by half a cell; passing the phase here keeps the snap on the visible marks.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GridSnap {
+    pub step: f32,
+    pub offset: [f32; 2],
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Stroke {
@@ -600,6 +619,73 @@ impl Board {
             }
         }
         best.map(|(attachment, point, _)| (attachment, point))
+    }
+
+    /// The magnetic target for a connector or pen end: closed shape outlines first, then the
+    /// polylines of freehand strokes and open lines/arrows, then a grid intersection. Content beats
+    /// the grid even when the grid point is a little closer, so an existing drawing remains the
+    /// thing the next line attaches to.
+    pub fn snap_drawing(
+        &self,
+        p: [f32; 2],
+        tolerance: f32,
+        grid: Option<GridSnap>,
+    ) -> Option<DrawSnap> {
+        let limit = tolerance * tolerance;
+        let mut best: Option<(f32, DrawSnap)> = None;
+        let mut consider = |point: [f32; 2], attachment: Option<Attachment>| {
+            let distance = dist_squared(point, p);
+            if distance <= limit && best.is_none_or(|(nearest, _)| distance < nearest) {
+                best = Some((distance, DrawSnap { point, attachment }));
+            }
+        };
+        for shape in &self.shapes {
+            if !shape.paint_bounds().grown(tolerance).contains(p[0], p[1]) {
+                continue;
+            }
+            if shape.kind.is_closed() {
+                if shape.id == 0 {
+                    continue;
+                }
+                if let Some(point) = shape.nearest_boundary(p) {
+                    consider(point, Some(shape.attachment_at(point)));
+                }
+            } else {
+                let outline = shape.outline();
+                if let Some(point) = nearest_on_polyline(p, &outline) {
+                    consider(point, None);
+                }
+            }
+        }
+        for stroke in &self.strokes {
+            let Some(bounds) = stroke.paint_bounds() else {
+                continue;
+            };
+            if !bounds.grown(tolerance).contains(p[0], p[1]) {
+                continue;
+            }
+            if let Some(point) = nearest_on_stroke(p, &stroke.points) {
+                consider(point, None);
+            }
+        }
+        if best.is_none()
+            && let Some(grid) = grid.filter(|grid| grid.step > f32::EPSILON)
+        {
+            let point = [
+                grid.offset[0] + ((p[0] - grid.offset[0]) / grid.step).round() * grid.step,
+                grid.offset[1] + ((p[1] - grid.offset[1]) / grid.step).round() * grid.step,
+            ];
+            if dist_squared(point, p) <= limit {
+                best = Some((
+                    dist_squared(point, p),
+                    DrawSnap {
+                        point,
+                        attachment: None,
+                    },
+                ));
+            }
+        }
+        best.map(|(_, snap)| snap)
     }
 
     /// Clear attachments whose target shape is no longer on this board.
@@ -2918,6 +3004,71 @@ fn rotate_about(p: [f32; 2], centre: [f32; 2], radians: f32) -> [f32; 2] {
 }
 
 /// The point on a closed polygon nearest to `p`.
+/// The freehand path is the renderer's quad-through-midpoints curve, so snapping samples that
+/// curve rather than the straight chords between raw samples. Eight steps per quad stay well
+/// inside the 12-pixel magnet while the bounds check keeps most strokes out of the loop.
+fn nearest_on_stroke(p: [f32; 2], points: &[[f32; 2]]) -> Option<[f32; 2]> {
+    let first = *points.first()?;
+    let last = *points.last()?;
+    let mut best = first;
+    let mut best_d = dist_squared(first, p);
+    let mut consider = |a: [f32; 2], b: [f32; 2]| {
+        let point = nearest_on_segment(p, a, b);
+        let d = dist_squared(point, p);
+        if d < best_d {
+            best = point;
+            best_d = d;
+        }
+    };
+    if points.len() < 3 {
+        consider(first, last);
+        return Some(best);
+    }
+    const STEPS: usize = 8;
+    let mut start = first;
+    for index in 1..points.len() - 1 {
+        let control = points[index];
+        let end = [
+            (points[index][0] + points[index + 1][0]) / 2.0,
+            (points[index][1] + points[index + 1][1]) / 2.0,
+        ];
+        let mut previous = start;
+        for step in 1..=STEPS {
+            let t = step as f32 / STEPS as f32;
+            let inv = 1.0 - t;
+            let sample = [
+                inv * inv * start[0] + 2.0 * inv * t * control[0] + t * t * end[0],
+                inv * inv * start[1] + 2.0 * inv * t * control[1] + t * t * end[1],
+            ];
+            consider(previous, sample);
+            previous = sample;
+        }
+        start = end;
+    }
+    consider(start, last);
+    Some(best)
+}
+
+fn nearest_on_polyline(p: [f32; 2], points: &[[f32; 2]]) -> Option<[f32; 2]> {
+    match points {
+        [] => None,
+        [only] => Some(*only),
+        _ => {
+            let mut best = points[0];
+            let mut best_d = f32::INFINITY;
+            for pair in points.windows(2) {
+                let point = nearest_on_segment(p, pair[0], pair[1]);
+                let d = dist_squared(point, p);
+                if d < best_d {
+                    best = point;
+                    best_d = d;
+                }
+            }
+            Some(best)
+        }
+    }
+}
+
 fn nearest_on_polygon(p: [f32; 2], corners: &[[f32; 2]]) -> [f32; 2] {
     let mut best = corners[0];
     let mut best_d = f32::INFINITY;

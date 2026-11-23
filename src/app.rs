@@ -1323,16 +1323,30 @@ impl App {
         (!selection.items.is_empty()).then(|| (out.board.clone(), selection.items.clone()))
     }
 
-    /// The closed shape a connector end at a canvas point should stick to, in canvas units: the
-    /// magnetic radius is an interface length, so it is divided by the zoom.
+    /// Where a connector or pen end at a canvas point should land: a closed shape (with the
+    /// attachment that follows it), a freehand/open-line polyline, or a grid intersection when the
+    /// grid or dot backdrop is visible. The magnetic radius is an interface length, so it is divided
+    /// by the zoom; the grid step is already a canvas length.
     pub(crate) fn snap_connector(
         &self,
         key: &u32,
         point: [f32; 2],
-    ) -> Option<(Attachment, [f32; 2])> {
+    ) -> Option<(Option<Attachment>, [f32; 2])> {
         let out = self.outputs.get(key)?;
         let ann = self.doc.boards.get(out.board())?;
-        ann.snap(point, SNAP_RADIUS / out.view.zoom)
+        let grid = match self.backdrop {
+            Backdrop::Grid => Some(crate::canvas::GridSnap {
+                step: crate::canvas::GRID_SPACING,
+                offset: [0.0, 0.0],
+            }),
+            Backdrop::Dots => Some(crate::canvas::GridSnap {
+                step: crate::canvas::GRID_SPACING,
+                offset: [crate::canvas::GRID_SPACING / 2.0; 2],
+            }),
+            _ => None,
+        };
+        ann.snap_drawing(point, SNAP_RADIUS / out.view.zoom, grid)
+            .map(|snap| (snap.attachment, snap.point))
     }
 
     /// The linked text under a screen point on this output: the board it links to and the canvas
@@ -3259,7 +3273,7 @@ impl App {
             None
         };
         let (from, attach) = match snap {
-            Some((attachment, point)) => (point, [Some(attachment), None]),
+            Some((attachment, point)) => (point, [attachment, None]),
             None => ([x, y], [None, None]),
         };
         let Some(out) = self.outputs.get_mut(key) else {
