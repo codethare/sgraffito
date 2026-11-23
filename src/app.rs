@@ -100,6 +100,23 @@ struct TextPress {
     index: usize,
 }
 
+/// Where a clipboard read that finished off the event loop should land: in the text box being
+/// edited, or as a new text box on the current board.
+#[derive(Debug)]
+pub(crate) enum PastedText {
+    Edit(String),
+    Canvas(String),
+}
+
+/// Whether a compositor selection arrived after the app last recorded its own copied elements.
+fn system_selection_is_newer(selection: Option<Instant>, own_copy: Option<Instant>) -> bool {
+    match (selection, own_copy) {
+        (Some(system), Some(own)) => system > own,
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
 /// Whether `previous` and a press now on `index` at `point` are a double click rather than two
 /// separate selections. The same box, a short interval and little travel, so a click followed by a
 /// drag toward another box does not open the first one for writing.
@@ -348,9 +365,14 @@ pub struct App {
     data_device: Option<DataDevice>,
     /// The compositor's current selection, replaced on every selection event.
     pub(crate) selection: Option<SelectionOffer>,
+    /// When the compositor last advertised a selection, so a newer system copy can outrank the
+    /// app's own element history.
+    pub(crate) selection_at: Option<Instant>,
+    /// When the app last recorded its own copied elements.
+    pub(crate) last_copy: Option<Instant>,
     /// Pasted text, read off the event loop by a thread and drained by `tick`.
-    pub(crate) paste_tx: mpsc::Sender<String>,
-    pub(crate) pasted: mpsc::Receiver<String>,
+    pub(crate) paste_tx: mpsc::Sender<PastedText>,
+    pub(crate) pasted: mpsc::Receiver<PastedText>,
     pub(crate) ping: Ping,
     /// Whether `Ctrl` is held, which is what makes `V` a paste.
     pub(crate) ctrl: bool,
@@ -679,6 +701,8 @@ impl App {
             data_device_manager,
             data_device: None,
             selection: None,
+            selection_at: None,
+            last_copy: None,
             paste_tx,
             pasted,
             ping,
@@ -1442,6 +1466,7 @@ impl App {
             log("copy refused: too large for the clipboard");
             return false;
         };
+        self.last_copy = Some(Instant::now());
         self.refresh_toolbar();
         log(&format!("copied {count} elements"));
         true
@@ -1461,6 +1486,64 @@ impl App {
         if self.copy_selection() {
             self.delete_selection();
         }
+    }
+
+    /// Ask the data device for a selection when no event has supplied one yet. Focus changes can
+    /// race the first paste, and a stored offer is the only thing the receive path needs.
+    pub(crate) fn refresh_system_selection(&mut self) {
+        if self.selection.is_none() && self.last_copy.is_none() {
+            self.selection = self
+                .data_device
+                .as_ref()
+                .and_then(|device| device.data().selection_offer());
+            if self.selection.is_some() {
+                self.selection_at = Some(Instant::now());
+            }
+        }
+    }
+
+    /// Whether the compositor's selection is newer than the app's own element clipboard. A text
+    /// copied in another window since the last in-app copy wins the next canvas paste.
+    pub(crate) fn system_selection_is_newer(&self) -> bool {
+        system_selection_is_newer(self.selection_at, self.last_copy)
+    }
+
+    /// Put text read from the system clipboard on the current board as a new text box. Returns
+    /// whether anything was inserted; an empty read is not a paste.
+    pub(crate) fn paste_text(&mut self, text: String) -> bool {
+        if text.is_empty() {
+            return false;
+        }
+        let Some(key) = self.keyboard_focus else {
+            log("paste needs a focused screen");
+            return false;
+        };
+        let Some(out) = self.outputs.get(&key) else {
+            return false;
+        };
+        let board_name = out.board.clone();
+        let point = out
+            .view
+            .to_canvas([out.width as f32 * 0.1, out.height as f32 * 0.2]);
+        let item = TextItem {
+            x: point[0],
+            y: point[1],
+            color: crate::config::current().colors[self.color_idx].clone(),
+            size: self.text_size,
+            text,
+            link: None,
+        };
+        let before = self.doc.clone();
+        let Some(ann) = self.doc.boards.get_mut(&board_name) else {
+            return false;
+        };
+        ann.texts.push(item.clone());
+        let index = ann.texts.len() - 1;
+        self.undo.record(before, &self.doc);
+        self.set_selection(key, vec![ItemId::Text(index)], None);
+        self.doc_changed_at(key, item.paint_bounds());
+        log("pasted system text");
+        true
     }
 
     /// Paste clipboard entry `index`, newest first, onto the board this screen shows, a little offset.
@@ -4307,6 +4390,7 @@ impl DataDeviceHandler for App {
             .data_device
             .as_ref()
             .and_then(|device| device.data().selection_offer());
+        self.selection_at = self.selection.as_ref().map(|_| Instant::now());
     }
 
     fn drop_performed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
@@ -4362,6 +4446,26 @@ mod tests {
         assert!(!caret_visible(CARET_BLINK));
         assert!(!caret_visible(CARET_BLINK * 2 - Duration::from_millis(1)));
         assert!(caret_visible(CARET_BLINK * 2));
+    }
+
+    /// A system copy only outranks the element clipboard when it is the newer of the two. With no
+    /// in-app copy yet, any selection wins; with no selection, the in-app copy does.
+    #[test]
+    fn the_newer_clipboard_source_wins() {
+        let t = Instant::now();
+        assert!(system_selection_is_newer(
+            Some(t + Duration::from_millis(1)),
+            None
+        ));
+        assert!(!system_selection_is_newer(None, Some(t)));
+        assert!(system_selection_is_newer(
+            Some(t + Duration::from_millis(1)),
+            Some(t)
+        ));
+        assert!(!system_selection_is_newer(
+            Some(t),
+            Some(t + Duration::from_millis(1))
+        ));
     }
 
     /// A second select press on the same text is an edit only when it is quick and lands close:

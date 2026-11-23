@@ -29,7 +29,8 @@ use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::{
 };
 
 use crate::app::{
-    App, BTN_LEFT, BTN_MIDDLE, Mode, Tool, ToolbarAction, log, read_selection, text_mime,
+    App, BTN_LEFT, BTN_MIDDLE, Mode, PastedText, Tool, ToolbarAction, log, read_selection,
+    text_mime,
 };
 use crate::canvas::{
     Board, Caret, ERASER_THRESHOLD, Rect, SELECT_HANDLE_HIT, ShapeKind, Stroke, Target, TextBuffer,
@@ -487,7 +488,7 @@ impl KeyboardHandler for App {
             if self.shift {
                 self.open_clipboard();
             } else {
-                self.paste_newest();
+                self.paste();
             }
         } else if cuts_selection(self.ctrl, event.keysym) {
             // A cut is `Ctrl+C` plus the removal `Delete` makes, so the copy must land first:
@@ -1306,43 +1307,75 @@ impl App {
         }
     }
 
-    /// Paste the compositor's selection at the caret, when a text box is being edited. The
-    /// bytes are read off the event loop: a thread reads the pipe and rings the loop when it has
-    /// them, so a slow clipboard owner cannot stall drawing or the control socket.
+    /// Paste the compositor's selection. In a text box it lands at the caret; with no editor open
+    /// it becomes a new text box, unless the app's own element clipboard is the newer source.
     fn paste(&mut self) {
-        if self.edit_target().is_none() {
+        self.refresh_system_selection();
+        let canvas = self.edit_target().is_none();
+        if canvas && !self.system_selection_is_newer() {
+            self.paste_newest();
             return;
         }
+        if !self.request_clipboard(canvas) && canvas {
+            self.paste_newest();
+        }
+    }
+
+    /// Ask the compositor for plain text. The bytes are read off the event loop: a thread reads
+    /// the pipe and rings the loop when it has them, so a slow clipboard owner cannot stall
+    /// drawing or the control socket. `canvas` says where a successful read belongs.
+    fn request_clipboard(&mut self, canvas: bool) -> bool {
         let Some(offer) = self.selection.clone() else {
             log("nothing to paste: the compositor has no selection");
-            return;
+            return false;
         };
         let Some(mime) = offer.with_mime_types(text_mime) else {
             log("nothing to paste: the selection offers no plain text");
-            return;
+            return false;
         };
         match offer.receive(mime) {
             Ok(pipe) => {
                 let sender = self.paste_tx.clone();
                 let ping = self.ping.clone();
                 thread::spawn(move || {
-                    if sender.send(read_selection(pipe)).is_ok() {
+                    let text = read_selection(pipe);
+                    let pasted = if canvas {
+                        PastedText::Canvas(text)
+                    } else {
+                        PastedText::Edit(text)
+                    };
+                    if sender.send(pasted).is_ok() {
                         ping.ping();
                     }
                 });
+                true
             }
-            Err(e) => log(&format!("failed to read the clipboard: {e}")),
+            Err(e) => {
+                log(&format!("failed to read the clipboard: {e}"));
+                false
+            }
         }
     }
 
     /// Insert whatever a reader thread has finished with, through the same path a local key
     /// takes. Called from `tick`, which the ping wakes as soon as a paste is ready.
     pub(crate) fn take_pasted(&mut self) {
-        while let Ok(text) = self.pasted.try_recv() {
-            if text.is_empty() {
-                continue;
+        while let Ok(pasted) = self.pasted.try_recv() {
+            match pasted {
+                PastedText::Edit(text) if self.edit_target_mut().is_some() => {
+                    if !text.is_empty() {
+                        self.edit_buffer(|buffer| buffer.insert(&text));
+                    }
+                }
+                PastedText::Edit(text) | PastedText::Canvas(text) => {
+                    if text.is_empty() {
+                        // The system offered no readable text; keep the app's own copy useful.
+                        self.paste_newest();
+                    } else {
+                        self.paste_text(text);
+                    }
+                }
             }
-            self.edit_buffer(|buffer| buffer.insert(&text));
         }
     }
 
