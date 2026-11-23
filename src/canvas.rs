@@ -19,6 +19,11 @@ pub const SELECT_HANDLE_HIT: f32 = 11.0;
 /// How far above the frame's top edge the rotation handle sits, in logical pixels.
 pub const SELECT_ROTATE_GAP: f32 = 18.0;
 
+/// Drawn diameter of the small midpoint handle a linear element shows on every segment.
+pub const LINEAR_MIDPOINT: f32 = 5.0;
+/// Radius a midpoint handle is grabbed within, in logical pixels.
+pub const LINEAR_MIDPOINT_HIT: f32 = 8.0;
+
 /// Smallest factor a resize may apply. A frame cannot be collapsed into an extent no drag can
 /// restore, and a negative factor would mirror the selection, which the text renderer cannot draw.
 const MIN_SCALE: f32 = 0.05;
@@ -544,6 +549,11 @@ pub struct Shape {
     /// shapes are deleted or moved. Zero is assigned a real id when the shape enters a board.
     #[serde(default)]
     pub id: u64,
+    /// Interior vertices of a line, arrow or pen-like linear element, between `from` and `to`.
+    /// Empty for a straight two-point connector and for every closed shape. The first and last
+    /// points stay in `from`/`to`, so an attachment continues to name an endpoint.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub points: Vec<[f32; 2]>,
     /// For a line or arrow, the closed shapes its two ends stick to.
     #[serde(default)]
     pub attach: [Option<Attachment>; 2],
@@ -1575,6 +1585,93 @@ impl Shape {
         }
     }
 
+    /// Whether this element is a linear element: a polyline with editable vertices rather than a
+    /// closed outline.
+    pub fn is_linear(&self) -> bool {
+        matches!(self.kind, ShapeKind::Line | ShapeKind::Arrow)
+    }
+
+    /// Every vertex of a linear element in draw order: `from`, the interior points, `to`. Empty for
+    /// a closed shape. The endpoints stay in `from`/`to`, so connector attachments still name the
+    /// two ends while the interior points make the line bend.
+    pub fn linear_vertices(&self) -> Vec<[f32; 2]> {
+        if !self.is_linear() {
+            return Vec::new();
+        }
+        let mut points = Vec::with_capacity(self.points.len() + 2);
+        points.push(self.from);
+        points.extend_from_slice(&self.points);
+        points.push(self.to);
+        points
+    }
+
+    /// The number of vertices a linear element has.
+    pub fn linear_vertex_count(&self) -> usize {
+        if self.is_linear() {
+            self.points.len() + 2
+        } else {
+            0
+        }
+    }
+
+    /// One vertex of a linear element by its place in draw order.
+    pub fn linear_vertex(&self, index: usize) -> Option<[f32; 2]> {
+        if !self.is_linear() {
+            return None;
+        }
+        match index {
+            0 => Some(self.from),
+            last if last + 1 == self.linear_vertex_count() => Some(self.to),
+            _ => self.points.get(index - 1).copied(),
+        }
+    }
+
+    /// The midpoint of every segment, which is where a press adds a vertex.
+    pub fn linear_midpoints(&self) -> Vec<[f32; 2]> {
+        let vertices = self.linear_vertices();
+        vertices
+            .windows(2)
+            .map(|pair| {
+                [
+                    (pair[0][0] + pair[1][0]) / 2.0,
+                    (pair[0][1] + pair[1][1]) / 2.0,
+                ]
+            })
+            .collect()
+    }
+
+    /// Move one existing vertex of a linear element. The first and last are the endpoints in
+    /// `from`/`to`, so a gesture that moves one keeps connectors bound to the same end.
+    pub fn set_linear_vertex(&mut self, index: usize, point: [f32; 2]) -> bool {
+        if !self.is_linear() {
+            return false;
+        }
+        if index == 0 {
+            self.from = point;
+            return true;
+        }
+        if index + 1 == self.linear_vertex_count() {
+            self.to = point;
+            return true;
+        }
+        if let Some(slot) = self.points.get_mut(index - 1) {
+            *slot = point;
+            return true;
+        }
+        false
+    }
+
+    /// Insert a vertex on `segment` at its midpoint, returning the index the new vertex has in draw
+    /// order. The segment is the one between vertex `segment` and `segment + 1`, so segment zero
+    /// inserts before every existing interior point and the last segment appends.
+    pub fn insert_linear_vertex(&mut self, segment: usize, point: [f32; 2]) -> Option<usize> {
+        if !self.is_linear() || segment + 1 >= self.linear_vertex_count() {
+            return None;
+        }
+        self.points.insert(segment, point);
+        Some(segment + 1)
+    }
+
     /// Length of the arrowhead, from the pen width with a floor so a hairline arrow still reads as
     /// an arrow.
     pub fn head_len(&self) -> f32 {
@@ -1591,7 +1688,10 @@ impl Shape {
     /// element that is invisible but still erasable.
     pub fn is_empty(&self) -> bool {
         match self.kind {
-            ShapeKind::Line | ShapeKind::Arrow => self.from == self.to,
+            ShapeKind::Line | ShapeKind::Arrow => {
+                let vertices = self.linear_vertices();
+                vertices.windows(2).all(|pair| pair[0] == pair[1])
+            }
             _ => self.from[0] == self.to[0] || self.from[1] == self.to[1],
         }
     }
@@ -1608,7 +1708,16 @@ impl Shape {
         let box_ = if self.kind.is_closed() && self.turn_angle() != 0.0 {
             self.rotated_box()
         } else {
-            rect_of(self.from, self.to)
+            let mut box_ = rect_of(self.from, self.to);
+            for point in &self.points {
+                box_ = box_.union(Rect {
+                    x: point[0],
+                    y: point[1],
+                    w: 0.0,
+                    h: 0.0,
+                });
+            }
+            box_
         };
         box_.grown(self.width / 2.0 + 1.0 + head)
     }
@@ -1682,24 +1791,28 @@ impl Shape {
                 .collect(),
             ShapeKind::Rect => vec![[x, y], [x1, y], [x1, y1], [x, y1], [x, y]],
             ShapeKind::Diamond => vec![[cx, y], [x1, cy], [cx, y1], [x, cy], [cx, y]],
-            ShapeKind::Line => vec![self.from, self.to],
+            ShapeKind::Line => self.linear_vertices(),
             ShapeKind::Arrow => {
-                let (dx, dy) = (self.to[0] - self.from[0], self.to[1] - self.from[1]);
+                let mut outline = self.linear_vertices();
+                if outline.len() < 2 {
+                    return outline;
+                }
+                let (from, to) = (outline[outline.len() - 2], outline[outline.len() - 1]);
+                let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
                 let len = (dx * dx + dy * dy).sqrt();
                 if len <= f32::EPSILON {
-                    return vec![self.from, self.to];
+                    return outline;
                 }
                 let (ux, uy) = (dx / len, dy / len);
                 let (head, half) = (self.head_len(), self.head_half());
-                let base = [self.to[0] - ux * head, self.to[1] - uy * head];
+                let base = [to[0] - ux * head, to[1] - uy * head];
                 let (px, py) = (-uy * half, ux * half);
-                vec![
-                    self.from,
-                    self.to,
+                outline.extend([
                     [base[0] + px, base[1] + py],
                     [base[0] - px, base[1] - py],
-                    self.to,
-                ]
+                    to,
+                ]);
+                outline
             }
         };
         if self.kind.is_closed() && self.turn_angle() != 0.0 {
@@ -1971,11 +2084,21 @@ pub enum Grab {
     Rotate,
 }
 
+/// A point handle of a single selected linear element. A vertex moves an existing point; a midpoint
+/// inserts a new point on that segment and then drags it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinearHandle {
+    Vertex(usize),
+    Midpoint(usize),
+}
+
 /// What a press with the selection tool resolves to.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Press {
     /// A handle of the frame: a resize or a rotation.
     Handle(Grab),
+    /// A point or segment midpoint of a single selected line or arrow.
+    Linear(LinearHandle),
     /// Drag what is already held.
     Move,
     /// Take the element under the pointer, which replaces the selection.
@@ -1986,6 +2109,51 @@ pub enum Press {
     Toggle(ItemId),
     /// A `Shift` press that grabbed nothing: it changes nothing and starts nothing.
     Inert,
+}
+
+/// The one linear element a selection holds, if it holds exactly one. The point handles belong to a
+/// single line or arrow; a cluster keeps the ordinary frame so its bounds can still be resized.
+pub fn selected_linear(ann: &Board, held: &[ItemId]) -> Option<usize> {
+    let [ItemId::Shape(index)] = held else {
+        return None;
+    };
+    ann.shapes
+        .get(*index)
+        .filter(|shape| shape.is_linear())
+        .map(|_| *index)
+}
+
+/// The point handle at a screen position. A vertex wins over a midpoint, and in selection mode only
+/// the two endpoints are grabbable; edit mode exposes every interior vertex as well.
+pub fn linear_handle_at(
+    shape: &Shape,
+    view: View,
+    screen: [f32; 2],
+    edit: bool,
+) -> Option<LinearHandle> {
+    let limit = SELECT_HANDLE_HIT * SELECT_HANDLE_HIT;
+    let count = shape.linear_vertex_count();
+    if count == 0 {
+        return None;
+    }
+    for index in 0..count {
+        if !edit && index != 0 && index + 1 != count {
+            continue;
+        }
+        let Some(point) = shape.linear_vertex(index) else {
+            continue;
+        };
+        if dist_squared(screen, view.to_screen(point)) <= limit {
+            return Some(LinearHandle::Vertex(index));
+        }
+    }
+    let limit = LINEAR_MIDPOINT_HIT * LINEAR_MIDPOINT_HIT;
+    shape
+        .linear_midpoints()
+        .into_iter()
+        .enumerate()
+        .find(|(_, point)| dist_squared(screen, view.to_screen(*point)) <= limit)
+        .map(|(segment, _)| LinearHandle::Midpoint(segment))
 }
 
 /// Resolve a press with the selection tool, decided here so that a test can check it: `screen` is where
@@ -2019,9 +2187,58 @@ pub fn selection_press_with(
     shift: bool,
     texts: &[(usize, Rect)],
 ) -> Press {
+    selection_press_full(ann, held, view, screen, tolerance, shift, texts, false)
+}
+
+/// The press for a single linear selection, with the edit-mode flag the caller keeps on the output.
+/// In selection mode only the endpoints are vertex handles; edit mode exposes the interior points
+/// too. Both modes show a small midpoint handle on every segment.
+#[allow(clippy::too_many_arguments)]
+pub fn selection_press_linear(
+    ann: &Board,
+    held: &[ItemId],
+    view: View,
+    screen: [f32; 2],
+    tolerance: f32,
+    shift: bool,
+    texts: &[(usize, Rect)],
+    linear_edit: bool,
+) -> Press {
+    selection_press_full(
+        ann,
+        held,
+        view,
+        screen,
+        tolerance,
+        shift,
+        texts,
+        linear_edit,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn selection_press_full(
+    ann: &Board,
+    held: &[ItemId],
+    view: View,
+    screen: [f32; 2],
+    tolerance: f32,
+    shift: bool,
+    texts: &[(usize, Rect)],
+    linear_edit: bool,
+) -> Press {
     let canvas = view.to_canvas(screen);
+    let linear = selected_linear(ann, held);
+    if let Some(index) = linear
+        && let Some(handle) = linear_handle_at(&ann.shapes[index], view, screen, linear_edit)
+    {
+        return Press::Linear(handle);
+    }
     let frame = selection_frame_with(ann, held, None, texts);
-    if let Some(frame) = frame
+    // A linear selection draws point handles instead of the eight-handle frame, so only the points
+    // may be grabbed. A cluster with a line in it still keeps the ordinary frame.
+    if linear.is_none()
+        && let Some(frame) = frame
         && let Some(grab) = grab_at(
             view.screen_rect(frame),
             screen[0],
@@ -2513,6 +2730,7 @@ impl Transform {
     pub fn shape(self, s: &Shape) -> Shape {
         let matrix = self.matrix();
         let mut out = Shape {
+            points: s.points.iter().map(|point| matrix.apply(*point)).collect(),
             from: matrix.apply(s.from),
             to: matrix.apply(s.to),
             ..s.clone()
@@ -3523,6 +3741,9 @@ pub struct Overlay {
     pub toolbar: Option<Toolbar>,
     /// What the selection tool holds, if anything.
     pub selection: Option<Selection>,
+    /// The shape index whose linear points are in edit mode. Transient; the points themselves are
+    /// document content and are written as they move.
+    pub linear_edit: Option<usize>,
     /// Attached connectors redrawn while a selection gesture moves their shapes. The document
     /// raster still holds their old geometry, so the frame paints these and skips those ids.
     pub connectors: Vec<LiveConnector>,

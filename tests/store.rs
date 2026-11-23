@@ -40,6 +40,7 @@ fn sample() -> Doc {
                 width: 3.0,
                 from: [30.0, 400.0],
                 to: [180.0, 260.0],
+                points: Vec::new(),
                 rotate: 0.0,
                 id: 1,
                 attach: [None, None],
@@ -460,6 +461,7 @@ fn stepping_a_selection_steps_its_widths_and_text_sizes() {
             width: 6.0,
             from: [10.0, 80.0],
             to: [110.0, 140.0],
+            points: Vec::new(),
             rotate: 0.0,
             id: 0,
             attach: [None, None],
@@ -901,6 +903,7 @@ fn connector_attachments_survive_the_round_trip() {
     let mut doc = Doc::default();
     let mut board = Board::default();
     board.add_shape(Shape {
+        points: Vec::new(),
         kind: ShapeKind::Rect,
         color: "#ffffff".into(),
         width: 3.0,
@@ -913,6 +916,7 @@ fn connector_attachments_survive_the_round_trip() {
     });
     let target = board.shapes[0].id;
     board.add_shape(Shape {
+        points: Vec::new(),
         kind: ShapeKind::Line,
         color: "#ffffff".into(),
         width: 3.0,

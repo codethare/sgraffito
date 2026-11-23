@@ -42,13 +42,13 @@ use wayland_client::{
 
 use crate::canvas::{
     Attachment, Backdrop, Board, BoardEdit, BoardRow, ClipEntry, ClipRow, Doc, ERASER_THRESHOLD,
-    Gesture, Grab, Handle, ItemId, LiveConnector, Motion, Note, Overlay, PEN_WIDTH_MAX,
-    PEN_WIDTH_MIN, PEN_WIDTH_STEP, Press, Rect, SNAP_RADIUS, Selection, Shape, ShapeKind,
-    TEXT_SIZE_MAX, TEXT_SIZE_MIN, TEXT_SIZE_STEP, Target, TextBuffer, TextItem, TextOverlay,
-    Toolbar, Transform, View, ZOOM_STEP, Zoom, date_stamp, link_source, marquee_select, note_drag,
-    nudge_delta, record_clip, selection_bounds, selection_frame, selection_frame_with,
-    selection_press_with, selection_with_contents, snap_square, stepped_size,
-    toggle_selection_with_contents,
+    Gesture, Grab, Handle, ItemId, LinearHandle, LiveConnector, Motion, Note, Overlay,
+    PEN_WIDTH_MAX, PEN_WIDTH_MIN, PEN_WIDTH_STEP, Press, Rect, SNAP_RADIUS, Selection, Shape,
+    ShapeKind, TEXT_SIZE_MAX, TEXT_SIZE_MIN, TEXT_SIZE_STEP, Target, TextBuffer, TextItem,
+    TextOverlay, Toolbar, Transform, View, ZOOM_STEP, Zoom, date_stamp, link_source,
+    marquee_select, note_drag, nudge_delta, record_clip, selected_linear, selection_bounds,
+    selection_frame, selection_frame_with, selection_press_linear, selection_with_contents,
+    snap_square, stepped_size, toggle_selection_with_contents,
 };
 
 pub use crate::canvas::{Tool, ToolbarAction};
@@ -63,8 +63,8 @@ use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::ZwpTextIn
 
 use crate::input::{Nav, PinchData};
 use crate::render::{
-    DamageRegion, FrameCache, Renderer, Screen, buffer_format, cards_bounds, color_strip_bounds,
-    move_button_bounds, snap_hint_bounds, toolbar_bounds, transient_bounds, transient_damage,
+    DamageRegion, FrameCache, Renderer, Screen, action_card_bounds, buffer_format, cards_bounds,
+    color_strip_bounds, snap_hint_bounds, toolbar_bounds, transient_bounds, transient_damage,
 };
 use crate::store::{self, Store};
 
@@ -92,12 +92,24 @@ const TOOLBAR_ANIM: Duration = Duration::from_millis(140);
 const TEXT_DOUBLE_CLICK: Duration = Duration::from_millis(400);
 const TEXT_DOUBLE_CLICK_SLOP: f32 = 6.0;
 
-/// The previous select press on a text box, kept only to recognise a quick second one.
+/// The previous select press on a text box or linear element, kept only to recognise a quick second
+/// one. The index names the box or shape on the board that was showing at the time.
 #[derive(Clone, Copy)]
 struct TextPress {
     at: Instant,
     point: [f32; 2],
     index: usize,
+}
+
+/// The vertex a pointer is dragging on a linear element. A midpoint press inserts the vertex first,
+/// so the same state serves both an existing point and the new one.
+#[derive(Clone, Copy)]
+pub(crate) struct LinearDrag {
+    pub(crate) key: u32,
+    shape: usize,
+    vertex: usize,
+    /// For an endpoint, which of `Shape::attach` the drag may detach. Interior vertices have none.
+    end: Option<usize>,
 }
 
 /// Where a clipboard read that finished off the event loop should land: in the text box being
@@ -434,6 +446,11 @@ pub struct App {
     colors_until: Option<Instant>,
     /// The last select press on a text box, for the quick second press that starts editing.
     last_text_press: Option<TextPress>,
+    /// The last select press on a linear element, for the double click that enters point editing.
+    last_linear_press: Option<TextPress>,
+    /// The linear vertex under the pointer, if a press is dragging one. The document is updated as
+    /// the pointer moves; the gesture's undo snapshot is taken on the press.
+    pub(crate) linear_drag: Option<LinearDrag>,
     /// When the colour strip started unfurling.
     colors_since: Option<Instant>,
     /// The in-app clipboard history, newest first. Session state: it is never written to the file.
@@ -687,6 +704,8 @@ impl App {
             colors_until: None,
             colors_since: None,
             last_text_press: None,
+            last_linear_press: None,
+            linear_drag: None,
             clips: Vec::new(),
             rename: None,
             delete_confirm: None,
@@ -1107,6 +1126,22 @@ impl App {
         };
         match held[0] {
             ItemId::Note(index) => self.enter_note(&key, index),
+            ItemId::Shape(index)
+                if self
+                    .doc
+                    .boards
+                    .get(
+                        &self
+                            .outputs
+                            .get(&key)
+                            .map(|out| out.board().to_string())
+                            .unwrap_or_default(),
+                    )
+                    .and_then(|ann| ann.shapes.get(index))
+                    .is_some_and(Shape::is_linear) =>
+            {
+                self.set_linear_edit(key, true);
+            }
             ItemId::Text(index) => {
                 let Some(out) = self.outputs.get(&key) else {
                     return;
@@ -1992,6 +2027,8 @@ impl App {
     fn restore_document(&mut self, doc: Doc) {
         self.gesture = None;
         self.selection_grab = None;
+        self.linear_drag = None;
+        self.last_linear_press = None;
         self.pending_duplicate = None;
         self.pending_links.clear();
         self.note_origin = None;
@@ -2111,6 +2148,8 @@ impl App {
     pub(crate) fn cancel_transient(&mut self, key: u32) {
         self.note_origin = None;
         self.note_sized = false;
+        self.linear_drag = None;
+        self.last_linear_press = None;
         self.pending_links.clear();
         let Some(out) = self.outputs.get_mut(&key) else {
             return;
@@ -2120,6 +2159,7 @@ impl App {
             || out.overlay.eraser.take().is_some()
             || out.overlay.note.take().is_some()
             || out.overlay.selection.take().is_some()
+            || out.overlay.linear_edit.take().is_some()
             || out.overlay.marquee.take().is_some();
         out.overlay.connectors.clear();
         if changed {
@@ -2137,7 +2177,7 @@ impl App {
         // The decision is `canvas::selection_press`, where the two coordinate spaces — the screen the
         // handles live in and the canvas a gesture moves the document in — are one function a test can
         // reach. This only carries it out.
-        let (press, frame, at) = {
+        let (press, frame, at, was_editing) = {
             let Some(out) = self.outputs.get(&key) else {
                 return;
             };
@@ -2161,7 +2201,8 @@ impl App {
                     view,
                 },
             );
-            let press = selection_press_with(
+            let linear_edit = out.overlay.linear_edit.is_some();
+            let press = selection_press_linear(
                 ann,
                 &held,
                 view,
@@ -2169,12 +2210,17 @@ impl App {
                 view.canvas_len(ERASER_THRESHOLD),
                 self.shift,
                 &boxes,
+                linear_edit,
             );
             let frame = selection_frame_with(ann, &held, None, &boxes);
-            (press, frame, view.to_canvas([x, y]))
+            (press, frame, view.to_canvas([x, y]), linear_edit)
         };
+        if was_editing && !matches!(press, Press::Linear(_)) {
+            self.set_linear_edit(key, false);
+        }
         let alt = self.alt;
         match press {
+            Press::Linear(handle) => self.begin_linear_handle(key, handle),
             // A gesture works in the document's own coordinates, because that is what the transform it
             // produces is applied to.
             Press::Handle(grab) => {
@@ -2638,10 +2684,14 @@ impl App {
         // taken back: keeping it would let a later `Esc` remove whatever the indices point at then.
         self.pending_duplicate = None;
         self.pending_links.clear();
+        self.linear_drag = None;
+        self.last_linear_press = None;
         self.undo.abandon_gesture();
         let mut dropped = false;
         for out in self.outputs.values_mut() {
-            let had = out.overlay.selection.take().is_some() | out.overlay.marquee.take().is_some();
+            let had = out.overlay.selection.take().is_some()
+                | out.overlay.marquee.take().is_some()
+                | out.overlay.linear_edit.take().is_some();
             out.overlay.connectors.clear();
             if had {
                 out.transient_dirty = true;
@@ -2700,6 +2750,9 @@ impl App {
     /// ends the gesture this way — a mode switch, a tool change, the output going away — and the
     /// drag the user already made is kept rather than dropped.
     pub(crate) fn commit_any_gesture(&mut self) {
+        if let Some(drag) = self.linear_drag {
+            self.release_linear_drag(drag.key);
+        }
         let keys: Vec<u32> = self
             .outputs
             .iter()
@@ -2739,6 +2792,8 @@ impl App {
             let next = if *k == key { owned.clone() } else { None };
             if out.overlay.selection != next {
                 out.overlay.selection = next;
+                // Point editing names an index in the selection that just changed.
+                out.overlay.linear_edit = None;
                 out.overlay.connectors.clear();
                 out.transient_dirty = true;
                 self.dirty = true;
@@ -3131,6 +3186,7 @@ impl App {
     /// with another tool.
     pub(crate) fn clear_text_press(&mut self) {
         self.last_text_press = None;
+        self.last_linear_press = None;
     }
 
     /// Fill the topmost closed shape under the pointer with the colour in hand. Lines and arrows are
@@ -3165,12 +3221,33 @@ impl App {
     /// A select press on text: the first click selects and can drag the box; a quick second click on
     /// the same box opens it for writing. A press that misses text clears the pending second click.
     pub(crate) fn select_text_press(&mut self, key: u32, x: f32, y: f32) {
+        let now = Instant::now();
         let Some(index) = self.text_index_at(&key, x, y) else {
             self.last_text_press = None;
+            // A quick second click on the same line enters point editing instead of inserting a
+            // midpoint or starting another drag.
+            if let Some(index) = self.linear_index_at(&key, x, y) {
+                if is_text_double_click(self.last_linear_press, index, [x, y], now) {
+                    self.last_linear_press = None;
+                    if self.linear_selection_index(key) != Some(index) {
+                        self.set_selection(key, vec![ItemId::Shape(index)], None);
+                    }
+                    self.set_linear_edit(key, true);
+                } else {
+                    self.last_linear_press = Some(TextPress {
+                        at: now,
+                        point: [x, y],
+                        index,
+                    });
+                    self.select_press(key, x, y);
+                }
+                return;
+            }
+            self.last_linear_press = None;
             self.select_press(key, x, y);
             return;
         };
-        let now = Instant::now();
+        self.last_linear_press = None;
         if is_text_double_click(self.last_text_press, index, [x, y], now) {
             self.last_text_press = None;
             self.begin_text_edit(&key, x, y);
@@ -3182,6 +3259,223 @@ impl App {
             });
             self.select_press(key, x, y);
         }
+    }
+
+    /// The one linear element a selection on this output holds, if it holds exactly one.
+    fn linear_selection_index(&self, key: u32) -> Option<usize> {
+        let out = self.outputs.get(&key)?;
+        let ann = self.doc.boards.get(out.board())?;
+        selected_linear(ann, &out.overlay.selection.as_ref()?.items)
+    }
+
+    /// Turn point editing on or off for the one linear element this output holds. Choosing another
+    /// tool, selection or board drops it through the same transient resets as the selection.
+    pub(crate) fn set_linear_edit(&mut self, key: u32, edit: bool) {
+        let Some(index) = self.linear_selection_index(key) else {
+            return;
+        };
+        let next = edit.then_some(index);
+        let Some(out) = self.outputs.get_mut(&key) else {
+            return;
+        };
+        if out.overlay.linear_edit != next {
+            out.overlay.linear_edit = next;
+            out.transient_dirty = true;
+            self.dirty = true;
+        }
+        if !edit {
+            self.linear_drag = None;
+        }
+    }
+
+    /// Toggle the edit mode the action card's `edit` control and `Enter` share.
+    pub(crate) fn toggle_linear_edit(&mut self, key: u32) {
+        self.last_linear_press = None;
+        let Some(index) = self.linear_selection_index(key) else {
+            return;
+        };
+        let editing = self
+            .outputs
+            .get(&key)
+            .is_some_and(|out| out.overlay.linear_edit == Some(index));
+        self.set_linear_edit(key, !editing);
+    }
+
+    /// The topmost linear shape under a screen point, for the quick second click that opens point
+    /// editing. It uses the same eraser tolerance as an ordinary select press.
+    fn linear_index_at(&mut self, key: &u32, x: f32, y: f32) -> Option<usize> {
+        let out = self.outputs.get(key)?;
+        let ann = self.doc.boards.get(out.board())?;
+        let point = out.view.to_canvas([x, y]);
+        match ann.hit(point[0], point[1], out.view.canvas_len(ERASER_THRESHOLD)) {
+            Some(ItemId::Shape(index)) if ann.shapes.get(index).is_some_and(Shape::is_linear) => {
+                Some(index)
+            }
+            _ => None,
+        }
+    }
+
+    /// A press on one of a linear element's point handles. A vertex drag moves that point; a
+    /// midpoint press first inserts a real vertex at the midpoint, then drags it.
+    fn begin_linear_handle(&mut self, key: u32, handle: LinearHandle) {
+        let Some(shape_index) = self.linear_selection_index(key) else {
+            return;
+        };
+        let Some(board_name) = self.outputs.get(&key).map(|out| out.board().to_string()) else {
+            return;
+        };
+        let Some(shape) = self
+            .doc
+            .boards
+            .get(&board_name)
+            .and_then(|ann| ann.shapes.get(shape_index))
+        else {
+            return;
+        };
+        let before = shape.paint_bounds();
+        self.undo.begin_gesture(&self.doc);
+        let (vertex, end, inserted) = match handle {
+            LinearHandle::Vertex(vertex) => {
+                let end = if vertex == 0 {
+                    Some(0)
+                } else if vertex + 1 == shape.linear_vertex_count() {
+                    Some(1)
+                } else {
+                    None
+                };
+                (vertex, end, None)
+            }
+            LinearHandle::Midpoint(segment) => {
+                let Some(point) = shape.linear_midpoints().get(segment).copied() else {
+                    self.undo.abandon_gesture();
+                    return;
+                };
+                let Some(vertex) = self
+                    .doc
+                    .boards
+                    .get_mut(&board_name)
+                    .and_then(|ann| ann.shapes.get_mut(shape_index))
+                    .and_then(|shape| shape.insert_linear_vertex(segment, point))
+                else {
+                    self.undo.abandon_gesture();
+                    return;
+                };
+                (vertex, None, Some(vertex))
+            }
+        };
+        let Some(shape) = self
+            .doc
+            .boards
+            .get_mut(&board_name)
+            .and_then(|ann| ann.shapes.get_mut(shape_index))
+        else {
+            return;
+        };
+        if let Some(end) = end {
+            shape.attach[end] = None;
+        }
+        let after = shape.paint_bounds();
+        if let Some(out) = self.outputs.get_mut(&key) {
+            if inserted.is_some() {
+                // A new point is a document vertex from this frame on; show it at full size rather
+                // than leaving it as a midpoint handle the user cannot grab again.
+                out.overlay.linear_edit = Some(shape_index);
+            }
+            out.transient_dirty = true;
+        }
+        self.linear_drag = Some(LinearDrag {
+            key,
+            shape: shape_index,
+            vertex,
+            end,
+        });
+        let damage = before.union(after);
+        self.doc_changed_at(key, damage);
+        self.dirty = true;
+    }
+
+    /// Drag the vertex taken by a point handle. The document is updated live; the press already took
+    /// the undo snapshot, so the release records one change.
+    pub(crate) fn drag_linear(&mut self, key: u32, x: f32, y: f32) {
+        let Some(drag) = self.linear_drag else {
+            return;
+        };
+        if drag.key != key {
+            return;
+        }
+        let Some(out) = self.outputs.get(&key) else {
+            return;
+        };
+        let point = out.view.to_canvas([x, y]);
+        let board_name = out.board().to_string();
+        let Some(shape) = self
+            .doc
+            .boards
+            .get_mut(&board_name)
+            .and_then(|ann| ann.shapes.get_mut(drag.shape))
+        else {
+            return;
+        };
+        let before = shape.paint_bounds();
+        if !shape.set_linear_vertex(drag.vertex, point) {
+            return;
+        }
+        let after = shape.paint_bounds();
+        self.doc_changed_at(drag.key, before.union(after));
+    }
+
+    /// Release a point drag. An endpoint is re-seated on a closed shape when it landed within the
+    /// magnetic radius, which is also how a bound end that was pulled away can bind again. The whole
+    /// drag records one undo step.
+    pub(crate) fn release_linear_drag(&mut self, key: u32) {
+        let Some(drag) = self.linear_drag.take() else {
+            return;
+        };
+        if drag.key != key {
+            self.linear_drag = Some(drag);
+            return;
+        }
+        let Some(out) = self.outputs.get(&key) else {
+            self.undo.abandon_gesture();
+            return;
+        };
+        let board_name = out.board().to_string();
+        let tolerance = SNAP_RADIUS / out.view.zoom;
+        let Some(shape) = self
+            .doc
+            .boards
+            .get(&board_name)
+            .and_then(|ann| ann.shapes.get(drag.shape))
+        else {
+            self.undo.abandon_gesture();
+            return;
+        };
+        let before = shape.paint_bounds();
+        let point = shape.linear_vertex(drag.vertex).unwrap_or(shape.to);
+        let snapped = drag
+            .end
+            .and_then(|_| self.doc.boards.get(&board_name)?.snap(point, tolerance));
+        if let Some((attachment, point)) = snapped
+            && let Some(shape) = self
+                .doc
+                .boards
+                .get_mut(&board_name)
+                .and_then(|ann| ann.shapes.get_mut(drag.shape))
+        {
+            shape.set_linear_vertex(drag.vertex, point);
+            if let Some(end) = drag.end {
+                shape.attach[end] = Some(attachment);
+            }
+        }
+        let after = self
+            .doc
+            .boards
+            .get(&board_name)
+            .and_then(|ann| ann.shapes.get(drag.shape))
+            .map(Shape::paint_bounds)
+            .unwrap_or(before);
+        self.undo.commit_gesture(&self.doc);
+        self.doc_changed_at(key, before.union(after));
     }
 
     /// The text box whose measured glyphs are under a canvas point. The select tool uses this to
@@ -3280,6 +3574,7 @@ impl App {
             return;
         };
         out.overlay.shape = Some(Shape {
+            points: Vec::new(),
             kind,
             color,
             width,
@@ -3845,10 +4140,10 @@ impl App {
             (Some(a), Some(b)) => Some(a.union(selection_bounds(view.screen_rect(b), handle_hit))),
             (a, b) => a.or(b.map(|b| selection_bounds(view.screen_rect(b), handle_hit))),
         };
-        // The move button exists exactly while a selection does, so its box joins the transient
-        // damage and the frame that removes it paints over the capsule.
+        // The action card exists exactly while a selection does, so its box joins the transient
+        // damage and the frame that removes it paints over the card and its shadow.
         let transient = if out.overlay.selection.is_some() {
-            let button = move_button_bounds((w as f32, h as f32));
+            let button = action_card_bounds((w as f32, h as f32)).grown(2.0);
             Some(transient.map_or(button, |box_| box_.union(button)))
         } else {
             transient

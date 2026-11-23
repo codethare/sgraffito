@@ -34,10 +34,11 @@ use crate::app::{
 };
 use crate::canvas::{
     Board, Caret, ERASER_THRESHOLD, Rect, SELECT_HANDLE_HIT, ShapeKind, Stroke, Target, TextBuffer,
-    ZOOM_STEP, constrained_drag, grab_at, selection_frame_with,
+    ZOOM_STEP, constrained_drag, grab_at, selected_linear, selection_frame_with,
 };
 use crate::render::{
-    closes_panel_on_pick, move_button_bounds, panel_stays_open, press_dismisses_panel,
+    action_card_bounds, action_card_edit_bounds, action_card_move_bounds, closes_panel_on_pick,
+    panel_stays_open, press_dismisses_panel,
 };
 
 /// The input method's own log, off unless `SGRAFFITO_IM_TRACE` is set: a commit that does not appear is a
@@ -870,6 +871,23 @@ impl App {
             self.end_text_edit();
             return;
         }
+        // A line's point editing is the next transient layer: `Esc` leaves it before it drops the
+        // selection the card belongs to.
+        if let Some(drag) = self.linear_drag {
+            self.release_linear_drag(drag.key);
+        }
+        let mut left_edit = false;
+        for out in self.outputs.values_mut() {
+            if out.overlay.linear_edit.take().is_some() {
+                out.transient_dirty = true;
+                left_edit = true;
+            }
+        }
+        if left_edit {
+            self.undo.abandon_gesture();
+            self.dirty = true;
+            return;
+        }
         if self.drop_selection() {
             return;
         }
@@ -894,12 +912,17 @@ impl App {
             else {
                 return;
             };
-            // The handles are drawn on the measured text, so the cursor agrees with them.
-            let boxes = self.renderer.text_boxes(ann, &items, out.screen());
-            selection_frame_with(ann, &items, None, &boxes)
-                // The handles are interface lengths, so the frame is grabbed in screen space.
-                .map(|frame| out.view.screen_rect(frame))
-                .and_then(|frame| grab_at(frame, x, y, SELECT_HANDLE_HIT))
+            // The handles are drawn on the measured text, so the cursor agrees with them. A single
+            // line has point handles instead of the eight-handle frame, so no frame cursor applies.
+            if selected_linear(ann, &items).is_some() {
+                None
+            } else {
+                let boxes = self.renderer.text_boxes(ann, &items, out.screen());
+                selection_frame_with(ann, &items, None, &boxes)
+                    // The handles are interface lengths, so the frame is grabbed in screen space.
+                    .map(|frame| out.view.screen_rect(frame))
+                    .and_then(|frame| grab_at(frame, x, y, SELECT_HANDLE_HIT))
+            }
         };
         if grab != self.selection_grab {
             self.selection_grab = grab;
@@ -981,15 +1004,19 @@ impl App {
             self.follow_link(key, &board, centre);
             return;
         }
-        // The move button is interface: a press on it must not also start a stroke.
+        // The selection action card is interface: a press on it must not also start a stroke.
         if let Some(size) = self.output_size(*key)
             && self
                 .outputs
                 .get(key)
                 .is_some_and(|out| out.overlay.selection.is_some())
-            && move_button_bounds(size).contains(x, y)
+            && action_card_bounds(size).contains(x, y)
         {
-            self.open_target(Some(*key), Target::Move);
+            if action_card_edit_bounds(size).contains(x, y) {
+                self.toggle_linear_edit(*key);
+            } else if action_card_move_bounds(size).contains(x, y) {
+                self.open_target(Some(*key), Target::Move);
+            }
             return;
         }
         // A pan owns the pointer while it runs: nothing else may start under it.
@@ -1091,9 +1118,12 @@ impl App {
             return;
         }
         // The selection tool draws nothing on hover: the pointer only says what a press would
-        // grab, until a press has started a gesture.
+        // grab, until a press has started a gesture. A linear vertex is its own small drag, not a
+        // selection transform, so it is checked first.
         if self.tool == Tool::Selection {
-            if self.gesture.is_some() {
+            if self.linear_drag.is_some() {
+                self.drag_linear(*key, x, y);
+            } else if self.gesture.is_some() {
                 self.drag_selection(*key, x, y);
             } else {
                 self.update_selection_grab(*key, x, y);
@@ -1491,6 +1521,9 @@ impl App {
         if self.tool == Tool::Note {
             self.commit_note(key);
         }
+        // A linear point drag is its own gesture; finish it before the selection release path, which
+        // only owns a transform or a marquee.
+        self.release_linear_drag(*key);
         // A gesture the pointer was dragging ends here, and is written into the document.
         self.release_selection(*key);
         // A pan the left button was holding — the hand tool's — ends with the button, or the pointer

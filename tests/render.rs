@@ -4,8 +4,9 @@ use sgraffito::canvas::{
     ToolbarAction, Transform, View, selection_frame, selection_frame_with,
 };
 use sgraffito::render::{
-    DAMAGE_SLACK, DamageRegion, FrameCache, Renderer, Screen, buffer_format, cards_bounds,
-    move_button_bounds, rail_column, toolbar_bounds, transient_bounds, transient_damage,
+    DAMAGE_SLACK, DamageRegion, FrameCache, Renderer, Screen, action_card_bounds,
+    action_card_edit_bounds, action_card_move_bounds, buffer_format, cards_bounds, rail_column,
+    toolbar_bounds, transient_bounds, transient_damage,
 };
 use wayland_client::protocol::wl_shm::Format;
 
@@ -1725,6 +1726,7 @@ fn the_default_view_draws_what_no_view_drew() {
             width: 3.0,
             from: [200.0, 150.0],
             to: [300.0, 250.0],
+            points: Vec::new(),
             rotate: 0.0,
             id: 0,
             attach: [None, None],
@@ -2574,6 +2576,7 @@ fn a_shape_is_drawn_as_a_hand_drawn_outline() {
             width: 3.0,
             from: [60.0, 50.0],
             to: [180.0, 120.0],
+            points: Vec::new(),
             rotate: 0.0,
             id: 0,
             attach: [None, None],
@@ -2607,6 +2610,7 @@ fn sole_shape(shape: Shape) -> Board {
 
 fn rect_shape(from: [f32; 2], to: [f32; 2]) -> Shape {
     Shape {
+        points: Vec::new(),
         kind: ShapeKind::Rect,
         color: "#3584e4".into(),
         width: 3.0,
@@ -2639,6 +2643,7 @@ fn sketched_ink_stays_inside_the_paint_box() {
         ShapeKind::Arrow,
     ] {
         let shape = Shape {
+            points: Vec::new(),
             kind,
             fill: None,
             ..rect_shape([80.0, 80.0], [220.0, 200.0])
@@ -2764,6 +2769,7 @@ fn a_moved_sketched_shape_leaves_no_trail() {
     // A heavy pen, because a light one's wander is inside what the half-width already allows for:
     // the point is the ink that only the style puts past the box.
     let heavy = |from: [f32; 2], to: [f32; 2]| Shape {
+        points: Vec::new(),
         width: 8.0,
         fill: None,
         ..rect_shape(from, to)
@@ -2926,6 +2932,7 @@ fn the_interface_over_a_sketched_document_is_exact() {
     const WHITE: (u8, u8, u8) = (255, 255, 255);
     let (w, h) = (400u32, 300u32);
     let shape = Shape {
+        points: Vec::new(),
         color: "#e01b24".into(),
         fill: None,
         ..rect_shape([80.0, 90.0], [240.0, 200.0])
@@ -2935,6 +2942,7 @@ fn the_interface_over_a_sketched_document_is_exact() {
         if !bare {
             doc.strokes = vec![line(40.0, 260.0, 360.0)];
             doc.shapes.push(Shape {
+                points: Vec::new(),
                 kind: ShapeKind::Circle,
                 fill: None,
                 ..rect_shape([260.0, 40.0], [370.0, 140.0])
@@ -3062,6 +3070,7 @@ fn every_shape_kind_puts_ink_outside_its_own_outline() {
         ShapeKind::Arrow,
     ] {
         let shape = Shape {
+            points: Vec::new(),
             kind,
             width: 3.0,
             fill: None,
@@ -3938,10 +3947,10 @@ fn a_panel_paints_one_card_behind_its_rows() {
     assert!(alpha(&buf, w, probe as u32, row as u32 + 10) > 0);
 }
 
-/// A link is visible as an underline without hovering, and the move button stays in the middle of
-/// the bottom of the canvas at every output size.
+/// A link is visible as an underline without hovering, and the edit/move action card stays in the
+/// middle of the bottom of the canvas at every output size.
 #[test]
-fn a_link_draws_an_underline_and_the_move_button_is_bottom_centred() {
+fn a_link_draws_an_underline_and_the_action_card_is_bottom_centred() {
     let (w, h) = (400u32, 200u32);
     let text = TextItem {
         x: 20.0,
@@ -3979,11 +3988,58 @@ fn a_link_draws_an_underline_and_the_move_button_is_bottom_centred() {
     assert!(changed > 0, "the link changed no pixel");
 
     for size in [(640.0, 480.0), (1920.0, 1080.0)] {
-        let box_ = move_button_bounds(size);
-        assert!((box_.x + box_.w / 2.0 - size.0 / 2.0).abs() < 1.0);
-        assert!(box_.y > size.1 / 2.0);
-        assert!(box_.y + box_.h < size.1);
+        let card = action_card_bounds(size);
+        let edit = action_card_edit_bounds(size);
+        let move_ = action_card_move_bounds(size);
+        assert!((card.x + card.w / 2.0 - size.0 / 2.0).abs() < 1.0);
+        assert!(card.y > size.1 / 2.0);
+        assert!((card.y + card.h - (size.1 - 18.0)).abs() < 0.01);
+        assert!(card.contains(edit.x + edit.w / 2.0, edit.y + edit.h / 2.0));
+        assert!(card.contains(move_.x + move_.w / 2.0, move_.y + move_.h / 2.0));
+        assert!(edit.x < move_.x);
     }
+}
+
+/// A selected line shows its endpoints and segment midpoints; edit mode promotes the interior bend
+/// to a full-size accent handle, which is the visible difference between the two modes.
+#[test]
+fn linear_edit_mode_promotes_interior_vertices() {
+    let (w, h) = (220u32, 120u32);
+    let line = Shape {
+        kind: ShapeKind::Line,
+        color: "#e01b24".into(),
+        width: 3.0,
+        from: [20.0, 90.0],
+        to: [200.0, 90.0],
+        points: vec![[110.0, 30.0]],
+        rotate: 0.0,
+        id: 1,
+        attach: [None, None],
+        fill: None,
+    };
+    let board = Board {
+        shapes: vec![line],
+        ..Board::default()
+    };
+    let pixel = |edit: bool| {
+        let overlay = Overlay {
+            selection: Some(Selection {
+                items: vec![ItemId::Shape(0)],
+                transform: None,
+            }),
+            linear_edit: edit.then_some(0),
+            ..Default::default()
+        };
+        let mut buf = buffer(w, h);
+        Renderer::new().render(&mut buf, w, h, 1.0, View::default(), &board, &overlay, None);
+        let at = ((30 * w + 110) * 4) as usize;
+        [buf[at], buf[at + 1], buf[at + 2], buf[at + 3]]
+    };
+    assert_ne!(
+        pixel(false),
+        pixel(true),
+        "the interior vertex did not gain a full handle in edit mode"
+    );
 }
 
 #[test]

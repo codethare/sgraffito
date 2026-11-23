@@ -1,4 +1,7 @@
-use sgraffito::canvas::{Board, ERASER_THRESHOLD, ItemId, PALETTE, Rect, Stroke, TextItem};
+use sgraffito::canvas::{
+    Board, ERASER_THRESHOLD, ItemId, LinearHandle, PALETTE, Rect, Shape, ShapeKind, Stroke,
+    TextItem, View, linear_handle_at, selected_linear,
+};
 use sgraffito::sketch::SKETCH_SLACK;
 
 fn line(y: f32, x0: f32, x1: f32) -> Stroke {
@@ -583,10 +586,9 @@ fn the_gap_between_the_elements_of_a_selection_is_inside_its_frame() {
 
 // --- shapes: two points and a kind -----------------------------------------------------------
 
-use sgraffito::canvas::{Shape, ShapeKind};
-
 fn shape(kind: ShapeKind, from: [f32; 2], to: [f32; 2]) -> Shape {
     Shape {
+        points: Vec::new(),
         kind,
         color: "#e01b24".into(),
         width: 3.0,
@@ -661,6 +663,7 @@ fn an_arrow_keeps_its_direction_and_carries_a_head_at_the_end() {
     assert!((100.0 - up - half).abs() < 0.01 && (down - 100.0 - half).abs() < 0.01);
     // A hairline arrow still gets a head big enough to read.
     let thin = Shape {
+        points: Vec::new(),
         width: 1.0,
         fill: None,
         ..arrow.clone()
@@ -924,6 +927,7 @@ fn a_connector_follows_a_turned_shape_and_keeps_its_local_attachment() {
     board.add_shape(shape(ShapeKind::Rect, [0.0, 0.0], [100.0, 100.0]));
     let target = board.shapes[0].id;
     board.add_shape(Shape {
+        points: Vec::new(),
         kind: ShapeKind::Line,
         color: "#000000".into(),
         width: 2.0,
@@ -1057,7 +1061,7 @@ fn removing_nothing_removes_nothing() {
 
 // --- the view: canvas to screen ---------------------------------------------------------------
 
-use sgraffito::canvas::{View, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP};
+use sgraffito::canvas::{ZOOM_MAX, ZOOM_MIN, ZOOM_STEP};
 
 #[test]
 fn the_identity_view_maps_every_point_to_itself() {
@@ -1676,6 +1680,7 @@ fn the_selection_walk_visits_every_kind_in_document_order() {
             width: 3.0,
             from: [0.0, 0.0],
             to: [10.0, 10.0],
+            points: Vec::new(),
             rotate: 0.0,
             id: 0,
             attach: [None, None],
@@ -1730,6 +1735,7 @@ fn the_walk_wraps_backwards_and_steps_from_a_marquee() {
             width: 3.0,
             from: [0.0, 0.0],
             to: [10.0, 10.0],
+            points: Vec::new(),
             rotate: 0.0,
             id: 0,
             attach: [None, None],
@@ -2107,6 +2113,7 @@ fn a_connector_snaps_to_a_shape_and_follows_both_endpoints() {
     assert_eq!(right.at, [1.0, 0.0]);
 
     let connector = Shape {
+        points: Vec::new(),
         kind: ShapeKind::Line,
         color: "#000000".into(),
         width: 2.0,
@@ -2159,6 +2166,7 @@ fn a_shape_id_is_unique_and_connectors_are_remapped_on_a_copy() {
     board.add_shape(shape(ShapeKind::Rect, [0.0, 0.0], [100.0, 100.0]));
     let target = board.shapes[0].id;
     board.add_shape(Shape {
+        points: Vec::new(),
         kind: ShapeKind::Line,
         color: "#000000".into(),
         width: 2.0,
@@ -2212,6 +2220,7 @@ fn a_moved_shape_snaps_to_a_free_connector_end() {
     board.add_shape(shape(ShapeKind::Rect, [0.0, 0.0], [100.0, 100.0]));
     let shape_id = board.shapes[0].id;
     board.add_shape(Shape {
+        points: Vec::new(),
         kind: ShapeKind::Line,
         color: "#000000".into(),
         width: 2.0,
@@ -2598,6 +2607,7 @@ fn an_attached_connector_stays_on_the_outline_through_moves_scales_turns_and_cop
     board.add_shape(shape(ShapeKind::Circle, [0.0, 0.0], [100.0, 100.0]));
     let target = board.shapes[0].id;
     board.add_shape(Shape {
+        points: Vec::new(),
         kind: ShapeKind::Line,
         color: "#000000".into(),
         width: 2.0,
@@ -2691,6 +2701,7 @@ fn a_reverse_snap_to_a_circle_puts_the_joint_on_the_rim() {
     board.add_shape(shape(ShapeKind::Circle, [0.0, 0.0], [100.0, 100.0]));
     let target = board.shapes[0].id;
     board.add_shape(Shape {
+        points: Vec::new(),
         kind: ShapeKind::Line,
         color: "#000000".into(),
         width: 2.0,
@@ -2723,4 +2734,82 @@ fn a_reverse_snap_to_a_circle_puts_the_joint_on_the_rim() {
     let end = board.shapes[1].from;
     let nearest = board.shapes[0].nearest_boundary(end).unwrap();
     assert!(close(end, nearest), "the joint is not on the rim: {end:?}");
+}
+
+#[test]
+fn a_bent_line_is_hit_and_bounded_through_its_interior_vertex() {
+    let mut bent = shape(ShapeKind::Line, [0.0, 0.0], [100.0, 0.0]);
+    bent.points.push([50.0, 60.0]);
+
+    assert_eq!(bent.linear_vertex_count(), 3);
+    assert_eq!(bent.linear_vertex(1), Some([50.0, 60.0]));
+    assert!(bent.distance_squared(50.0, 60.0) < 1e-4);
+    assert!(
+        bent.paint_bounds().contains(50.0, 60.0),
+        "the bend escaped the shape's paint bounds: {:?}",
+        bent.paint_bounds()
+    );
+    assert!(
+        !bent.is_empty(),
+        "a line with a real bend was treated as an empty drag"
+    );
+
+    let plain = shape(ShapeKind::Line, [0.0, 0.0], [0.0, 0.0]);
+    assert!(plain.is_empty());
+}
+
+#[test]
+fn a_midpoint_press_inserts_a_persistent_vertex() {
+    let mut line = shape(ShapeKind::Line, [0.0, 0.0], [100.0, 0.0]);
+    assert_eq!(line.linear_midpoints(), vec![[50.0, 0.0]]);
+
+    let vertex = line
+        .insert_linear_vertex(0, line.linear_midpoints()[0])
+        .expect("the midpoint did not insert");
+    assert_eq!(vertex, 1);
+    assert_eq!(line.points, vec![[50.0, 0.0]]);
+    assert_eq!(line.linear_vertex_count(), 3);
+
+    assert!(line.set_linear_vertex(vertex, [50.0, 30.0]));
+    assert_eq!(line.linear_vertex(vertex), Some([50.0, 30.0]));
+    assert_eq!(line.points, vec![[50.0, 30.0]]);
+    assert_eq!(line.from, [0.0, 0.0]);
+    assert_eq!(line.to, [100.0, 0.0]);
+}
+
+#[test]
+fn selection_exposes_endpoints_while_edit_exposes_every_vertex() {
+    let mut line = shape(ShapeKind::Line, [0.0, 0.0], [100.0, 0.0]);
+    line.insert_linear_vertex(0, [50.0, 0.0]);
+    let view = View::default();
+
+    assert_eq!(
+        linear_handle_at(&line, view, [0.0, 0.0], false),
+        Some(LinearHandle::Vertex(0))
+    );
+    assert_eq!(
+        linear_handle_at(&line, view, [100.0, 0.0], false),
+        Some(LinearHandle::Vertex(2))
+    );
+    // The inserted vertex is hidden in selection mode, where only endpoints and midpoints are
+    // grabbable; edit mode promotes it to a full vertex handle.
+    assert_eq!(linear_handle_at(&line, view, [50.0, 0.0], false), None);
+    assert_eq!(
+        linear_handle_at(&line, view, [50.0, 0.0], true),
+        Some(LinearHandle::Vertex(1))
+    );
+    assert_eq!(
+        linear_handle_at(&line, view, [25.0, 0.0], false),
+        Some(LinearHandle::Midpoint(0))
+    );
+
+    let board = Board {
+        shapes: vec![line],
+        ..Board::default()
+    };
+    assert_eq!(selected_linear(&board, &[ItemId::Shape(0)]), Some(0));
+    assert_eq!(
+        selected_linear(&board, &[ItemId::Shape(0), ItemId::Shape(1)]),
+        None
+    );
 }

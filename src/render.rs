@@ -17,10 +17,10 @@ use tiny_skia::{
 use wayland_client::protocol::wl_shm::Format;
 
 use crate::canvas::{
-    Backdrop, Board, GRID_SPACING, Handle, ItemId, LiveConnector, NOTE_DATE_SIZE, NOTE_RADIUS,
-    Note, Overlay, Rect, SELECT_HANDLE, SELECT_ROTATE_GAP, Shape, ShapeKind, Stroke, TextItem,
-    TextOverlay, Tool, Toolbar, ToolbarAction, View, note_ink, parse_hex, rect_of, rotate_handle,
-    selection_frame_with,
+    Backdrop, Board, GRID_SPACING, Handle, ItemId, LINEAR_MIDPOINT, LiveConnector, NOTE_DATE_SIZE,
+    NOTE_RADIUS, Note, Overlay, Rect, SELECT_HANDLE, SELECT_ROTATE_GAP, Shape, ShapeKind, Stroke,
+    TextItem, TextOverlay, Tool, Toolbar, ToolbarAction, View, note_ink, parse_hex, rect_of,
+    rotate_handle, selected_linear, selection_frame_with,
 };
 use crate::config;
 use crate::config::{CardPosition, ToolbarPosition};
@@ -1389,6 +1389,11 @@ impl SketchCache {
             s.width.to_bits().hash(hash);
             s.from[0].to_bits().hash(hash);
             s.from[1].to_bits().hash(hash);
+            s.points.len().hash(hash);
+            for point in &s.points {
+                point[0].to_bits().hash(hash);
+                point[1].to_bits().hash(hash);
+            }
             s.to[0].to_bits().hash(hash);
             s.to[1].to_bits().hash(hash);
             s.rotate.to_bits().hash(hash);
@@ -1893,13 +1898,29 @@ impl Renderer {
                 self.text_boxes(ann, &s.items, screen),
             )
         });
-        if let Some(frame) = selection_boxes
+        let linear = overlay
+            .selection
             .as_ref()
-            .and_then(|(items, transform, boxes)| {
-                selection_frame_with(ann, items, *transform, boxes)
-            })
+            .filter(|selection| selection.transform.is_none())
+            .and_then(|selection| selected_linear(ann, &selection.items));
+        if linear.is_none()
+            && let Some(frame) = selection_boxes
+                .as_ref()
+                .and_then(|(items, transform, boxes)| {
+                    selection_frame_with(ann, items, *transform, boxes)
+                })
         {
             draw_selection(&mut pixmap, view.screen_rect(frame), screen);
+        }
+        if let Some(index) = linear
+            && let Some(shape) = ann.shapes.get(index)
+        {
+            draw_linear_handles(
+                &mut pixmap,
+                shape,
+                screen,
+                overlay.linear_edit == Some(index),
+            );
         }
         if let Some(marquee) = overlay.marquee {
             draw_marquee(&mut pixmap, marquee, screen);
@@ -1923,46 +1944,21 @@ impl Renderer {
             }
         }
         // Interface on the canvas: only while something is held, so a press on it can be told from
-        // a press on the drawing by the same rule that says the button is there.
+        // a press on the drawing by the same rule that says the control is there. The edit control
+        // is live only for one selected line or arrow; a cluster still gets move-to-board.
         if overlay.selection.is_some() && overlay.toolbar.is_some() {
             let (w, h) = (
                 pixmap.width() as f32 / scale,
                 pixmap.height() as f32 / scale,
             );
-            let box_ = move_button_bounds((w, h));
-            round_rect(
-                &mut pixmap,
-                Rect {
-                    x: box_.x * scale,
-                    y: box_.y * scale,
-                    w: box_.w * scale,
-                    h: box_.h * scale,
-                },
-                (MOVE_BUTTON_H / 2.0) * scale,
-                parse_hex(TOOLBAR_BLOCK_FILL),
-                Some((parse_hex(TOOLBAR_BLOCK_EDGE), TOOLBAR_HAIRLINE * scale)),
-            );
-            let label = "move to board";
-            let width = self.text_width(label, TOOLBAR_TEXT_SIZE);
-            let item = toolbar_text(
-                box_.x + (box_.w - width) / 2.0,
-                box_.y,
-                box_.h,
-                TOOLBAR_TEXT_SIZE,
-                TOOLBAR_LABEL_TEXT,
-                label,
-            );
-            self.draw_text(
-                &mut pixmap,
-                &item,
-                Screen {
-                    scale,
-                    view: View::default(),
-                },
-                None,
-                None,
-                None,
-            );
+            let can_edit = overlay
+                .selection
+                .as_ref()
+                .is_some_and(|selection| selected_linear(ann, &selection.items).is_some());
+            let editing = overlay
+                .linear_edit
+                .is_some_and(|index| ann.shapes.get(index).is_some_and(Shape::is_linear));
+            self.draw_action_card(&mut pixmap, (w, h), scale, can_edit, editing);
         }
         if let Some(at) = overlay.eraser {
             // The marker is what the pointer aims with, so its size is a screen length even though
@@ -2970,6 +2966,81 @@ impl Renderer {
                 TOOLBAR_BLOCK,
                 TOOLBAR_TEXT_SIZE,
                 TOOLBAR_LABEL_TEXT,
+                label,
+            );
+            self.draw_text(
+                pixmap,
+                &text,
+                Screen {
+                    scale,
+                    view: View::default(),
+                },
+                None,
+                None,
+                None,
+            );
+        }
+    }
+
+    /// The card that holds `edit` and `move to board` while a selection is held. It uses the rail's
+    /// own plate colour and edge, so it reads as the same material as the main control bar, and it
+    /// sits on the same bottom margin as the zoom and history cards.
+    fn draw_action_card(
+        &mut self,
+        pixmap: &mut PixmapMut,
+        surface: (f32, f32),
+        scale: f32,
+        can_edit: bool,
+        editing: bool,
+    ) {
+        let layout = action_card_layout(surface);
+        let card = Rect {
+            x: layout.card.x * scale,
+            y: layout.card.y * scale,
+            w: layout.card.w * scale,
+            h: layout.card.h * scale,
+        };
+        round_rect(
+            pixmap,
+            card,
+            TOOLBAR_RADIUS * scale,
+            parse_hex(TOOLBAR_PLATE_FILL),
+            Some((parse_hex(TOOLBAR_CARD_EDGE), TOOLBAR_HAIRLINE * scale)),
+        );
+        draw_card_shadow(pixmap, card, TOOLBAR_RADIUS * scale, scale);
+        for (rect, label, enabled, active) in [
+            (layout.edit, "edit", can_edit, editing),
+            (layout.move_, "move to board", true, false),
+        ] {
+            if active {
+                let button = Rect {
+                    x: rect.x * scale,
+                    y: rect.y * scale,
+                    w: rect.w * scale,
+                    h: rect.h * scale,
+                };
+                round_rect(
+                    pixmap,
+                    button,
+                    TOOLBAR_RADIUS * scale,
+                    parse_hex(TOOLBAR_ACCENT),
+                    None,
+                );
+            }
+            let ink = if !enabled {
+                TOOLBAR_LABEL_TEXT
+            } else if active {
+                "#ffffffff"
+            } else {
+                TOOLBAR_FOREGROUND
+            };
+            let width = self.text_width(label, TOOLBAR_TEXT_SIZE);
+            let text = toolbar_text(
+                rect.x + (rect.w - width) / 2.0,
+                rect.y,
+                rect.h,
+                TOOLBAR_TEXT_SIZE,
+                ink,
                 label,
             );
             self.draw_text(
@@ -4217,6 +4288,51 @@ fn draw_selection(pixmap: &mut PixmapMut, frame: Rect, screen: Screen) {
     }
 }
 
+/// The point handles of a selected line or arrow. Selection mode draws the two endpoints and a
+/// small midpoint on every segment; edit mode also exposes every interior vertex at full size. A
+/// dragged midpoint is inserted as a real vertex, so the next frame draws it in the full-size set.
+fn draw_linear_handles(pixmap: &mut PixmapMut, shape: &Shape, screen: Screen, edit: bool) {
+    let c = parse_hex(TOOLBAR_ACCENT);
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(c[0], c[1], c[2], c[3]);
+    paint.anti_alias = true;
+    let count = shape.linear_vertex_count();
+    for index in 0..count {
+        if !edit && index != 0 && index + 1 != count {
+            continue;
+        }
+        let Some(point) = shape.linear_vertex(index) else {
+            continue;
+        };
+        let point = screen.point(point);
+        let mut dot = PathBuilder::new();
+        dot.push_circle(point[0], point[1], screen.ui(SELECT_HANDLE / 2.0));
+        if let Some(path) = dot.finish() {
+            pixmap.fill_path(
+                &path,
+                &paint,
+                tiny_skia::FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
+        }
+    }
+    for point in shape.linear_midpoints() {
+        let point = screen.point(point);
+        let mut dot = PathBuilder::new();
+        dot.push_circle(point[0], point[1], screen.ui(LINEAR_MIDPOINT / 2.0));
+        if let Some(path) = dot.finish() {
+            pixmap.fill_path(
+                &path,
+                &paint,
+                tiny_skia::FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
+        }
+    }
+}
+
 /// The marquee of a selection drag: the same hairline, with no fill of its own.
 fn draw_marquee(pixmap: &mut PixmapMut, marquee: Rect, screen: Screen) {
     let Some(path) = rounded_rect_path(screen.rect(marquee), 0.0) else {
@@ -4596,15 +4712,56 @@ fn toolbar_bounds_at(
     }
 }
 
-/// The move-to-board button: a capsule at the bottom centre of the canvas, present only while a
-/// selection is held. Logical pixels, like the rail.
-pub fn move_button_bounds(size: (f32, f32)) -> Rect {
-    Rect {
-        x: size.0 / 2.0 - MOVE_BUTTON_W / 2.0,
-        y: size.1 - TOOLBAR_MARGIN - MOVE_BUTTON_H,
-        w: MOVE_BUTTON_W,
-        h: MOVE_BUTTON_H,
+/// Width of the `edit` control inside the selection action card, in logical pixels.
+const ACTION_EDIT_W: f32 = 58.0;
+
+/// One card at the bottom centre of the canvas, present only while a selection is held.
+#[derive(Clone, Copy)]
+struct ActionCardLayout {
+    card: Rect,
+    edit: Rect,
+    move_: Rect,
+}
+
+fn action_card_layout(size: (f32, f32)) -> ActionCardLayout {
+    let total = ACTION_EDIT_W + TOOLBAR_GAP + MOVE_BUTTON_W;
+    let x = ((size.0 - total) / 2.0).max(TOOLBAR_MARGIN);
+    let y = (size.1 - TOOLBAR_MARGIN - MOVE_BUTTON_H).max(0.0);
+    ActionCardLayout {
+        card: Rect {
+            x,
+            y,
+            w: total,
+            h: MOVE_BUTTON_H,
+        },
+        edit: Rect {
+            x,
+            y,
+            w: ACTION_EDIT_W,
+            h: MOVE_BUTTON_H,
+        },
+        move_: Rect {
+            x: x + ACTION_EDIT_W + TOOLBAR_GAP,
+            y,
+            w: MOVE_BUTTON_W,
+            h: MOVE_BUTTON_H,
+        },
     }
+}
+
+/// The card behind `edit` and `move to board`. Logical pixels, like the rail.
+pub fn action_card_bounds(size: (f32, f32)) -> Rect {
+    action_card_layout(size).card
+}
+
+/// The `edit` half of the selection action card, in logical pixels.
+pub fn action_card_edit_bounds(size: (f32, f32)) -> Rect {
+    action_card_layout(size).edit
+}
+
+/// The `move to board` half of the selection action card, in logical pixels.
+pub fn action_card_move_bounds(size: (f32, f32)) -> Rect {
+    action_card_layout(size).move_
 }
 
 /// Where the caret and the preedit sit in a shaped line, in logical pixels relative to the
@@ -4863,6 +5020,7 @@ fn draw_icon(
         draw_shape(
             pixmap,
             &Shape {
+                points: Vec::new(),
                 kind,
                 color: color.into(),
                 width: ICON_STROKE,
@@ -5350,10 +5508,18 @@ fn sketched_shape(s: &Shape, seed: u64) -> Vec<Seg> {
                 seed,
             )
         }
-        ShapeKind::Line => sketch::line(s.from, s.to, s.width, seed),
-        ShapeKind::Arrow => {
-            let mut segs = sketch::line(s.from, s.to, s.width, seed);
-            if let Some(head) = arrow_head(s) {
+        ShapeKind::Line | ShapeKind::Arrow => {
+            let vertices = s.linear_vertices();
+            let mut segs = Vec::new();
+            for (index, pair) in vertices.windows(2).enumerate() {
+                // A different salt per segment keeps a bend from looking like two copies of the
+                // same bow, while the first segment still sits under the hand that drew it.
+                let segment_seed = seed ^ (index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+                segs.extend(sketch::line(pair[0], pair[1], s.width, segment_seed));
+            }
+            if s.kind == ShapeKind::Arrow
+                && let Some(head) = arrow_head(s)
+            {
                 segs.extend(sketch::closed(&head, s.width, seed ^ HEAD_SALT));
             }
             segs
@@ -5378,7 +5544,12 @@ fn sketched_shape(s: &Shape, seed: u64) -> Vec<Seg> {
 /// The three corners of an arrow's head in canvas coordinates: the tip, then the two barbs. `None`
 /// when the arrow is too short to have a direction.
 fn arrow_head(s: &Shape) -> Option<[[f32; 2]; 3]> {
-    let (dx, dy) = (s.to[0] - s.from[0], s.to[1] - s.from[1]);
+    let vertices = s.linear_vertices();
+    if vertices.len() < 2 {
+        return None;
+    }
+    let (from, to) = (vertices[vertices.len() - 2], vertices[vertices.len() - 1]);
+    let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
     let len = (dx * dx + dy * dy).sqrt();
     if len <= f32::EPSILON {
         return None;
@@ -5532,8 +5703,6 @@ fn draw_exact_shape(
     paint: &Paint,
     stroke: &SkStroke,
 ) {
-    let from = screen.point(s.from);
-    let to = screen.point(s.to);
     match s.kind {
         ShapeKind::Circle | ShapeKind::Rect | ShapeKind::Diamond => {
             if let Some(path) = closed_shape_path(s, screen) {
@@ -5541,11 +5710,18 @@ fn draw_exact_shape(
             }
         }
         ShapeKind::Line | ShapeKind::Arrow => {
-            let mut pb = PathBuilder::new();
-            pb.move_to(from[0], from[1]);
-            pb.line_to(to[0], to[1]);
-            if let Some(path) = pb.finish() {
-                pixmap.stroke_path(&path, paint, stroke, Transform::identity(), None);
+            let vertices = s.linear_vertices();
+            if vertices.len() >= 2 {
+                let mut pb = PathBuilder::new();
+                let first = screen.point(vertices[0]);
+                pb.move_to(first[0], first[1]);
+                for point in &vertices[1..] {
+                    let point = screen.point(*point);
+                    pb.line_to(point[0], point[1]);
+                }
+                if let Some(path) = pb.finish() {
+                    pixmap.stroke_path(&path, paint, stroke, Transform::identity(), None);
+                }
             }
             if s.kind == ShapeKind::Arrow {
                 fill_arrow_head(pixmap, s, screen, paint);
@@ -6414,6 +6590,7 @@ mod tests {
     #[test]
     fn a_snap_marks_its_target_and_its_endpoint() {
         let target = Shape {
+            points: Vec::new(),
             kind: ShapeKind::Rect,
             color: "#ffffff".into(),
             width: 3.0,
@@ -6428,6 +6605,7 @@ mod tests {
         ann.add_shape(target.clone());
         let overlay = Overlay {
             shape: Some(Shape {
+                points: Vec::new(),
                 kind: ShapeKind::Line,
                 color: "#ffffff".into(),
                 width: 2.0,
@@ -6480,6 +6658,7 @@ mod tests {
     #[test]
     fn a_live_connector_joins_the_transient_damage() {
         let connector = Shape {
+            points: Vec::new(),
             kind: ShapeKind::Line,
             color: "#ffffff".into(),
             width: 3.0,
@@ -7679,6 +7858,7 @@ mod tests {
         // a document that already holds it.
         let held = [ItemId::Shape(0)];
         let shape = Shape {
+            points: Vec::new(),
             kind: ShapeKind::Circle,
             color: "#e01b24".into(),
             width: 3.0,
