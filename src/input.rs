@@ -195,12 +195,6 @@ pub fn deletes_selection(keysym: Keysym) -> bool {
     matches!(keysym, Keysym::Delete | Keysym::KP_Delete)
 }
 
-/// Whether this key cuts the selection: `Ctrl+X`, which copies exactly what `Ctrl+C` would and
-/// then removes the originals. Nothing else cuts, and without `Ctrl` `X` is no shortcut at all.
-pub fn cuts_selection(ctrl: bool, keysym: Keysym) -> bool {
-    ctrl && matches!(keysym, Keysym::x | Keysym::X)
-}
-
 /// The board list's own keys while it is open. It is a menu, so its letters act on the boards
 /// rather than arming the main rail's tools.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -483,19 +477,13 @@ impl KeyboardHandler for App {
             // Document undo, outside a text box: typing keeps its own keys, and the edit is the
             // unit undo works in once it has landed.
             self.undo();
-        } else if self.ctrl && matches!(event.keysym, Keysym::c | Keysym::C) {
-            self.copy_selection();
+        } else if self.ctrl && matches!(event.keysym, Keysym::d | Keysym::D) {
+            // Elements are duplicated in place, not put on the compositor clipboard: `Ctrl+D`
+            // clones the selection with a small offset and selects the clones.
+            self.duplicate_held();
         } else if self.ctrl && matches!(event.keysym, Keysym::v | Keysym::V) {
-            if self.shift {
-                self.open_clipboard();
-            } else {
-                self.paste();
-            }
-        } else if cuts_selection(self.ctrl, event.keysym) {
-            // A cut is `Ctrl+C` plus the removal `Delete` makes, so the copy must land first:
-            // `cut_selection` removes nothing when the clipboard refuses it. A text box or a
-            // board name takes this key earlier, before it can reach the canvas.
-            self.cut_selection();
+            // `Ctrl+V` is the compositor's text selection everywhere, including a text box.
+            self.paste();
         } else if deletes_selection(event.keysym) {
             // The only key that removes content. It acts on the selection, so with nothing selected
             // it does nothing.
@@ -1279,8 +1267,6 @@ impl App {
             ToolbarAction::Boards => self.toggle_boards(),
             ToolbarAction::Shared => self.toggle_shared(),
             ToolbarAction::Link => self.open_target(acting, Target::Link),
-            ToolbarAction::Clipboard => self.open_clipboard(),
-            ToolbarAction::Clip(index) => self.paste_clip(index),
             // The panel's rows are the document's boards in name order, which is the order the rail was
             // drawn from, so an index names the same board it was drawn as.
             ToolbarAction::Board(index) => {
@@ -1338,16 +1324,11 @@ impl App {
     }
 
     /// Paste the compositor's selection. In a text box it lands at the caret; with no editor open
-    /// it becomes a new text box, unless the app's own element clipboard is the newer source.
+    /// it becomes a new text box. There is no in-app element clipboard in the way.
     fn paste(&mut self) {
         self.refresh_system_selection();
-        let canvas = self.edit_target().is_none();
-        if canvas && !self.system_selection_is_newer() {
-            self.paste_newest();
-            return;
-        }
-        if !self.request_clipboard(canvas) && canvas {
-            self.paste_newest();
+        if !self.request_clipboard(self.edit_target().is_none()) {
+            log("nothing to paste from the compositor");
         }
     }
 
@@ -1398,10 +1379,7 @@ impl App {
                     }
                 }
                 PastedText::Edit(text) | PastedText::Canvas(text) => {
-                    if text.is_empty() {
-                        // The system offered no readable text; keep the app's own copy useful.
-                        self.paste_newest();
-                    } else {
+                    if !text.is_empty() {
                         self.paste_text(text);
                     }
                 }

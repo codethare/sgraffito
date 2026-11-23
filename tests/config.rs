@@ -45,8 +45,6 @@ fn config_paints_the_palette_and_the_note_border() {
             more: false,
             boards_open: false,
             size_open: false,
-            clipboard_open: false,
-            clips: Vec::new(),
             target: None,
             rename: None,
             delete_confirm: None,

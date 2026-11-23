@@ -259,8 +259,6 @@ fn rail_state() -> Toolbar {
         more: false,
         boards_open: false,
         size_open: false,
-        clipboard_open: false,
-        clips: Vec::new(),
         target: None,
         rename: None,
         delete_confirm: None,

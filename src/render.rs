@@ -180,8 +180,6 @@ enum Icon {
     Shared,
     /// The link row: two chain links.
     Link,
-    /// A clipboard entry.
-    Clipboard,
     /// Undo and redo arrows for the history cards.
     Undo,
     Redo,
@@ -278,10 +276,7 @@ fn key_of(action: ToolbarAction) -> Option<&'static str> {
         | ToolbarAction::RenameBoard(_) => "C",
         ToolbarAction::CancelDeleteBoard => return None,
         ToolbarAction::Shared => "F",
-        // No single letter: `Ctrl+Shift+V` opens the history, and the row says so in the drawer.
-        ToolbarAction::Clipboard => "Ctrl+Shift+V",
         ToolbarAction::Link => return None,
-        ToolbarAction::Clip(_) => return None,
         ToolbarAction::Backdrop(_) => return None,
         ToolbarAction::Color(index) => ["1", "2", "3", "4", "5"].get(index).copied().unwrap_or("?"),
         ToolbarAction::SizeStep(dir) => {
@@ -310,7 +305,7 @@ fn labelled(action: ToolbarAction, what: &str) -> String {
 
 /// The key a block shows on its face: its **primary** shortcut, and only when that shortcut is a
 /// single key. A board row names the key that opened its list rather than a key of its own, and a
-/// chord such as `Ctrl+Shift+V` or an alternate binding is no face mark — the stretched capsule
+/// chord such as `Ctrl+Shift+Z` or an alternate binding is no face mark — the stretched capsule
 /// still states it in full, which is where every key, primary or alternate, is taught.
 fn badge_of(action: ToolbarAction) -> Option<&'static str> {
     if matches!(
@@ -831,12 +826,11 @@ fn toolbar_blocks(toolbar: &Toolbar, surface: f32) -> Vec<Block> {
 /// by choice, so they live in the list the `more` block opens. This is the one list of who they are —
 /// `drawer_blocks` is what they look like — so the rules that open and close the drawer cannot
 /// disagree with what it shows.
-pub const DRAWER: [ToolbarAction; 5] = [
+pub const DRAWER: [ToolbarAction; 4] = [
     ToolbarAction::Tool(Tool::Bucket),
     ToolbarAction::Scrim,
     ToolbarAction::Shared,
     ToolbarAction::Link,
-    ToolbarAction::Clipboard,
 ];
 
 /// How many boards the panel lists before the rest are only reachable from the command line. The rail
@@ -854,8 +848,6 @@ fn open_panel(
         Some((ToolbarAction::Boards, board_rows(toolbar)))
     } else if toolbar.size_open {
         Some((ToolbarAction::Size, size_rows(toolbar)))
-    } else if toolbar.clipboard_open {
-        Some((ToolbarAction::More, clip_rows(toolbar)))
     } else if toolbar.more {
         Some((ToolbarAction::More, drawer_blocks(toolbar, overflow)))
     } else {
@@ -882,7 +874,6 @@ pub fn picks_from_panel(action: ToolbarAction) -> bool {
                 | ToolbarAction::CancelDeleteBoard
                 | ToolbarAction::RenameBoard(_)
                 | ToolbarAction::SizeStep(_)
-                | ToolbarAction::Clip(_)
                 | ToolbarAction::Backdrop(_)
         )
 }
@@ -895,12 +886,7 @@ pub fn picks_from_panel(action: ToolbarAction) -> bool {
 pub fn panel_stays_open(hover: Option<ToolbarAction>, owner: Option<ToolbarAction>) -> bool {
     matches!(
         owner,
-        Some(
-            ToolbarAction::Boards
-                | ToolbarAction::Size
-                | ToolbarAction::Clipboard
-                | ToolbarAction::More
-        )
+        Some(ToolbarAction::Boards | ToolbarAction::Size | ToolbarAction::More)
     ) || match owner {
         Some(owner) => hover == Some(owner) || hover.is_some_and(picks_from_panel),
         None => false,
@@ -921,7 +907,6 @@ pub fn closes_panel_on_pick(action: ToolbarAction) -> bool {
                 | ToolbarAction::CancelDeleteBoard
                 | ToolbarAction::RenameBoard(_)
                 | ToolbarAction::Link
-                | ToolbarAction::Clipboard
                 | ToolbarAction::Scrim
                 | ToolbarAction::Backdrop(_)
         )
@@ -984,14 +969,6 @@ fn drawer_blocks(toolbar: &Toolbar, overflow: &[Block]) -> Vec<Block> {
                 mark: Mark::Icon(Icon::Link),
                 column: 1,
                 label: labelled(*action, "link text to board"),
-                action: Some(*action),
-                active: false,
-                gap: TOOLBAR_GAP,
-            }),
-            ToolbarAction::Clipboard => Some(Block {
-                mark: Mark::Icon(Icon::Clipboard),
-                column: 1,
-                label: labelled(*action, "clipboard history"),
                 action: Some(*action),
                 active: false,
                 gap: TOOLBAR_GAP,
@@ -1113,31 +1090,6 @@ fn size_rows(toolbar: &Toolbar) -> Vec<Block> {
         .collect()
 }
 
-/// The clipboard history's rows, newest first. Every row is a pick: a press pastes that entry and
-/// closes the panel.
-fn clip_rows(toolbar: &Toolbar) -> Vec<Block> {
-    toolbar
-        .clips
-        .iter()
-        .enumerate()
-        .map(|(index, clip)| {
-            let label = if clip.preview.is_empty() {
-                format!("{}: {} items", index + 1, clip.items)
-            } else {
-                format!("{}: {} items · {}", index + 1, clip.items, clip.preview)
-            };
-            Block {
-                mark: Mark::Icon(Icon::Clipboard),
-                column: 1,
-                label,
-                action: Some(ToolbarAction::Clip(index)),
-                active: false,
-                gap: TOOLBAR_GAP,
-            }
-        })
-        .collect()
-}
-
 /// What the `more` block reports while the pointer is on it: what is in the drawer, or `None` while the
 /// drawer is open, because then its controls are on screen and each is named by its own block.
 fn drawer_legend(toolbar: &Toolbar, overflow: &[Block]) -> Option<String> {
@@ -1164,7 +1116,6 @@ fn drawer_caption(action: ToolbarAction) -> Option<&'static str> {
         ToolbarAction::Scrim => "backdrop",
         ToolbarAction::Shared => "boards",
         ToolbarAction::Link => "link",
-        ToolbarAction::Clipboard => "clipboard",
         _ => return None,
     })
 }
@@ -4415,8 +4366,6 @@ fn same_layout(a: &Toolbar, b: &Toolbar) -> bool {
         && a.more == b.more
         && a.boards_open == b.boards_open
         && a.size_open == b.size_open
-        && a.clipboard_open == b.clipboard_open
-        && a.clips == b.clips
         && a.target == b.target
         && a.rename == b.rename
         && a.delete_confirm == b.delete_confirm
@@ -5361,31 +5310,6 @@ fn draw_icon(
                 }
             }
         }
-        Icon::Clipboard => {
-            // A board with a clip over its top edge.
-            if let Some(body) = rounded_rect_path(
-                Rect {
-                    x: x + w * 0.2,
-                    y: y + h * 0.2,
-                    w: w * 0.6,
-                    h: h * 0.7,
-                },
-                2.0 * scale,
-            ) {
-                path.push_path(&body);
-            }
-            if let Some(clip) = rounded_rect_path(
-                Rect {
-                    x: x + w * 0.38,
-                    y: y + h * 0.1,
-                    w: w * 0.24,
-                    h: h * 0.2,
-                },
-                1.0 * scale,
-            ) {
-                path.push_path(&clip);
-            }
-        }
         Icon::Link => {
             // Two chain links, overlapping at the middle.
             for dx in [0.1, 0.4] {
@@ -6269,31 +6193,18 @@ mod tests {
                 Some(ToolbarAction::Lock),
                 "{position:?}: the open drawer shadowed the lock block"
             );
-            // The boards list and the clipboard list are panels too, and follow the same edge.
-            let panels = [
-                (
-                    Toolbar {
-                        boards_open: true,
-                        boards: vec![crate::canvas::BoardRow {
-                            name: "laptop".into(),
-                            current: true,
-                        }],
-                        ..rail_for_legend()
-                    },
-                    ToolbarAction::Board(0),
-                ),
-                (
-                    Toolbar {
-                        clipboard_open: true,
-                        clips: vec![crate::canvas::ClipRow {
-                            items: 2,
-                            preview: "note".into(),
-                        }],
-                        ..rail_for_legend()
-                    },
-                    ToolbarAction::Clip(0),
-                ),
-            ];
+            // The boards list is a panel too and follows the same edge.
+            let panels = [(
+                Toolbar {
+                    boards_open: true,
+                    boards: vec![crate::canvas::BoardRow {
+                        name: "laptop".into(),
+                        current: true,
+                    }],
+                    ..rail_for_legend()
+                },
+                ToolbarAction::Board(0),
+            )];
             for (panel_rail, action) in panels {
                 let pill = renderer.toolbar_pill(&panel_rail, surface, position);
                 let row = pill
@@ -7352,8 +7263,6 @@ mod tests {
             more: false,
             boards_open: false,
             size_open: false,
-            clipboard_open: false,
-            clips: Vec::new(),
             target: None,
             rename: None,
             delete_confirm: None,
@@ -7654,8 +7563,6 @@ mod tests {
                 more: false,
                 boards_open: false,
                 size_open: false,
-                clipboard_open: false,
-                clips: Vec::new(),
                 target: None,
                 rename: None,
                 delete_confirm: None,
@@ -8010,8 +7917,6 @@ mod tests {
             more: false,
             boards_open: false,
             size_open: false,
-            clipboard_open: false,
-            clips: Vec::new(),
             target: None,
             rename: None,
             delete_confirm: None,
@@ -8278,11 +8183,9 @@ mod tests {
                 | ToolbarAction::NewBoard
                 | ToolbarAction::DeleteBoard(_)
                 | ToolbarAction::RenameBoard(_) => keysym == Keysym::C || keysym == Keysym::c,
-                // These live in the drawer (closed here) or in the clipboard list, and name no
-                // single key: their block labels are never walked by this test.
+                // These live in the drawer (closed here) and name no single key: their block labels
+                // are never walked by this test.
                 ToolbarAction::Link
-                | ToolbarAction::Clipboard
-                | ToolbarAction::Clip(_)
                 | ToolbarAction::AskDeleteBoard(_)
                 | ToolbarAction::CancelDeleteBoard
                 | ToolbarAction::Undo
@@ -8310,9 +8213,8 @@ mod tests {
         assert_eq!(badge_of(ToolbarAction::Lock), Some("Esc"));
         assert_eq!(badge_of(ToolbarAction::More), Some("M"));
         assert_eq!(badge_of(ToolbarAction::Shared), Some("F"));
-        // A chord has no letter of its own to wear, and a pick out of a panel names the key that
-        // opened the list rather than one of its own.
-        assert_eq!(badge_of(ToolbarAction::Clipboard), None);
+        // A row in the drawer has no letter of its own to wear, and a pick out of a panel names the
+        // key that opened the list rather than one of its own.
         assert_eq!(badge_of(ToolbarAction::Link), None);
         assert_eq!(badge_of(ToolbarAction::Size), None);
         assert_eq!(badge_of(ToolbarAction::Board(0)), None);
@@ -8326,11 +8228,6 @@ mod tests {
             let key = badge_of(action).expect("a badged action");
             assert!(labelled(action, "does it").ends_with(&format!("({key})")));
         }
-        // The capsule still teaches a key the square cannot abbreviate.
-        assert_eq!(
-            labelled(ToolbarAction::Clipboard, "clipboard history"),
-            "clipboard history (Ctrl+Shift+V)"
-        );
     }
 
     /// The badge and the icon are drawn in the same 30 pt square, so their boxes must stay apart.

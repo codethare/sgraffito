@@ -389,8 +389,6 @@ fn toolbar(tool: Tool, color: &'static str, size: f32, hover: Option<ToolbarActi
         more: false,
         boards_open: false,
         size_open: false,
-        clipboard_open: false,
-        clips: Vec::new(),
         target: None,
         rename: None,
         delete_confirm: None,
@@ -2490,8 +2488,6 @@ fn a_row_of_the_panel_can_be_clicked_with_the_pointer_on_the_block_that_opened_i
         more: true,
         boards_open: false,
         size_open: false,
-        clipboard_open: false,
-        clips: Vec::new(),
         target: None,
         rename: None,
         delete_confirm: None,
@@ -2522,7 +2518,7 @@ fn a_row_of_the_panel_can_be_clicked_with_the_pointer_on_the_block_that_opened_i
     // The panel's control answers on a row, and the block's own strip covers the rail's column beside it.
     assert_eq!(
         hit(&mut renderer, 60.0, last_row - 5.0),
-        Some(ToolbarAction::Clipboard)
+        Some(ToolbarAction::Link)
     );
     assert_eq!(
         hit(&mut renderer, 20.0, last_row - 5.0),

@@ -203,10 +203,6 @@ pub enum ToolbarAction {
     Shared,
     /// Link the selected text box to a board: opens the board list as a target picker.
     Link,
-    /// Open the clipboard history panel.
-    Clipboard,
-    /// Paste clipboard entry `index`, newest first.
-    Clip(usize),
 }
 
 /// What edit mode paints behind the document. Locked mode always paints nothing, because that
@@ -3344,13 +3340,6 @@ fn transformed_text_box(
     }
 }
 
-/// Most elements one clipboard entry may hold, and most bytes of JSON it may be. A clip is memory,
-/// not the file: these bound the one case where a copy is a whole busy board.
-pub const MAX_CLIP_ITEMS: usize = 200;
-pub const MAX_CLIP_BYTES: usize = 1_000_000;
-/// Most entries the clipboard history keeps; an older entry is dropped to make room for a newer one.
-pub const MAX_CLIP_ENTRIES: usize = 8;
-
 /// The text a link action would link: the one text box held, and nothing else. `None` when nothing
 /// is held, more than one thing is, or the held thing is not a text box.
 pub fn link_source(ann: &Board, items: &[ItemId]) -> Option<usize> {
@@ -3358,86 +3347,6 @@ pub fn link_source(ann: &Board, items: &[ItemId]) -> Option<usize> {
         [ItemId::Text(index)] if *index < ann.texts.len() => Some(*index),
         _ => None,
     }
-}
-
-/// The element count and JSON byte count of a clipboard copy, or `None` when either cap would be
-/// exceeded. Both caps matter: a few huge strokes and a thousand tiny ones are the same problem.
-pub fn clip_size(board: &Board) -> Option<(usize, usize)> {
-    let items = board.strokes.len() + board.texts.len() + board.shapes.len() + board.notes.len();
-    if items > MAX_CLIP_ITEMS {
-        return None;
-    }
-    let bytes = serde_json::to_vec(board).ok()?.len();
-    (bytes <= MAX_CLIP_BYTES).then_some((items, bytes))
-}
-
-/// Drop the oldest clipboard entries until the history is within all three caps. The newest entry
-/// is assumed to fit on its own: [`ClipEntry::new`] refused it otherwise, so the tail is always the
-/// part that goes.
-pub fn trim_clipboard(clips: &mut Vec<ClipEntry>) {
-    while clips.len() > MAX_CLIP_ENTRIES {
-        clips.pop();
-    }
-    let mut items: usize = clips.iter().map(|clip| clip.items).sum();
-    let mut bytes: usize = clips.iter().map(|clip| clip.bytes).sum();
-    while (items > MAX_CLIP_ITEMS || bytes > MAX_CLIP_BYTES) && clips.len() > 1 {
-        if let Some(old) = clips.pop() {
-            items -= old.items;
-            bytes -= old.bytes;
-        }
-    }
-}
-
-/// Record a copy of `items` from `board` as the newest clipboard entry, and return how many
-/// elements it holds. `None` when there is nothing to copy or the copy is too large for the
-/// clipboard, in which case the history is left exactly as it was — the caller decides what that
-/// means for the document. This is the one place a copy is encoded, so `Ctrl+C` and a cut cannot
-/// disagree about what the clipboard holds.
-pub fn record_clip(clips: &mut Vec<ClipEntry>, board: &Board, items: &[ItemId]) -> Option<usize> {
-    if items.is_empty() {
-        return None;
-    }
-    let entry = ClipEntry::new(board.copied(items))?;
-    // A repeat copy of the same shape is not a second history entry: it moves to the front.
-    if let Some(index) = clips.iter().position(|clip| clip.board == entry.board) {
-        clips.remove(index);
-    }
-    let count = entry.items;
-    clips.insert(0, entry);
-    trim_clipboard(clips);
-    Some(count)
-}
-
-/// One entry in the clipboard history, with the measurements its cap was decided from.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ClipEntry {
-    pub board: Board,
-    pub items: usize,
-    pub bytes: usize,
-}
-
-impl ClipEntry {
-    /// A new entry when both caps allow it; `None` when the copy is too big to be stored at all.
-    pub fn new(board: Board) -> Option<Self> {
-        let (items, bytes) = clip_size(&board)?;
-        Some(Self {
-            board,
-            items,
-            bytes,
-        })
-    }
-
-    pub fn preview(&self) -> String {
-        self.board.clip_preview()
-    }
-}
-
-/// One entry in the clipboard history, as the panel lists it: how many elements it holds and a short
-/// preview so two similar copies can be told apart.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ClipRow {
-    pub items: usize,
-    pub preview: String,
 }
 
 impl Board {
@@ -3457,6 +3366,10 @@ impl Board {
         for shape in &mut out.shapes {
             shape.from[0] += dx;
             shape.from[1] += dy;
+            for point in &mut shape.points {
+                point[0] += dx;
+                point[1] += dy;
+            }
             shape.to[0] += dx;
             shape.to[1] += dy;
         }
@@ -3465,26 +3378,6 @@ impl Board {
             note.y += dy;
         }
         out
-    }
-}
-
-impl Board {
-    /// A one-line description of a clipboard entry, taken from its first non-empty text or note.
-    pub fn clip_preview(&self) -> String {
-        let text = self
-            .texts
-            .iter()
-            .map(|t| t.text.as_str())
-            .chain(self.notes.iter().map(|n| n.text.as_str()))
-            .find(|text| !text.trim().is_empty());
-        let mut preview = match text {
-            Some(text) => text.lines().next().unwrap_or("").trim().to_string(),
-            None => String::new(),
-        };
-        if preview.chars().count() > 24 {
-            preview = preview.chars().take(24).collect::<String>() + "…";
-        }
-        preview
     }
 }
 
@@ -3976,10 +3869,7 @@ pub struct Toolbar {
     /// Whether the width list is open. The readout toggles it, and it obeys the same one-panel rule as the
     /// other two.
     pub size_open: bool,
-    /// Whether the clipboard history panel is open.
-    pub clipboard_open: bool,
-    /// The clipboard history, newest first, as the panel lists it.
-    pub clips: Vec<ClipRow>,
+
     /// What a board pick applies while a target picker is open. `None` means a pick switches the screen.
     pub target: Option<Target>,
     /// The board's name being edited in the list, which its row draws instead of the name.

@@ -2,9 +2,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use sgraffito::canvas::{
-    Board, ClipEntry, Doc, ItemId, MAX_CLIP_BYTES, MAX_CLIP_ENTRIES, MAX_CLIP_ITEMS, Note,
-    PEN_WIDTH_MAX, Shape, ShapeKind, Stroke, TEXT_SIZE_MAX, TextItem, View, clip_size, link_source,
-    record_clip, stepped_size, trim_clipboard,
+    Board, Doc, ItemId, Note, PEN_WIDTH_MAX, Shape, ShapeKind, Stroke, TEXT_SIZE_MAX, TextItem,
+    View, link_source, stepped_size,
 };
 use sgraffito::store::{self, Store};
 
@@ -746,97 +745,6 @@ fn moving_elements_leaves_the_source_board_without_them() {
     assert_eq!(doc.move_items("a", "a", &[ItemId::Stroke(0)]), None);
 }
 
-/// The two halves of a cut, on the data model: the clipboard gets exactly what `Ctrl+C` records —
-/// one entry holding the selected elements — and only then are those elements removed. This is the
-/// order `App::cut_selection` runs, and the selection's ids name nothing once `remove` has run.
-#[test]
-fn a_cut_records_one_copy_then_removes_the_originals() {
-    let mut board = Board {
-        strokes: vec![Stroke {
-            color: "#fff".into(),
-            width: 3.0,
-            points: vec![[0.0, 0.0], [4.0, 4.0]],
-            attach: [None, None],
-        }],
-        texts: vec![TextItem {
-            x: 1.0,
-            y: 2.0,
-            color: "#fff".into(),
-            size: 18.0,
-            text: "cut".into(),
-            link: None,
-            container: None,
-        }],
-        ..Board::default()
-    };
-    let items = [ItemId::Stroke(0), ItemId::Text(0)];
-    let mut clips = Vec::new();
-
-    assert_eq!(record_clip(&mut clips, &board, &items), Some(2));
-    assert_eq!(clips.len(), 1, "a cut recorded more than one entry");
-    assert_eq!(clips[0].board.strokes.len(), 1);
-    assert_eq!(clips[0].board.texts.len(), 1);
-
-    assert!(board.remove(&items).is_some(), "the cut removed nothing");
-    assert!(board.strokes.is_empty(), "the cut left its stroke");
-    assert!(board.texts.is_empty(), "the cut left its text");
-}
-
-/// Nothing selected is a no-op, and a copy the clipboard refuses leaves both the history and the
-/// board alone: a cut never loses what the clipboard did not take.
-#[test]
-fn an_empty_or_refused_cut_changes_nothing() {
-    let mut clips = Vec::new();
-    assert_eq!(record_clip(&mut clips, &Board::default(), &[]), None);
-    assert!(clips.is_empty(), "an empty cut recorded an entry");
-
-    let board = Board {
-        strokes: (0..=MAX_CLIP_ITEMS)
-            .map(|i| Stroke {
-                color: "#fff".into(),
-                width: 3.0,
-                points: vec![[i as f32, 0.0]],
-                attach: [None, None],
-            })
-            .collect(),
-        ..Board::default()
-    };
-    let items: Vec<ItemId> = (0..=MAX_CLIP_ITEMS).map(ItemId::Stroke).collect();
-    assert_eq!(record_clip(&mut clips, &board, &items), None);
-    assert!(clips.is_empty(), "a refused cut recorded an entry");
-}
-
-/// The clipboard caps are both enforced, and a copy over either is refused whole rather than
-/// trimmed: half a drawing pasted is worse than nothing.
-#[test]
-fn a_copy_over_the_cap_is_refused_whole() {
-    assert!(clip_size(&Board::default()).is_some());
-    let board = Board {
-        strokes: (0..=MAX_CLIP_ITEMS)
-            .map(|i| Stroke {
-                color: "#fff".into(),
-                width: 3.0,
-                points: vec![[i as f32, 0.0]],
-                attach: [None, None],
-            })
-            .collect(),
-        ..Board::default()
-    };
-    assert!(ClipEntry::new(board).is_none(), "the item cap was ignored");
-
-    let mut wordy = Board::default();
-    wordy.texts.push(TextItem {
-        container: None,
-        x: 0.0,
-        y: 0.0,
-        color: "#fff".into(),
-        size: 18.0,
-        text: "x".repeat(MAX_CLIP_BYTES),
-        link: None,
-    });
-    assert!(ClipEntry::new(wordy).is_none(), "the byte cap was ignored");
-}
-
 /// Only one text box is a link source, and following a link keeps the zoom and centres the point.
 #[test]
 fn a_link_source_is_one_text_box_and_the_jump_centres_it() {
@@ -877,31 +785,6 @@ fn a_link_source_is_one_text_box_and_the_jump_centres_it() {
     .centred_on((800.0, 600.0), [100.0, 50.0]);
     assert_eq!(view.zoom, 2.0);
     assert_eq!(view.to_screen([100.0, 50.0]), [400.0, 300.0]);
-}
-
-/// The history is capped by entries, elements and bytes together, and evicts oldest-first: the
-/// newest copy is always the one left at the front.
-#[test]
-fn the_clipboard_history_evicts_the_oldest_entry_under_every_cap() {
-    let entry = |items: usize, bytes: usize| ClipEntry {
-        board: Board::default(),
-        items,
-        bytes,
-    };
-    let mut clips = (0..MAX_CLIP_ENTRIES + 3)
-        .map(|_| entry(1, 1))
-        .collect::<Vec<_>>();
-    trim_clipboard(&mut clips);
-    assert_eq!(clips.len(), MAX_CLIP_ENTRIES);
-
-    let mut by_items = vec![entry(120, 1), entry(120, 1)];
-    trim_clipboard(&mut by_items);
-    assert_eq!(by_items.len(), 1, "the element cap did not evict");
-    assert_eq!(by_items[0].items, 120, "the oldest entry survived");
-
-    let mut by_bytes = vec![entry(1, MAX_CLIP_BYTES), entry(1, MAX_CLIP_BYTES)];
-    trim_clipboard(&mut by_bytes);
-    assert_eq!(by_bytes.len(), 1, "the byte cap did not evict");
 }
 
 /// Shape ids and connector attachments are document data: a save and load keeps both, so a connector

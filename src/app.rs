@@ -41,14 +41,14 @@ use wayland_client::{
 };
 
 use crate::canvas::{
-    Attachment, Backdrop, Board, BoardEdit, BoardRow, ClipEntry, ClipRow, Doc, ERASER_THRESHOLD,
-    Gesture, Grab, Handle, ItemId, LinearHandle, LiveConnector, Motion, Note, Overlay,
-    PEN_WIDTH_MAX, PEN_WIDTH_MIN, PEN_WIDTH_STEP, Press, Rect, SNAP_RADIUS, Selection, Shape,
-    ShapeKind, TEXT_SIZE_MAX, TEXT_SIZE_MIN, TEXT_SIZE_STEP, Target, TextBuffer, TextItem,
-    TextOverlay, Toolbar, Transform, View, ZOOM_STEP, Zoom, date_stamp, link_source,
-    marquee_select, note_drag, nudge_delta, record_clip, selected_linear, selection_bounds,
-    selection_frame, selection_frame_with, selection_press_linear, selection_with_contents,
-    snap_square, stepped_size, toggle_selection_with_contents,
+    Attachment, Backdrop, Board, BoardEdit, BoardRow, Doc, ERASER_THRESHOLD, Gesture, Grab, Handle,
+    ItemId, LinearHandle, LiveConnector, Motion, Note, Overlay, PEN_WIDTH_MAX, PEN_WIDTH_MIN,
+    PEN_WIDTH_STEP, Press, Rect, SNAP_RADIUS, Selection, Shape, ShapeKind, TEXT_SIZE_MAX,
+    TEXT_SIZE_MIN, TEXT_SIZE_STEP, Target, TextBuffer, TextItem, TextOverlay, Toolbar, Transform,
+    View, ZOOM_STEP, Zoom, date_stamp, link_source, marquee_select, note_drag, nudge_delta,
+    selected_linear, selection_bounds, selection_frame, selection_frame_with,
+    selection_press_linear, selection_with_contents, snap_square, stepped_size,
+    toggle_selection_with_contents,
 };
 
 pub use crate::canvas::{Tool, ToolbarAction};
@@ -122,15 +122,6 @@ pub(crate) struct LinearDrag {
 pub(crate) enum PastedText {
     Edit(String),
     Canvas(String),
-}
-
-/// Whether a compositor selection arrived after the app last recorded its own copied elements.
-fn system_selection_is_newer(selection: Option<Instant>, own_copy: Option<Instant>) -> bool {
-    match (selection, own_copy) {
-        (Some(system), Some(own)) => system > own,
-        (Some(_), None) => true,
-        _ => false,
-    }
 }
 
 /// Whether `previous` and a press now on `index` at `point` are a double click rather than two
@@ -381,11 +372,6 @@ pub struct App {
     data_device: Option<DataDevice>,
     /// The compositor's current selection, replaced on every selection event.
     pub(crate) selection: Option<SelectionOffer>,
-    /// When the compositor last advertised a selection, so a newer system copy can outrank the
-    /// app's own element history.
-    pub(crate) selection_at: Option<Instant>,
-    /// When the app last recorded its own copied elements.
-    pub(crate) last_copy: Option<Instant>,
     /// Pasted text, read off the event loop by a thread and drained by `tick`.
     pub(crate) paste_tx: mpsc::Sender<PastedText>,
     pub(crate) pasted: mpsc::Receiver<PastedText>,
@@ -440,8 +426,7 @@ pub struct App {
     pub(crate) boards_open: bool,
     /// Whether the rail's width list is open. The readout toggles it; one at a time like the others.
     pub(crate) size_open: bool,
-    /// Whether the clipboard history panel is open.
-    pub(crate) clipboard_open: bool,
+
     /// What a pick in the board list applies instead of switching the screen.
     pub(crate) target: Option<Target>,
     /// Whether the collapsed colour swatch is expanded.
@@ -458,8 +443,7 @@ pub struct App {
     pub(crate) linear_drag: Option<LinearDrag>,
     /// When the colour strip started unfurling.
     colors_since: Option<Instant>,
-    /// The in-app clipboard history, newest first. Session state: it is never written to the file.
-    pub(crate) clips: Vec<ClipEntry>,
+
     /// The board's name being edited in the list, if any. A name is typed where it is read, so this is
     /// app-level state and not an output's.
     pub(crate) rename: Option<Rename>,
@@ -703,7 +687,6 @@ impl App {
             shared: false,
             boards_open: false,
             size_open: false,
-            clipboard_open: false,
             target: None,
             colors_open: false,
             colors_until: None,
@@ -711,7 +694,6 @@ impl App {
             last_text_press: None,
             last_container_press: None,
             linear_drag: None,
-            clips: Vec::new(),
             rename: None,
             delete_confirm: None,
             panel_open_since: None,
@@ -725,8 +707,6 @@ impl App {
             data_device_manager,
             data_device: None,
             selection: None,
-            selection_at: None,
-            last_copy: None,
             paste_tx,
             pasted,
             ping,
@@ -757,6 +737,13 @@ impl App {
         app.bind_text_input_manager();
         app.bind_cursor_shape();
         app.bind_pointer_gestures();
+        // `SeatState::new` binds the seats that already exist; it does not call `new_seat` for
+        // them. The data device is what receives the compositor's selection, so bind it here as
+        // well as on a hotplugged seat below.
+        let seats: Vec<_> = app.seat_state.seats().collect();
+        if let Some(seat) = seats.first() {
+            app.data_device = Some(app.data_device_manager.get_data_device(&app.qh, seat));
+        }
         app.sync_outputs();
         Ok(app)
     }
@@ -952,15 +939,6 @@ impl App {
                     more: self.more,
                     boards_open: self.boards_open,
                     size_open: self.size_open,
-                    clipboard_open: self.clipboard_open,
-                    clips: self
-                        .clips
-                        .iter()
-                        .map(|clip| ClipRow {
-                            items: clip.items,
-                            preview: clip.preview(),
-                        })
-                        .collect(),
                     target: self.target,
                     rename: self.rename.as_ref().map(|rename| BoardEdit {
                         index: rename.index,
@@ -1186,7 +1164,6 @@ impl App {
         // lists the pointer could not be said to be reading from.
         self.boards_open = false;
         self.size_open = false;
-        self.clipboard_open = false;
         self.more = open;
         self.delete_confirm = None;
         self.panel_open_since = open.then(Instant::now);
@@ -1202,29 +1179,11 @@ impl App {
         }
         self.more = false;
         self.size_open = false;
-        self.clipboard_open = false;
         self.boards_open = open;
         if !open {
             self.target = None;
             self.delete_confirm = None;
         }
-        self.panel_open_since = open.then(Instant::now);
-        self.toolbar_hover = None;
-        self.toolbar_hover_since = None;
-        self.refresh_toolbar();
-    }
-
-    /// Open or close the clipboard history panel. A pick pastes and closes it, like every other panel.
-    pub(crate) fn set_clipboard(&mut self, open: bool) {
-        if self.clipboard_open == open {
-            return;
-        }
-        self.more = false;
-        self.boards_open = false;
-        self.size_open = false;
-        self.clipboard_open = open;
-        self.target = None;
-        self.delete_confirm = None;
         self.panel_open_since = open.then(Instant::now);
         self.toolbar_hover = None;
         self.toolbar_hover_since = None;
@@ -1238,7 +1197,6 @@ impl App {
         self.set_more(false);
         self.set_boards(false);
         self.set_size(false);
-        self.set_clipboard(false);
         self.target = None;
         if confirming {
             self.refresh_toolbar();
@@ -1256,7 +1214,6 @@ impl App {
             return;
         }
         self.boards_open = false;
-        self.clipboard_open = false;
         self.more = false;
         self.size_open = open;
         self.delete_confirm = None;
@@ -1271,8 +1228,6 @@ impl App {
             Some(ToolbarAction::Boards)
         } else if self.size_open {
             Some(ToolbarAction::Size)
-        } else if self.clipboard_open {
-            Some(ToolbarAction::Clipboard)
         } else if self.more {
             Some(ToolbarAction::More)
         } else {
@@ -1502,64 +1457,44 @@ impl App {
         log(&format!("moved {} elements to {board}", items.len()));
     }
 
-    /// Copy the held elements into the app's own clipboard history. The newest copy is the one
-    /// `Ctrl+V` pastes; the panel lists the rest. An over-cap copy is refused whole. Returns
-    /// whether an entry was recorded, which is what tells a cut it may remove the originals.
-    pub(crate) fn copy_selection(&mut self) -> bool {
+    /// Clone the held elements with an offset and hand the selection to the clones. `Ctrl+D` uses
+    /// this directly: the document is the only clipboard for elements now, so duplicating cannot
+    /// compete with the compositor's text selection.
+    pub(crate) fn duplicate_held(&mut self) {
         let Some(key) = self.keyboard_focus else {
-            return false;
+            return;
         };
         let Some((board_name, items)) = self.held(key) else {
-            log("copy needs a selection");
-            return false;
-        };
-        let Some(ann) = self.doc.boards.get(&board_name) else {
-            return false;
-        };
-        let Some(count) = record_clip(&mut self.clips, ann, &items) else {
-            log("copy refused: too large for the clipboard");
-            return false;
-        };
-        self.last_copy = Some(Instant::now());
-        self.refresh_toolbar();
-        log(&format!("copied {count} elements"));
-        true
-    }
-
-    /// Cut the held elements: exactly what `Ctrl+C` copies enters the clipboard history, and the
-    /// same selection is then removed as one document change. With nothing held this does nothing,
-    /// and a copy the clipboard refuses removes nothing either, so a cut never loses content the
-    /// clipboard did not take.
-    pub(crate) fn cut_selection(&mut self) {
-        let Some(key) = self.keyboard_focus else {
+            log("duplicate needs a selection");
             return;
         };
-        if self.held(key).is_none() {
+        let before = self.doc.clone();
+        let Some((ids, box_)) = self.doc.boards.get_mut(&board_name).map(|ann| {
+            let copy = ann.copied(&items).shifted(COPY_OFFSET, COPY_OFFSET);
+            ann.append(&copy)
+        }) else {
+            return;
+        };
+        if ids.is_empty() {
             return;
         }
-        if self.copy_selection() {
-            self.delete_selection();
+        self.undo.record(before, &self.doc);
+        self.set_selection(key, ids, None);
+        if let Some(box_) = box_ {
+            self.doc_changed_at(key, box_);
+        } else {
+            self.doc_changed();
         }
+        self.refresh_all_bound_labels(key);
+        log("duplicated selection");
     }
 
-    /// Ask the data device for a selection when no event has supplied one yet. Focus changes can
-    /// race the first paste, and a stored offer is the only thing the receive path needs.
+    /// Ask the compositor for its current selection. There is no in-app element clipboard to take
+    /// precedence, so a paste in a text box always consults Wayland.
     pub(crate) fn refresh_system_selection(&mut self) {
-        if self.selection.is_none() && self.last_copy.is_none() {
-            self.selection = self
-                .data_device
-                .as_ref()
-                .and_then(|device| device.data().selection_offer());
-            if self.selection.is_some() {
-                self.selection_at = Some(Instant::now());
-            }
+        if let Some(device) = self.data_device.as_ref() {
+            self.selection = device.data().selection_offer();
         }
-    }
-
-    /// Whether the compositor's selection is newer than the app's own element clipboard. A text
-    /// copied in another window since the last in-app copy wins the next canvas paste.
-    pub(crate) fn system_selection_is_newer(&self) -> bool {
-        system_selection_is_newer(self.selection_at, self.last_copy)
     }
 
     /// Put text read from the system clipboard on the current board as a new text box. Returns
@@ -1599,53 +1534,6 @@ impl App {
         self.doc_changed_at(key, item.paint_bounds());
         log("pasted system text");
         true
-    }
-
-    /// Paste clipboard entry `index`, newest first, onto the board this screen shows, a little offset.
-    pub(crate) fn paste_clip(&mut self, index: usize) {
-        let Some(clip) = self.clips.get(index).map(|clip| clip.board.clone()) else {
-            return;
-        };
-        let Some(key) = self.keyboard_focus else {
-            log("paste needs a focused screen");
-            return;
-        };
-        let Some(out) = self.outputs.get(&key) else {
-            return;
-        };
-        let board_name = out.board.clone();
-        let copy = clip.shifted(COPY_OFFSET, COPY_OFFSET);
-        let count = copy.strokes.len() + copy.texts.len() + copy.shapes.len() + copy.notes.len();
-        let before = self.doc.clone();
-        let Some(ann) = self.doc.boards.get_mut(&board_name) else {
-            return;
-        };
-        let (ids, _) = ann.append(&copy);
-        if ids.is_empty() {
-            return;
-        }
-        self.undo.record(before, &self.doc);
-        self.set_selection(key, ids, None);
-        self.doc_changed();
-        log(&format!("pasted {count} elements"));
-    }
-
-    /// Paste the newest clipboard entry: what `Ctrl+V` does outside a text box.
-    pub(crate) fn paste_newest(&mut self) {
-        if self.clips.is_empty() {
-            log("paste needs a clipboard entry");
-            return;
-        }
-        self.paste_clip(0);
-    }
-
-    /// Open the clipboard history panel, if there is a history to choose from.
-    pub(crate) fn open_clipboard(&mut self) {
-        if self.clips.is_empty() {
-            log("the clipboard is empty");
-            return;
-        }
-        self.set_clipboard(true);
     }
 
     /// Delete a board by name, from the panel's row that owns it. Everything the board holds goes with
@@ -4917,7 +4805,6 @@ impl DataDeviceHandler for App {
             .data_device
             .as_ref()
             .and_then(|device| device.data().selection_offer());
-        self.selection_at = self.selection.as_ref().map(|_| Instant::now());
     }
 
     fn drop_performed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
@@ -4973,26 +4860,6 @@ mod tests {
         assert!(!caret_visible(CARET_BLINK));
         assert!(!caret_visible(CARET_BLINK * 2 - Duration::from_millis(1)));
         assert!(caret_visible(CARET_BLINK * 2));
-    }
-
-    /// A system copy only outranks the element clipboard when it is the newer of the two. With no
-    /// in-app copy yet, any selection wins; with no selection, the in-app copy does.
-    #[test]
-    fn the_newer_clipboard_source_wins() {
-        let t = Instant::now();
-        assert!(system_selection_is_newer(
-            Some(t + Duration::from_millis(1)),
-            None
-        ));
-        assert!(!system_selection_is_newer(None, Some(t)));
-        assert!(system_selection_is_newer(
-            Some(t + Duration::from_millis(1)),
-            Some(t)
-        ));
-        assert!(!system_selection_is_newer(
-            Some(t),
-            Some(t + Duration::from_millis(1))
-        ));
     }
 
     /// A second select press on the same text is an edit only when it is quick and lands close:

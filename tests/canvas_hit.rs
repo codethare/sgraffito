@@ -2814,6 +2814,29 @@ fn a_bound_label_is_removed_with_its_container_and_copied_with_it() {
 }
 
 #[test]
+fn a_duplicate_clone_is_offset_and_keeps_its_bound_label() {
+    let mut board = Board::default();
+    let mut rect = shape(ShapeKind::Rect, [10.0, 20.0], [210.0, 120.0]);
+    rect.id = 9;
+    board.shapes.push(rect);
+    board.texts.push(TextItem {
+        container: Some(9),
+        ..text(50.0, 50.0, "label")
+    });
+
+    let copy = board.copied(&[ItemId::Shape(0)]).shifted(12.0, 12.0);
+    let (ids, _) = board.append(&copy);
+    assert_eq!(ids.len(), 2, "the shape and its label were not cloned");
+    assert_eq!(board.shapes.len(), 2);
+    assert_eq!(board.texts.len(), 2);
+    assert_eq!(board.shapes[1].from, [22.0, 32.0]);
+    assert_eq!(board.shapes[1].to, [222.0, 132.0]);
+    assert_eq!(board.texts[1].x, 62.0);
+    assert_eq!(board.texts[1].y, 62.0);
+    assert_eq!(board.texts[1].container, Some(board.shapes[1].id));
+}
+
+#[test]
 fn a_line_label_sits_on_the_midpoint_measured_along_the_line() {
     let mut line = shape(ShapeKind::Line, [0.0, 0.0], [200.0, 0.0]);
     line.points.push([100.0, 100.0]);

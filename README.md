@@ -84,13 +84,15 @@ Every mark on the canvas is drawn as a **hand-drawn** one: a stroke is a pen tha
 | `Delete` | remove everything the selection holds, as one change |
 | `Ctrl`+`Z` | undo the last document change; outside a text box, because the editor owns the keys while it is focused |
 | `Ctrl`+`Shift`+`Z` | redo the change last undone |
-| `Ctrl`+`X` | cut the selection: exactly what `Ctrl`+`C` copies enters the clipboard history, then the originals are removed as one change |
+| `Ctrl`+`D` | duplicate everything the selection holds: clone it with a small offset and select the clones; elements are not put on the compositor clipboard |
+| `Ctrl`+`V` | paste the compositor's plain-text selection: at the caret in a text box or label, or as a new selected text box on the canvas |
 | `Tab` / `Shift+Tab` | walk the selection to the next / previous element on this output, in document order and wrapping at both ends |
 | `←` `→` `↑` `↓` | with something selected, move it by 1 logical pixel, or 10 while `Shift` is held; with nothing selected, pan the view by 40 pixels, or 400 with `Shift` |
 | `+` / `=` / `-` | zoom the view in / out by one step, about the centre of the output |
 | `0` | put the view back at 1:1 from the canvas origin |
 | `Enter` | open the selected text box or note for writing, with the caret at its end |
 | double-click a text box with `V` armed | open it for writing; a single click selects and can drag it |
+| double-click a container or line | create or reopen its one bound label |
 | hold `Shift` while dragging | constrain the drag: a line or an arrow snaps to the nearest 15°, a circle, rectangle, diamond or note comes out with equal sides, and a resize of a selection keeps its proportions |
 | hold `Shift` and click an element | add it to the selection, or take it out when it is already held |
 | hold `Alt` when a selection drag starts | copy what the selection holds and drag the copy, leaving the original where it was |
@@ -151,7 +153,7 @@ At the foot of the rail is a **more** block (`M`): it opens a **drawer** — a s
 
 Each block is clickable, and a click does what the block's key does where it has one: a colour block picks that colour, `P`/`E`/`T`/`V`/`O`/`R`/`D`/`L`/`A` arm that tool, `[` and `]` — the two rows of the width list — step the active size, and `Esc` cancels what is in progress and locks on the next click.
 
-While the pointer is on a block, that block opens away from the edge into a capsule that states what it does and ends with the key that does the same thing: `pen (P)`, `text: click to place (T)`, `select: drag to move (V)`, `smaller width ([)`, `cancel, then lock (Esc)`, `colour 3 (3)`. That is where the full shortcuts are taught — an alternate binding and a chord such as `Ctrl+Shift+V` are named here rather than squeezed into the square. 140 ms, ease-out, brief and in one direction. The label is uncovered by the edge as it moves, so the text is never drawn outside the shape that carries it; the other blocks stay squares and nothing moves under the pointer, which keeps the block it is on for as long as it stays on the capsule. Leaving a block closes it at once instead of animating back. Hovering is the only thing that repaints: it damages the rail's own box, not the whole output, at frame cadence.
+While the pointer is on a block, that block opens away from the edge into a capsule that states what it does and ends with the key that does the same thing: `pen (P)`, `text: click to place (T)`, `select: drag to move (V)`, `smaller width ([)`, `cancel, then lock (Esc)`, `colour 3 (3)`. That is where the full shortcuts are taught — an alternate binding and a chord such as `Ctrl+Shift+Z` are named here rather than squeezed into the square. 140 ms, ease-out, brief and in one direction. The label is uncovered by the edge as it moves, so the text is never drawn outside the shape that carries it; the other blocks stay squares and nothing moves under the pointer, which keeps the block it is on for as long as it stays on the capsule. Leaving a block closes it at once instead of animating back. Hovering is the only thing that repaints: it damages the rail's own box, not the whole output, at frame cadence.
 
 Controls are laid out at the macOS metrics recorded in `CLAUDE.md`: 13 pt control text for both a glyph and its label, a 30 pt square block, 6 pt between a block and its label, and 12 pt of padding after a label, so text never touches the capsule's edge.
 
@@ -159,12 +161,13 @@ A press anywhere on the rail, or on the capsule a block has stretched into, belo
 
 The pointer follows the armed tool through `wp_cursor_shape_v1`: a crosshair for the pen, a cell for the eraser, an I-beam for the text tool and the compositor's default arrow for the selection tool, which creates nothing of its own. With a selection held, the arrow becomes the resize shape of the handle under it, a grab shape over the rotation handle, and the protocol's held-gesture shape while a drag is in flight. The compositor's own cursor is used while the pointer is on the rail and once the daemon is locked again. A compositor that does not advertise the protocol keeps its own cursor and the daemon says so in its log.
 
-## Links, moving and the clipboard
+## Links, moving and text paste
 
 - A text box can link to a board. Select exactly one text box, open the drawer (`M`) and pick `link text to board`, then a board from the list. The text is underlined in the accent colour; `Ctrl`+click switches to that board and centres the text's canvas position. A plain click still selects or edits it. Deleting the target board clears the links that named it, and renaming the board moves them.
 - With a selection held, one card appears at the bottom centre of the canvas with `edit` and `move to board`. The card uses the rail's plate colour, edge and shadow, and sits on the same 18 pt bottom margin as the zoom and history cards. `move to board` opens the same board list and moves every held element to the picked board, then lets go of the selection; `edit` is live only when the selection is one line or arrow.
-- `Ctrl+C` copies the held elements into sgraffito's own clipboard history; `Ctrl+X` cuts them — the same copy is recorded first, and only then are the originals removed as one change, so a clipboard that refuses an oversized copy removes nothing; `Ctrl+V` pastes the newest copy onto the board the screen shows, offset slightly and selected; `Ctrl+Shift+V` opens the history panel, where a row pastes that copy. If the compositor's selection has changed since the last in-app copy, `Ctrl+V` outside a text box instead reads that selection as plain text and creates a selected text box near the top of the view. Inside a text box, `Ctrl+C`/`Ctrl+V` keep the compositor's text semantics, and `Ctrl+X` does not cut: the buffer has a caret but no selected range. A board name takes its own keys too, so `Ctrl+X` cannot cut the canvas while a name is being edited.
-- The clipboard is session state, never written to the file. It keeps at most 8 entries, 200 elements and 1 MB of JSON in total; adding a copy drops the oldest entries until all three hold. A copy that alone exceeds the element or byte cap is refused whole.
+- Elements are duplicated directly, never through the compositor clipboard: `Ctrl+D` clones the held elements with a small offset and selects the copies, and `Alt`-dragging still clones and drags in one gesture. A container's bound label is included in the clone.
+- `Ctrl+V` always asks Wayland for the current plain-text selection. In a text box or bound label it inserts at the caret; outside one it creates a selected text box near the top of the view. There is no in-app element clipboard to outrank that selection, so text copied in another application reaches a sgraffito text box directly.
+- Sgraffito does not write the compositor clipboard. Text cut from one of its boxes is not implemented because the buffer has a caret but no selected text range.
 
 ## Drawer and backdrop
 
@@ -267,7 +270,7 @@ The file is read once when the daemon starts.
 
 ## Known limitations
 
-- Undo and redo are in memory only, so both are empty after a restart; there is no persisted history. There is no z-order, no layers, no PNG export and no pressure or touch support. A link points at a board and the linked text's position, not at a particular element inside that board; the clipboard history is session state, so it is lost when the daemon restarts. A cut is an ordinary undoable document change, but the clipboard side of it is not restored by undo.
+- Undo and redo are in memory only, so both are empty after a restart; there is no persisted history. There is no z-order, no layers, no PNG export and no pressure or touch support. A link points at a board and the linked text's position, not at a particular element inside that board. Duplicating an element is an ordinary undoable document change; sgraffito does not write the compositor clipboard.
 - The toolbar is part of the full-screen edit overlay, not a surface of its own, so it cannot respect another layer surface's exclusive zone: a compositor bar or dock that occupies the edge the rail is docked to, or the optical-centre band, is covered by it while editing. Its edge comes from `toolbar` in the configuration file; it cannot be dragged.
 - A block shows an icon of what it does and says what it does only while the pointer is on it, so a first-time user learns the rail by hovering, or from this README's key table. Each block's text ends with its key, and that is the only place a key appears: when a block's text does not fit the room reserved for the rail, the block stays a square showing its icon and no text, and its key is then only in this README. The longest text is `text: click to place (T)`, about 177 logical pixels of capsule, which fits the 320-pixel reserve on any output at least 336 pixels wide.
 - A drawer shows the rows that fit the output. A very short screen folds almost the whole rail into it, and a panel taller than the screen would be rows nobody could click or read, so the rows nearest the `more` block are kept and the rest stay on their keys — a folded control never loses its key.
