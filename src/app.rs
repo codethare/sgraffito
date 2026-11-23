@@ -961,6 +961,12 @@ impl App {
                     zoom: self.outputs.get(&key).map_or(1.0, |out| out.view.zoom),
                     can_undo: self.undo.can_undo(),
                     can_redo: self.undo.can_redo(),
+                    can_duplicate: self.outputs.get(&key).is_some_and(|out| {
+                        out.overlay
+                            .selection
+                            .as_ref()
+                            .is_some_and(|selection| !selection.items.is_empty())
+                    }),
                     colors_open: self.colors_open,
                     colors_grow: hover_grow(self.colors_since, Instant::now()),
                 })
@@ -1461,9 +1467,13 @@ impl App {
     /// this directly: the document is the only clipboard for elements now, so duplicating cannot
     /// compete with the compositor's text selection.
     pub(crate) fn duplicate_held(&mut self) {
-        let Some(key) = self.keyboard_focus else {
-            return;
-        };
+        if let Some(key) = self.keyboard_focus {
+            self.duplicate_on(key);
+        }
+    }
+
+    /// Duplicate the selection on one output. The card routes its click here as well as `Ctrl+D`.
+    pub(crate) fn duplicate_on(&mut self, key: u32) {
         let Some((board_name, items)) = self.held(key) else {
             log("duplicate needs a selection");
             return;
@@ -2595,6 +2605,7 @@ impl App {
         if dropped {
             self.gesture = None;
             self.dirty = true;
+            self.refresh_toolbar();
         }
         dropped
     }
@@ -2682,6 +2693,7 @@ impl App {
         self.pending_links.clear();
         let owned =
             (!items.is_empty() || transform.is_some()).then_some(Selection { items, transform });
+        let mut changed = false;
         for (k, out) in self.outputs.iter_mut() {
             let next = if *k == key { owned.clone() } else { None };
             if out.overlay.selection != next {
@@ -2691,7 +2703,12 @@ impl App {
                 out.overlay.connectors.clear();
                 out.transient_dirty = true;
                 self.dirty = true;
+                changed = true;
             }
+        }
+        if changed {
+            // The cards' enabled states are part of the rail the frame paints.
+            self.refresh_toolbar();
         }
     }
 

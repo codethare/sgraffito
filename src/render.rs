@@ -183,6 +183,8 @@ enum Icon {
     /// Undo and redo arrows for the history cards.
     Undo,
     Redo,
+    /// Two overlapping sheets for the duplicate card.
+    Duplicate,
     /// No backdrop: an empty square.
     Clear,
     /// A square grid.
@@ -287,6 +289,7 @@ fn key_of(action: ToolbarAction) -> Option<&'static str> {
             }
         }
         ToolbarAction::Lock => "Esc",
+        ToolbarAction::Duplicate => "Ctrl+D",
         // No block shows these yet; if one does, its text names the key that does the same thing.
         ToolbarAction::Undo => "Ctrl+Z",
         ToolbarAction::Redo => "Ctrl+Shift+Z",
@@ -2896,10 +2899,44 @@ impl Renderer {
             draw_icon(pixmap, icon, icon_box, scale, ink, false);
             self.draw_badge(pixmap, box_, scale, badge, ink);
         }
+        let duplicate = square(cards.duplicate);
+        round_rect(
+            pixmap,
+            duplicate,
+            TOOLBAR_RADIUS * scale,
+            parse_hex(TOOLBAR_BLOCK_FILL),
+            Some((parse_hex(TOOLBAR_CARD_EDGE), TOOLBAR_HAIRLINE * scale)),
+        );
+        let hover = toolbar.hover == Some(ToolbarAction::Duplicate);
+        if hover && toolbar.can_duplicate {
+            let ring = duplicate.grown(-TOOLBAR_HOVER_INSET * scale);
+            round_rect(
+                pixmap,
+                ring,
+                (TOOLBAR_RADIUS - TOOLBAR_HOVER_INSET) * scale,
+                parse_hex(TOOLBAR_HOVER_FILL),
+                Some((parse_hex(TOOLBAR_FOREGROUND), TOOLBAR_HAIRLINE * scale)),
+            );
+        }
+        let ink = if toolbar.can_duplicate {
+            TOOLBAR_FOREGROUND
+        } else {
+            TOOLBAR_LABEL_TEXT
+        };
+        let icon_box = Rect {
+            x: duplicate.x + (duplicate.w - 20.0 * scale) / 2.0,
+            y: duplicate.y + 2.0 * scale,
+            w: 20.0 * scale,
+            h: 20.0 * scale,
+        };
+        draw_icon(pixmap, Icon::Duplicate, icon_box, scale, ink, false);
         let hint = match toolbar.hover {
             Some(ToolbarAction::Undo) if toolbar.can_undo => Some((cards.history, "undo (Ctrl+Z)")),
             Some(ToolbarAction::Redo) if toolbar.can_redo => {
                 Some((cards.history, "redo (Ctrl+Shift+Z)"))
+            }
+            Some(ToolbarAction::Duplicate) if toolbar.can_duplicate => {
+                Some((cards.duplicate, "duplicate (Ctrl+D)"))
             }
             _ => None,
         };
@@ -3081,6 +3118,11 @@ impl Renderer {
         if let Some(action) = [
             (cards.undo, ToolbarAction::Undo, toolbar.can_undo),
             (cards.redo, ToolbarAction::Redo, toolbar.can_redo),
+            (
+                cards.duplicate,
+                ToolbarAction::Duplicate,
+                toolbar.can_duplicate,
+            ),
         ]
         .into_iter()
         .find(|(rect, _, enabled)| {
@@ -4366,6 +4408,7 @@ fn same_layout(a: &Toolbar, b: &Toolbar) -> bool {
         && a.more == b.more
         && a.boards_open == b.boards_open
         && a.size_open == b.size_open
+        && a.can_duplicate == b.can_duplicate
         && a.target == b.target
         && a.rename == b.rename
         && a.delete_confirm == b.delete_confirm
@@ -4552,12 +4595,13 @@ fn toolbar_ceiling(surface: f32) -> f32 {
     (surface - 2.0 * TOOLBAR_MARGIN).min(TOOLBAR_RESERVE)
 }
 
-/// One zoom readout and one history card. The history card holds both buttons, so it keeps the
-/// same width and background as the percentage.
+/// One zoom readout, one history card and one duplicate card. The history card holds both history
+/// buttons, so every card keeps the same width and background.
 #[derive(Clone, Copy)]
 struct CardsLayout {
     zoom: Rect,
     history: Rect,
+    duplicate: Rect,
     undo: Rect,
     redo: Rect,
     position: CardPosition,
@@ -4568,7 +4612,7 @@ const CARD_H: f32 = TOOLBAR_BLOCK;
 
 fn cards_layout(surface: (f32, f32), position: CardPosition) -> CardsLayout {
     let gap = TOOLBAR_GAP;
-    let total = 2.0 * CARD_W + gap;
+    let total = 3.0 * CARD_W + 2.0 * gap;
     let x = if position.left() {
         TOOLBAR_MARGIN
     } else if position.centre() {
@@ -4587,6 +4631,12 @@ fn cards_layout(surface: (f32, f32), position: CardPosition) -> CardsLayout {
         w: CARD_W,
         h: CARD_H,
     };
+    let duplicate = Rect {
+        x: history.x + CARD_W + gap,
+        y,
+        w: CARD_W,
+        h: CARD_H,
+    };
     let half = CARD_W / 2.0;
     CardsLayout {
         zoom: Rect {
@@ -4596,6 +4646,7 @@ fn cards_layout(surface: (f32, f32), position: CardPosition) -> CardsLayout {
             h: CARD_H,
         },
         history,
+        duplicate,
         undo: Rect {
             x: history.x,
             y,
@@ -4615,7 +4666,11 @@ fn cards_layout(surface: (f32, f32), position: CardPosition) -> CardsLayout {
 /// The area the cards and a hover hint can paint. The hint opens away from the nearest screen edge.
 pub fn cards_bounds(surface: (f32, f32), position: CardPosition) -> Rect {
     let cards = cards_layout(surface, position);
-    let cards_box = cards.zoom.union(cards.history).grown(TOOLBAR_SHADOW_REACH);
+    let cards_box = cards
+        .zoom
+        .union(cards.history)
+        .union(cards.duplicate)
+        .grown(TOOLBAR_SHADOW_REACH);
     if position.top() {
         Rect {
             h: cards_box.h + TOOLBAR_BLOCK + TOOLBAR_GAP,
@@ -5207,6 +5262,21 @@ fn draw_icon(
             path.close();
             path.move_to(band[0][0], band[0][1]);
             path.line_to(band[1][0], band[1][1]);
+        }
+        Icon::Duplicate => {
+            for (dx, dy) in [(0.04, 0.2), (0.28, 0.04)] {
+                if let Some(sheet) = rounded_rect_path(
+                    Rect {
+                        x: x + w * dx,
+                        y: y + h * dy,
+                        w: w * 0.56,
+                        h: h * 0.7,
+                    },
+                    2.0 * scale,
+                ) {
+                    path.push_path(&sheet);
+                }
+            }
         }
         Icon::Undo | Icon::Redo => {
             let undo = icon == Icon::Undo;
@@ -7272,6 +7342,7 @@ mod tests {
             zoom: 1.0,
             can_undo: false,
             can_redo: false,
+            can_duplicate: false,
             colors_open: false,
             colors_grow: 1.0,
         }
@@ -7572,6 +7643,7 @@ mod tests {
                 zoom: 1.0,
                 can_undo: false,
                 can_redo: false,
+                can_duplicate: false,
                 colors_open: false,
                 colors_grow: 1.0,
             }),
@@ -7926,6 +7998,7 @@ mod tests {
             zoom: 1.0,
             can_undo: false,
             can_redo: false,
+            can_duplicate: false,
             colors_open: false,
             colors_grow: 1.0,
         }
@@ -8189,7 +8262,8 @@ mod tests {
                 | ToolbarAction::AskDeleteBoard(_)
                 | ToolbarAction::CancelDeleteBoard
                 | ToolbarAction::Undo
-                | ToolbarAction::Redo => false,
+                | ToolbarAction::Redo
+                | ToolbarAction::Duplicate => false,
                 ToolbarAction::Backdrop(_) => false,
                 ToolbarAction::Size => unreachable!("no key, filtered above"),
             };
@@ -8350,12 +8424,22 @@ mod tests {
         ] {
             let cards = cards_layout(surface, position);
             assert_eq!(cards.position, position);
-            for rect in [cards.zoom, cards.history, cards.undo, cards.redo] {
+            for rect in [
+                cards.zoom,
+                cards.history,
+                cards.duplicate,
+                cards.undo,
+                cards.redo,
+            ] {
                 assert!(rect.x >= 0.0 && rect.y >= 0.0);
                 assert!(rect.x + rect.w <= surface.0);
                 assert!(rect.y + rect.h <= surface.1);
             }
             assert_eq!(cards.history.x - (cards.zoom.x + cards.zoom.w), TOOLBAR_GAP);
+            assert_eq!(
+                cards.duplicate.x - (cards.history.x + cards.history.w),
+                TOOLBAR_GAP
+            );
             if position.left() {
                 assert_eq!(cards.zoom.x, TOOLBAR_MARGIN);
             }
@@ -8371,6 +8455,7 @@ mod tests {
         let mut toolbar = crate::render::tests::rail_for_legend();
         toolbar.can_undo = true;
         toolbar.can_redo = true;
+        toolbar.can_duplicate = true;
         let surface = (900.0, 1000.0);
         let cards = cards_layout(surface, CardPosition::BottomRight);
         let centre = |r: Rect| (r.x + r.w / 2.0, r.y + r.h / 2.0);
@@ -8384,8 +8469,19 @@ mod tests {
             renderer.toolbar_hit_at(ToolbarPosition::Left, &toolbar, surface.0, surface.1, x, y),
             Some(ToolbarAction::Redo)
         );
+        let (x, y) = centre(cards.duplicate);
+        assert_eq!(
+            renderer.toolbar_hit_at(ToolbarPosition::Left, &toolbar, surface.0, surface.1, x, y),
+            Some(ToolbarAction::Duplicate)
+        );
         toolbar.can_undo = false;
         let (x, y) = centre(cards.undo);
+        assert_eq!(
+            renderer.toolbar_hit_at(ToolbarPosition::Left, &toolbar, surface.0, surface.1, x, y),
+            None
+        );
+        toolbar.can_duplicate = false;
+        let (x, y) = centre(cards.duplicate);
         assert_eq!(
             renderer.toolbar_hit_at(ToolbarPosition::Left, &toolbar, surface.0, surface.1, x, y),
             None

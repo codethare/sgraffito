@@ -398,6 +398,7 @@ fn toolbar(tool: Tool, color: &'static str, size: f32, hover: Option<ToolbarActi
         zoom: 1.0,
         can_undo: false,
         can_redo: false,
+        can_duplicate: false,
         colors_open: false,
         colors_grow: 1.0,
     }
@@ -2497,6 +2498,7 @@ fn a_row_of_the_panel_can_be_clicked_with_the_pointer_on_the_block_that_opened_i
         zoom: 1.0,
         can_undo: false,
         can_redo: false,
+        can_duplicate: false,
         colors_open: false,
         colors_grow: 1.0,
     };

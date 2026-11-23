@@ -1262,6 +1262,11 @@ impl App {
             ToolbarAction::Redo => {
                 self.redo();
             }
+            ToolbarAction::Duplicate => {
+                if let Some(key) = acting.or(self.keyboard_focus) {
+                    self.duplicate_on(key);
+                }
+            }
             ToolbarAction::Scrim => self.cycle_backdrop(),
             ToolbarAction::Backdrop(mode) => self.set_backdrop(mode),
             ToolbarAction::Boards => self.toggle_boards(),

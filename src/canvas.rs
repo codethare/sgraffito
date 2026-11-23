@@ -177,6 +177,8 @@ pub enum ToolbarAction {
     Undo,
     /// Step the document forward again, like `Ctrl+Shift+Z`. No block shows this one yet.
     Redo,
+    /// Clone the held elements in place, like `Ctrl+D`.
+    Duplicate,
     /// Open or close the drawer of controls that are not used often.
     More,
     /// Switch the edit-mode backdrop off and on.
@@ -3890,6 +3892,8 @@ pub struct Toolbar {
     /// Whether a document change can be undone and whether an undone one can be redone.
     pub can_undo: bool,
     pub can_redo: bool,
+    /// Whether this output holds a selection that `duplicate` can clone.
+    pub can_duplicate: bool,
     /// Whether the collapsed colour swatch is showing the other four colours beside it.
     pub colors_open: bool,
     /// How far that flyout has unfurled, 0 to about 1.

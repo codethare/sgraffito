@@ -164,8 +164,8 @@ The pointer follows the armed tool through `wp_cursor_shape_v1`: a crosshair for
 ## Links, moving and text paste
 
 - A text box can link to a board. Select exactly one text box, open the drawer (`M`) and pick `link text to board`, then a board from the list. The text is underlined in the accent colour; `Ctrl`+click switches to that board and centres the text's canvas position. A plain click still selects or edits it. Deleting the target board clears the links that named it, and renaming the board moves them.
-- With a selection held, one card appears at the bottom centre of the canvas with `edit` and `move to board`. The card uses the rail's plate colour, edge and shadow, and sits on the same 18 pt bottom margin as the zoom and history cards. `move to board` opens the same board list and moves every held element to the picked board, then lets go of the selection; `edit` is live only when the selection is one line or arrow.
-- Elements are duplicated directly, never through the compositor clipboard: `Ctrl+D` clones the held elements with a small offset and selects the copies, and `Alt`-dragging still clones and drags in one gesture. A container's bound label is included in the clone.
+- With a selection held, one card appears at the bottom centre of the canvas with `edit` and `move to board`. The card uses the rail's plate colour, edge and shadow, and sits on the same 18 pt bottom margin as the zoom, history and duplicate cards. `move to board` opens the same board list and moves every held element to the picked board, then lets go of the selection; `edit` is live only when the selection is one line or arrow.
+- Elements are duplicated directly, never through the compositor clipboard: `Ctrl+D` or the duplicate card clones the held elements with a small offset and selects the copies, and `Alt`-dragging still clones and drags in one gesture. A container's bound label is included in the clone. The duplicate card sits beside the zoom and undo/redo cards, disabled while nothing is selected.
 - `Ctrl+V` always asks Wayland for the current plain-text selection. In a text box or bound label it inserts at the caret; outside one it creates a selected text box near the top of the view. There is no in-app element clipboard to outrank that selection, so text copied in another application reaches a sgraffito text box directly.
 - Sgraffito does not write the compositor clipboard. Text cut from one of its boxes is not implemented because the buffer has a caret but no selected text range.
 
@@ -244,8 +244,9 @@ border = 1.0
 # top or bottom rail a row, and its panels always open toward the middle of the screen.
 toolbar = "left"
 
-# The zoom percentage and shared undo/redo card. One of "top left", "top right",
-# "top center", "bottom left", "bottom right" (the default) or "bottom center".
+# The zoom percentage, shared undo/redo card and duplicate card. One of "top left",
+# "top right", "top center", "bottom left", "bottom right" (the default) or
+# "bottom center".
 cards = "bottom right"
 
 # Canvas text font, as a family name from the system font database. Examples:
