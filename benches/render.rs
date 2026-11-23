@@ -56,6 +56,7 @@ fn document(stroke_count: usize, width: f32, height: f32) -> Board {
             size: 24.0,
             text: "benchmark note".into(),
             link: None,
+            container: None,
         }],
         shapes: vec![],
         notes: vec![],
@@ -75,6 +76,7 @@ fn text_overlay(width: f32, height: f32, preedit: &str) -> Overlay {
     Overlay {
         text: Some(TextOverlay {
             item: TextItem {
+                container: None,
                 x: width * 0.1,
                 y: height * 0.2,
                 color: "#ffffff".into(),

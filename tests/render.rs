@@ -120,6 +120,7 @@ fn text_item_draws_ink() {
             size: 32.0,
             text: "H".into(),
             link: None,
+            container: None,
         }],
     );
     Renderer::new().render(
@@ -183,6 +184,7 @@ fn overlay_text_box_draws_text_and_cursor() {
     let overlay = Overlay {
         text: Some(TextOverlay {
             item: TextItem {
+                container: None,
                 x: 10.0,
                 y: 10.0,
                 color: "#ffffff".into(),
@@ -219,6 +221,7 @@ fn the_caret_spans_the_whole_line_box() {
     let overlay = Overlay {
         text: Some(TextOverlay {
             item: TextItem {
+                container: None,
                 x: 10.0,
                 y: 10.0,
                 color: "#ffffff".into(),
@@ -257,6 +260,7 @@ fn the_caret_spans_the_whole_line_box() {
 #[test]
 fn preedit_renders_more_ink_than_committed_text_alone() {
     let item = TextItem {
+        container: None,
         x: 10.0,
         y: 10.0,
         color: "#ffffff".into(),
@@ -853,6 +857,7 @@ fn bounding_box_frame_is_pixel_identical_to_a_whole_surface_frame() {
             size: 18.0,
             text: "note".into(),
             link: None,
+            container: None,
         }],
     );
     let first = dot(100.0, 45.0);
@@ -987,6 +992,7 @@ fn long_text_damage_contains_everything_rasterised() {
             size: 24.0,
             text: "a long text line that exceeds the output width. ".repeat(3),
             link: None,
+            container: None,
         }],
     );
     let first = dot(100.0, 50.0);
@@ -1220,6 +1226,7 @@ fn edit_frame(w: u32, h: u32, text: &str, cursor: usize, preedit: &str) -> Vec<u
     let overlay = Overlay {
         text: Some(TextOverlay {
             item: TextItem {
+                container: None,
                 x: 10.0,
                 y: 10.0,
                 color: "#ffffff".into(),
@@ -1307,6 +1314,7 @@ fn a_cjk_click_lands_inside_the_measured_box() {
     // font-size estimate the eraser uses is 0.6 em per character: too narrow for full-width
     // scripts, which is why a click on such a glyph used to start a new box instead.
     let item = TextItem {
+        container: None,
         x: 10.0,
         y: 10.0,
         color: "#ffffff".into(),
@@ -1719,6 +1727,7 @@ fn the_default_view_draws_what_no_view_drew() {
             size: 20.0,
             text: "milk".into(),
             link: None,
+            container: None,
         }],
         shapes: vec![Shape {
             kind: ShapeKind::Circle,
@@ -3126,6 +3135,7 @@ fn cached_document() -> Board {
             size: 18.0,
             text: "cached".into(),
             link: None,
+            container: None,
         }],
         shapes: vec![],
         notes: vec![],
@@ -3953,6 +3963,7 @@ fn a_panel_paints_one_card_behind_its_rows() {
 fn a_link_draws_an_underline_and_the_action_card_is_bottom_centred() {
     let (w, h) = (400u32, 200u32);
     let text = TextItem {
+        container: None,
         x: 20.0,
         y: 20.0,
         color: "#ffffff".into(),
@@ -3963,6 +3974,7 @@ fn a_link_draws_an_underline_and_the_action_card_is_bottom_centred() {
     let draw = |linked: bool| {
         let mut board = Board::default();
         board.texts.push(TextItem {
+            container: None,
             link: linked.then(|| "other".to_string()),
             ..text.clone()
         });
@@ -4000,6 +4012,57 @@ fn a_link_draws_an_underline_and_the_action_card_is_bottom_centred() {
     }
 }
 
+/// A container label is measured with the container's wrap width and placed at its centre.
+#[test]
+fn a_bound_label_wraps_and_centres_inside_its_container() {
+    let shape = Shape {
+        kind: ShapeKind::Rect,
+        color: "#ffffff".into(),
+        width: 2.0,
+        from: [40.0, 40.0],
+        to: [260.0, 180.0],
+        points: Vec::new(),
+        rotate: 0.0,
+        id: 7,
+        attach: [None, None],
+        fill: None,
+    };
+    let item = TextItem {
+        x: 0.0,
+        y: 0.0,
+        color: "#ffffff".into(),
+        size: 18.0,
+        text: "a label long enough to wrap several times inside the container".into(),
+        link: None,
+        container: Some(7),
+    };
+    let mut renderer = Renderer::new();
+    let placed = renderer.place_bound_text(&item, &shape);
+    let wrap = shape.label_wrap().unwrap();
+    let measured = renderer.text_edit_bounds_wrapped(
+        &placed.text,
+        &placed,
+        Some(wrap),
+        Screen {
+            scale: 1.0,
+            view: View::default(),
+        },
+    );
+    assert!(
+        measured.w <= wrap + 12.0,
+        "the label did not wrap at the container width: {measured:?}"
+    );
+    let centre = shape.centre();
+    assert!(
+        ((measured.x + measured.w / 2.0) - centre[0]).abs() < 3.0,
+        "the label is not horizontally centred: {measured:?}"
+    );
+    assert!(
+        ((measured.y + measured.h / 2.0) - centre[1]).abs() < 3.0,
+        "the label is not vertically centred: {measured:?}"
+    );
+}
+
 /// A selected line shows its endpoints and segment midpoints; edit mode promotes the interior bend
 /// to a full-size accent handle, which is the visible difference between the two modes.
 #[test]
@@ -4011,7 +4074,7 @@ fn linear_edit_mode_promotes_interior_vertices() {
         width: 3.0,
         from: [20.0, 90.0],
         to: [200.0, 90.0],
-        points: vec![[110.0, 30.0]],
+        points: vec![[110.0, 30.0], [150.0, 60.0]],
         rotate: 0.0,
         id: 1,
         attach: [None, None],
@@ -4032,13 +4095,54 @@ fn linear_edit_mode_promotes_interior_vertices() {
         };
         let mut buf = buffer(w, h);
         Renderer::new().render(&mut buf, w, h, 1.0, View::default(), &board, &overlay, None);
-        let at = ((30 * w + 110) * 4) as usize;
+        let at = ((60 * w + 150) * 4) as usize;
         [buf[at], buf[at + 1], buf[at + 2], buf[at + 3]]
     };
     assert_ne!(
         pixel(false),
         pixel(true),
         "the interior vertex did not gain a full handle in edit mode"
+    );
+}
+
+/// A selected line keeps the ordinary selection frame: the four corner handles and the rotation
+/// handle are still there, alongside the point handles.
+#[test]
+fn a_selected_line_keeps_the_frame_and_rotation_handle() {
+    let (w, h) = (220u32, 140u32);
+    let line = Shape {
+        kind: ShapeKind::Line,
+        color: "#e01b24".into(),
+        width: 2.0,
+        from: [40.0, 100.0],
+        to: [160.0, 50.0],
+        points: Vec::new(),
+        rotate: 0.0,
+        id: 1,
+        attach: [None, None],
+        fill: None,
+    };
+    let board = Board {
+        shapes: vec![line],
+        ..Board::default()
+    };
+    let draw = |selected: bool| {
+        let overlay = Overlay {
+            selection: selected.then(|| Selection {
+                items: vec![ItemId::Shape(0)],
+                transform: None,
+            }),
+            ..Default::default()
+        };
+        let mut buf = buffer(w, h);
+        Renderer::new().render(&mut buf, w, h, 1.0, View::default(), &board, &overlay, None);
+        let at = ((48 * w + 100) * 4) as usize;
+        [buf[at], buf[at + 1], buf[at + 2], buf[at + 3]]
+    };
+    assert_ne!(
+        draw(false),
+        draw(true),
+        "the line selection frame is missing"
     );
 }
 
@@ -4066,6 +4170,7 @@ fn a_selected_texts_frame_is_measured_not_estimated() {
             size: 18.0,
             text: "iii".into(),
             link: None,
+            container: None,
         }],
         ..Board::default()
     };
@@ -4135,6 +4240,7 @@ fn off_screen_elements_leave_the_frame_empty() {
             size: 18.0,
             text: "nowhere".into(),
             link: None,
+            container: None,
         }],
         shapes: vec![rect_shape([60_000.0, 60_000.0], [60_100.0, 60_100.0])],
         notes: vec![Note::new(

@@ -1,6 +1,6 @@
 use sgraffito::canvas::{
     Board, ERASER_THRESHOLD, ItemId, LinearHandle, PALETTE, Rect, Shape, ShapeKind, Stroke,
-    TextItem, View, linear_handle_at, selected_linear,
+    TextItem, View, linear_handle_at, selected_linear, selection_with_contents,
 };
 use sgraffito::sketch::SKETCH_SLACK;
 
@@ -24,6 +24,7 @@ fn ann(strokes: Vec<Stroke>, texts: Vec<TextItem>) -> Board {
 
 fn text(x: f32, y: f32, s: &str) -> TextItem {
     TextItem {
+        container: None,
         x,
         y,
         color: "#ffffff".into(),
@@ -2278,7 +2279,7 @@ fn one_shot_drawing_tools_hand_the_pointer_back_to_select() {
 
 // --- a closed shape takes what it encloses ------------------------------------------------
 
-use sgraffito::canvas::{selection_with_contents, toggle_selection_with_contents};
+use sgraffito::canvas::toggle_selection_with_contents;
 
 fn enclosed_board(outer_rotate: f32) -> Board {
     let mut board = Board::default();
@@ -2775,6 +2776,54 @@ fn a_midpoint_press_inserts_a_persistent_vertex() {
     assert_eq!(line.points, vec![[50.0, 30.0]]);
     assert_eq!(line.from, [0.0, 0.0]);
     assert_eq!(line.to, [100.0, 0.0]);
+}
+
+#[test]
+fn a_bound_label_is_removed_with_its_container_and_copied_with_it() {
+    let mut board = Board::default();
+    let mut rect = shape(ShapeKind::Rect, [0.0, 0.0], [200.0, 100.0]);
+    rect.id = 7;
+    board.shapes.push(rect);
+    board.texts.push(TextItem {
+        container: Some(7),
+        ..text(40.0, 30.0, "label")
+    });
+
+    assert_eq!(board.bound_text_index(7), Some(0));
+    assert_eq!(board.bound_text(7).map(|t| t.text.as_str()), Some("label"));
+    assert_eq!(board.text_wrap(&board.texts[0]), Some(184.0));
+    assert!(
+        !selection_with_contents(&board, &[ItemId::Shape(0)]).contains(&ItemId::Text(0)),
+        "a bound label was selected as a second object"
+    );
+
+    let copy = board.copied(&[ItemId::Shape(0)]);
+    assert_eq!(copy.texts.len(), 1, "the clipboard left the label behind");
+    assert_eq!(copy.texts[0].container, Some(7));
+
+    let mut target = Board::default();
+    let (_, _) = target.append(&copy);
+    assert_eq!(target.texts.len(), 1);
+    assert_eq!(target.texts[0].container, Some(target.shapes[0].id));
+
+    board.remove(&[ItemId::Shape(0)]);
+    assert!(
+        board.texts.is_empty(),
+        "removing the container left its label behind"
+    );
+}
+
+#[test]
+fn a_line_label_sits_on_the_midpoint_measured_along_the_line() {
+    let mut line = shape(ShapeKind::Line, [0.0, 0.0], [200.0, 0.0]);
+    line.points.push([100.0, 100.0]);
+    // The three segments have equal length; the middle of the whole polyline is the bend.
+    assert!(
+        (line.label_point()[0] - 100.0).abs() < 1e-3
+            && (line.label_point()[1] - 100.0).abs() < 1e-3,
+        "the label point is not the polyline midpoint: {:?}",
+        line.label_point()
+    );
 }
 
 #[test]

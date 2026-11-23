@@ -912,9 +912,9 @@ impl App {
             else {
                 return;
             };
-            // The handles are drawn on the measured text, so the cursor agrees with them. A single
-            // line has point handles instead of the eight-handle frame, so no frame cursor applies.
-            if selected_linear(ann, &items).is_some() {
+            // The handles are drawn on the measured text, so the cursor agrees with them. A line in
+            // point-edit mode has only point handles; an ordinary line selection keeps the frame.
+            if selected_linear(ann, &items).is_some() && out.overlay.linear_edit.is_some() {
                 None
             } else {
                 let boxes = self.renderer.text_boxes(ann, &items, out.screen());

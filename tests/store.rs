@@ -33,6 +33,7 @@ fn sample() -> Doc {
                 size: 18.0,
                 text: "买牛奶".into(), // CJK on purpose: multi-byte content must survive
                 link: None,
+                container: None,
             }],
             shapes: vec![Shape {
                 kind: ShapeKind::Arrow,
@@ -454,6 +455,7 @@ fn stepping_a_selection_steps_its_widths_and_text_sizes() {
             size: 18.0,
             text: "hi".into(),
             link: None,
+            container: None,
         }],
         shapes: vec![Shape {
             kind: ShapeKind::Rect,
@@ -515,6 +517,7 @@ fn a_size_step_at_the_bound_writes_nothing() {
             size: TEXT_SIZE_MAX,
             text: "hi".into(),
             link: None,
+            container: None,
         }],
         ..Default::default()
     };
@@ -554,6 +557,7 @@ fn a_shrinking_step_reports_the_ink_it_left() {
             size: 20.0,
             text: "hi".into(),
             link: None,
+            container: None,
         }],
         ..Default::default()
     };
@@ -589,6 +593,7 @@ fn a_mixed_selection_reports_only_what_changed() {
             size: 18.0,
             text: "hi".into(),
             link: None,
+            container: None,
         }],
         ..Default::default()
     };
@@ -688,6 +693,7 @@ fn links_follow_a_board_rename_and_are_dropped_with_its_deletion() {
         doc.boards.insert(name.into(), Board::default());
     }
     doc.boards.get_mut("a").unwrap().texts.push(TextItem {
+        container: None,
         x: 0.0,
         y: 0.0,
         color: "#ffffff".into(),
@@ -719,6 +725,7 @@ fn moving_elements_leaves_the_source_board_without_them() {
         attach: [None, None],
     });
     board.texts.push(TextItem {
+        container: None,
         x: 0.0,
         y: 0.0,
         color: "#ffffff".into(),
@@ -758,6 +765,7 @@ fn a_cut_records_one_copy_then_removes_the_originals() {
             size: 18.0,
             text: "cut".into(),
             link: None,
+            container: None,
         }],
         ..Board::default()
     };
@@ -818,6 +826,7 @@ fn a_copy_over_the_cap_is_refused_whole() {
 
     let mut wordy = Board::default();
     wordy.texts.push(TextItem {
+        container: None,
         x: 0.0,
         y: 0.0,
         color: "#fff".into(),
@@ -840,6 +849,7 @@ fn a_link_source_is_one_text_box_and_the_jump_centres_it() {
                 size: 18.0,
                 text: "go".into(),
                 link: Some("b".into()),
+                container: None,
             },
             TextItem {
                 x: 0.0,
@@ -848,6 +858,7 @@ fn a_link_source_is_one_text_box_and_the_jump_centres_it() {
                 size: 18.0,
                 text: "no".into(),
                 link: None,
+                container: None,
             },
         ],
         ..Board::default()

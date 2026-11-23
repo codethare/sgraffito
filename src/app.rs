@@ -110,6 +110,10 @@ pub(crate) struct LinearDrag {
     vertex: usize,
     /// For an endpoint, which of `Shape::attach` the drag may detach. Interior vertices have none.
     end: Option<usize>,
+    /// A midpoint press waits until the pointer actually moves before inserting. A plain click on a
+    /// line must select it, not leave a vertex behind or make the line look like it entered edit mode.
+    pending: Option<usize>,
+    origin: [f32; 2],
 }
 
 /// Where a clipboard read that finished off the event loop should land: in the text box being
@@ -446,8 +450,9 @@ pub struct App {
     colors_until: Option<Instant>,
     /// The last select press on a text box, for the quick second press that starts editing.
     last_text_press: Option<TextPress>,
-    /// The last select press on a linear element, for the double click that enters point editing.
-    last_linear_press: Option<TextPress>,
+    /// The last select press on a bindable container or linear element, for the quick second press
+    /// that opens its bound label.
+    last_container_press: Option<TextPress>,
     /// The linear vertex under the pointer, if a press is dragging one. The document is updated as
     /// the pointer moves; the gesture's undo snapshot is taken on the press.
     pub(crate) linear_drag: Option<LinearDrag>,
@@ -704,7 +709,7 @@ impl App {
             colors_until: None,
             colors_since: None,
             last_text_press: None,
-            last_linear_press: None,
+            last_container_press: None,
             linear_drag: None,
             clips: Vec::new(),
             rename: None,
@@ -1575,6 +1580,7 @@ impl App {
             .view
             .to_canvas([out.width as f32 * 0.1, out.height as f32 * 0.2]);
         let item = TextItem {
+            container: None,
             x: point[0],
             y: point[1],
             color: crate::config::current().colors[self.color_idx].clone(),
@@ -2028,7 +2034,7 @@ impl App {
         self.gesture = None;
         self.selection_grab = None;
         self.linear_drag = None;
-        self.last_linear_press = None;
+        self.last_container_press = None;
         self.pending_duplicate = None;
         self.pending_links.clear();
         self.note_origin = None;
@@ -2149,7 +2155,7 @@ impl App {
         self.note_origin = None;
         self.note_sized = false;
         self.linear_drag = None;
-        self.last_linear_press = None;
+        self.last_container_press = None;
         self.pending_links.clear();
         let Some(out) = self.outputs.get_mut(&key) else {
             return;
@@ -2685,7 +2691,7 @@ impl App {
         self.pending_duplicate = None;
         self.pending_links.clear();
         self.linear_drag = None;
-        self.last_linear_press = None;
+        self.last_container_press = None;
         self.undo.abandon_gesture();
         let mut dropped = false;
         for out in self.outputs.values_mut() {
@@ -2910,6 +2916,10 @@ impl App {
                 box_ = Some(box_.map_or(connector_box, |box_| box_.union(connector_box)));
             }
         }
+        // A container's label follows the container's new geometry, including a connector whose end
+        // an attached shape just moved. It is a second document change on the same gesture, so it
+        // stays under the same undo snapshot.
+        self.refresh_all_bound_labels(key);
         // A copy the gesture made is ordinary content from here on: it has been dragged, and the gesture
         // that owned it is over.
         self.pending_duplicate = None;
@@ -3146,6 +3156,18 @@ impl App {
                 continue;
             }
             if edit.buffer.text.is_empty() {
+                // An empty label is not content: removing the container's text also removes the
+                // binding. A label created by this edit was already inserted, so it is removed here
+                // too, leaving the document exactly as the edit found it.
+                if edit.item.container.is_some()
+                    && let Some(index) = edit.index
+                    && let Some(ann) = self.doc.boards.get_mut(&board_name)
+                    && index < ann.texts.len()
+                {
+                    let removed = ann.texts.remove(index);
+                    box_ = box_.union(view.screen_rect(removed.paint_bounds()));
+                    changed = true;
+                }
                 out.pending = Some(match out.pending {
                     Some(pending) => pending.union(box_),
                     None => box_,
@@ -3154,6 +3176,18 @@ impl App {
             }
             let mut item = edit.item.clone();
             item.text = edit.buffer.text.clone();
+            if let Some(shape) = item.container.and_then(|id| {
+                self.doc
+                    .boards
+                    .get(&board_name)
+                    .and_then(|ann| ann.shape_index_by_id(id))
+                    .and_then(|index| self.doc.boards.get(&board_name)?.shapes.get(index))
+                    .cloned()
+            }) {
+                item = self.renderer.place_bound_text(&item, &shape);
+            } else {
+                item.container = None;
+            }
             box_ = box_.union(view.screen_rect(item.paint_bounds()));
             out.pending = Some(match out.pending {
                 Some(pending) => pending.union(box_),
@@ -3186,7 +3220,7 @@ impl App {
     /// with another tool.
     pub(crate) fn clear_text_press(&mut self) {
         self.last_text_press = None;
-        self.last_linear_press = None;
+        self.last_container_press = None;
     }
 
     /// Fill the topmost closed shape under the pointer with the colour in hand. Lines and arrows are
@@ -3224,30 +3258,27 @@ impl App {
         let now = Instant::now();
         let Some(index) = self.text_index_at(&key, x, y) else {
             self.last_text_press = None;
-            // A quick second click on the same line enters point editing instead of inserting a
-            // midpoint or starting another drag.
-            if let Some(index) = self.linear_index_at(&key, x, y) {
-                if is_text_double_click(self.last_linear_press, index, [x, y], now) {
-                    self.last_linear_press = None;
-                    if self.linear_selection_index(key) != Some(index) {
-                        self.set_selection(key, vec![ItemId::Shape(index)], None);
-                    }
-                    self.set_linear_edit(key, true);
+            // A quick second click on the same container or line opens its bound label. This is the
+            // only double-click action: point editing stays on the action card and `Enter`.
+            if let Some(shape) = self.bindable_shape_at(&key, x, y) {
+                if is_text_double_click(self.last_container_press, shape, [x, y], now) {
+                    self.last_container_press = None;
+                    self.open_bound_text(key, shape);
                 } else {
-                    self.last_linear_press = Some(TextPress {
+                    self.last_container_press = Some(TextPress {
                         at: now,
                         point: [x, y],
-                        index,
+                        index: shape,
                     });
                     self.select_press(key, x, y);
                 }
                 return;
             }
-            self.last_linear_press = None;
+            self.last_container_press = None;
             self.select_press(key, x, y);
             return;
         };
-        self.last_linear_press = None;
+        self.last_container_press = None;
         if is_text_double_click(self.last_text_press, index, [x, y], now) {
             self.last_text_press = None;
             self.begin_text_edit(&key, x, y);
@@ -3290,7 +3321,7 @@ impl App {
 
     /// Toggle the edit mode the action card's `edit` control and `Enter` share.
     pub(crate) fn toggle_linear_edit(&mut self, key: u32) {
-        self.last_linear_press = None;
+        self.last_container_press = None;
         let Some(index) = self.linear_selection_index(key) else {
             return;
         };
@@ -3301,18 +3332,29 @@ impl App {
         self.set_linear_edit(key, !editing);
     }
 
-    /// The topmost linear shape under a screen point, for the quick second click that opens point
-    /// editing. It uses the same eraser tolerance as an ordinary select press.
-    fn linear_index_at(&mut self, key: &u32, x: f32, y: f32) -> Option<usize> {
+    /// The topmost bindable container under a screen point: a closed shape whose interior contains
+    /// it, or a line/arrow within the ordinary select tolerance. This is the target of the double
+    /// click that creates or opens a bound label.
+    fn bindable_shape_at(&mut self, key: &u32, x: f32, y: f32) -> Option<usize> {
         let out = self.outputs.get(key)?;
         let ann = self.doc.boards.get(out.board())?;
         let point = out.view.to_canvas([x, y]);
-        match ann.hit(point[0], point[1], out.view.canvas_len(ERASER_THRESHOLD)) {
-            Some(ItemId::Shape(index)) if ann.shapes.get(index).is_some_and(Shape::is_linear) => {
-                Some(index)
-            }
-            _ => None,
+        if let Some(index) = ann
+            .shapes
+            .iter()
+            .rposition(|shape| shape.kind.is_closed() && shape.contains_point(point))
+        {
+            return Some(index);
         }
+        let limit = out.view.canvas_len(ERASER_THRESHOLD).powi(2);
+        ann.shapes
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, shape)| {
+                shape.is_linear() && shape.distance_squared(point[0], point[1]) <= limit
+            })
+            .map(|(index, _)| index)
     }
 
     /// A press on one of a linear element's point handles. A vertex drag moves that point; a
@@ -3334,7 +3376,7 @@ impl App {
         };
         let before = shape.paint_bounds();
         self.undo.begin_gesture(&self.doc);
-        let (vertex, end, inserted) = match handle {
+        let (vertex, end, pending, origin) = match handle {
             LinearHandle::Vertex(vertex) => {
                 let end = if vertex == 0 {
                     Some(0)
@@ -3343,44 +3385,29 @@ impl App {
                 } else {
                     None
                 };
-                (vertex, end, None)
+                let origin = shape.linear_vertex(vertex).unwrap_or(shape.from);
+                (vertex, end, None, origin)
             }
             LinearHandle::Midpoint(segment) => {
                 let Some(point) = shape.linear_midpoints().get(segment).copied() else {
                     self.undo.abandon_gesture();
                     return;
                 };
-                let Some(vertex) = self
-                    .doc
-                    .boards
-                    .get_mut(&board_name)
-                    .and_then(|ann| ann.shapes.get_mut(shape_index))
-                    .and_then(|shape| shape.insert_linear_vertex(segment, point))
-                else {
-                    self.undo.abandon_gesture();
-                    return;
-                };
-                (vertex, None, Some(vertex))
+                (segment + 1, None, Some(segment), point)
             }
         };
-        let Some(shape) = self
-            .doc
-            .boards
-            .get_mut(&board_name)
-            .and_then(|ann| ann.shapes.get_mut(shape_index))
-        else {
-            return;
-        };
-        if let Some(end) = end {
-            shape.attach[end] = None;
+        let mut damage = None;
+        if let Some(end) = end
+            && let Some(shape) = self
+                .doc
+                .boards
+                .get_mut(&board_name)
+                .and_then(|ann| ann.shapes.get_mut(shape_index))
+            && shape.attach[end].take().is_some()
+        {
+            damage = Some(before.union(shape.paint_bounds()));
         }
-        let after = shape.paint_bounds();
         if let Some(out) = self.outputs.get_mut(&key) {
-            if inserted.is_some() {
-                // A new point is a document vertex from this frame on; show it at full size rather
-                // than leaving it as a midpoint handle the user cannot grab again.
-                out.overlay.linear_edit = Some(shape_index);
-            }
             out.transient_dirty = true;
         }
         self.linear_drag = Some(LinearDrag {
@@ -3388,9 +3415,12 @@ impl App {
             shape: shape_index,
             vertex,
             end,
+            pending,
+            origin,
         });
-        let damage = before.union(after);
-        self.doc_changed_at(key, damage);
+        if let Some(damage) = damage {
+            self.doc_changed_at(key, damage);
+        }
         self.dirty = true;
     }
 
@@ -3417,11 +3447,27 @@ impl App {
             return;
         };
         let before = shape.paint_bounds();
+        let mut drag = drag;
+        if let Some(segment) = drag.pending {
+            // A click is not an insertion: the pointer has to leave the midpoint handle first.
+            if (point[0] - drag.origin[0]).hypot(point[1] - drag.origin[1])
+                <= out.view.canvas_len(2.0)
+            {
+                return;
+            }
+            let Some(vertex) = shape.insert_linear_vertex(segment, drag.origin) else {
+                return;
+            };
+            drag.vertex = vertex;
+            drag.pending = None;
+            self.linear_drag = Some(drag);
+        }
         if !shape.set_linear_vertex(drag.vertex, point) {
             return;
         }
         let after = shape.paint_bounds();
         self.doc_changed_at(drag.key, before.union(after));
+        self.refresh_bound_label(drag.key, drag.shape);
     }
 
     /// Release a point drag. An endpoint is re-seated on a closed shape when it landed within the
@@ -3433,6 +3479,11 @@ impl App {
         };
         if drag.key != key {
             self.linear_drag = Some(drag);
+            return;
+        }
+        if drag.pending.is_some() {
+            // The press never turned into a drag: leave the line exactly as it was.
+            self.undo.abandon_gesture();
             return;
         }
         let Some(out) = self.outputs.get(&key) else {
@@ -3476,6 +3527,81 @@ impl App {
             .unwrap_or(before);
         self.undo.commit_gesture(&self.doc);
         self.doc_changed_at(key, before.union(after));
+        self.refresh_bound_label(key, drag.shape);
+    }
+
+    /// Re-centre every label on this output's board, which is what an attached line needs after a
+    /// shape move seats its endpoints. Labels are few; the scan is one per bound text.
+    fn refresh_all_bound_labels(&mut self, key: u32) {
+        let Some(board_name) = self.outputs.get(&key).map(|out| out.board().to_string()) else {
+            return;
+        };
+        let indices: Vec<usize> = self
+            .doc
+            .boards
+            .get(&board_name)
+            .map(|ann| {
+                ann.shapes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, shape)| ann.bound_text(shape.id).is_some())
+                    .map(|(index, _)| index)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for index in indices {
+            self.refresh_bound_label(key, index);
+        }
+    }
+
+    /// Re-centre the label bound to one shape after its geometry moved. The text stays an ordinary
+    /// text item; only its origin changes, and the caller's gesture owns the undo snapshot.
+    fn refresh_bound_label(&mut self, key: u32, shape_index: usize) {
+        let Some(out) = self.outputs.get(&key) else {
+            return;
+        };
+        let board_name = out.board().to_string();
+        let Some(shape) = self
+            .doc
+            .boards
+            .get(&board_name)
+            .and_then(|ann| ann.shapes.get(shape_index))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(text_index) = self
+            .doc
+            .boards
+            .get(&board_name)
+            .and_then(|ann| ann.bound_text_index(shape.id))
+        else {
+            return;
+        };
+        let Some(item) = self
+            .doc
+            .boards
+            .get(&board_name)
+            .and_then(|ann| ann.texts.get(text_index))
+            .cloned()
+        else {
+            return;
+        };
+        let placed = self.renderer.place_bound_text(&item, &shape);
+        if placed.x == item.x && placed.y == item.y {
+            return;
+        }
+        let damage = item.paint_bounds().union(placed.paint_bounds());
+        if let Some(slot) = self
+            .doc
+            .boards
+            .get_mut(&board_name)
+            .and_then(|ann| ann.texts.get_mut(text_index))
+        {
+            slot.x = placed.x;
+            slot.y = placed.y;
+        }
+        self.doc_changed_at(key, damage);
     }
 
     /// The text box whose measured glyphs are under a canvas point. The select tool uses this to
@@ -3491,10 +3617,99 @@ impl App {
         // for CJK.
         let ann = self.doc.boards.get(board_name)?;
         ann.texts.iter().position(|t| {
+            let wrap = ann.text_wrap(t);
             self.renderer
-                .text_edit_bounds(&t.text, t, Screen { scale, view })
+                .text_edit_bounds_wrapped(&t.text, t, wrap, Screen { scale, view })
                 .contains(x, y)
         })
+    }
+
+    /// Open the label belonging to a container or line, creating an empty bound text on the first
+    /// double click. An existing label is never duplicated: the reverse lookup is by the shape's
+    /// stable id.
+    fn open_bound_text(&mut self, key: u32, shape_index: usize) {
+        let Some(board_name) = self.outputs.get(&key).map(|out| out.board().to_string()) else {
+            return;
+        };
+        let Some(ann) = self.doc.boards.get_mut(&board_name) else {
+            return;
+        };
+        if ann
+            .shapes
+            .get(shape_index)
+            .is_some_and(|shape| shape.id == 0)
+        {
+            ann.ensure_shape_ids();
+        }
+        let Some(shape) = ann.shapes.get(shape_index).cloned() else {
+            return;
+        };
+        if let Some(index) = ann.bound_text_index(shape.id) {
+            let selected = self
+                .outputs
+                .get(&key)
+                .and_then(|out| out.overlay.selection.as_ref())
+                .is_some_and(|selection| selection.items.contains(&ItemId::Shape(shape_index)));
+            if !selected {
+                self.set_selection(key, vec![ItemId::Shape(shape_index)], None);
+            }
+            self.begin_text_edit_index(key, index);
+            return;
+        }
+        // The edit's undo snapshot precedes the empty text, so a label the user abandons leaves no
+        // item and no undo step; typed content is undone back to before the label existed.
+        self.undo.begin_edit(&self.doc);
+        let item = TextItem {
+            x: shape.label_point()[0],
+            y: shape.label_point()[1],
+            color: shape.color.clone(),
+            size: self.text_size,
+            text: String::new(),
+            link: None,
+            container: Some(shape.id),
+        };
+        let item = self.renderer.place_bound_text(&item, &shape);
+        let damage = item.paint_bounds().union(shape.paint_bounds());
+        let index = {
+            let ann = self.doc.boards.get_mut(&board_name).unwrap();
+            ann.texts.push(item);
+            ann.texts.len() - 1
+        };
+        self.set_selection(key, vec![ItemId::Shape(shape_index)], None);
+        self.doc_changed_at(key, damage);
+        self.begin_text_edit_index(key, index);
+    }
+
+    /// Put an already-identified text item under the caret. Used by a label, whose index exists
+    /// before the edit, without creating the item again.
+    fn begin_text_edit_index(&mut self, key: u32, index: usize) {
+        let Some(board_name) = self.outputs.get(&key).map(|out| out.board().to_string()) else {
+            return;
+        };
+        let Some(item) = self
+            .doc
+            .boards
+            .get(&board_name)
+            .and_then(|ann| ann.texts.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        self.undo.begin_edit(&self.doc);
+        if let Some(out) = self.outputs.get_mut(&key) {
+            out.overlay.text = Some(TextOverlay {
+                buffer: TextBuffer::new(item.text.clone()),
+                item,
+                index: Some(index),
+                note: None,
+                preedit: String::new(),
+            });
+            out.text_dirty = false;
+            out.last_text_bounds = None;
+            out.dirty = true;
+        }
+        self.dirty = true;
+        self.sync_text_input();
     }
 
     pub(crate) fn begin_text_edit(&mut self, key: &u32, x: f32, y: f32) {
@@ -3518,6 +3733,7 @@ impl App {
             Some(idx) => (self.doc.boards[&board_name].texts[idx].clone(), Some(idx)),
             None => (
                 TextItem {
+                    container: None,
                     x,
                     y,
                     color: crate::config::current().colors[self.color_idx].clone(),
@@ -4150,9 +4366,11 @@ impl App {
         };
         let current_text_bounds = out.overlay.text.as_ref().and_then(|edit| {
             (edit.preedit.is_empty()).then(|| {
-                view.screen_rect(self.renderer.text_edit_bounds(
+                let wrap = ann.text_wrap(&edit.item);
+                view.screen_rect(self.renderer.text_edit_bounds_wrapped(
                     &edit.buffer.text,
                     &edit.item,
+                    wrap,
                     Screen { scale, view },
                 ))
             })

@@ -388,7 +388,14 @@ pub struct TextItem {
     /// written before links existed.
     #[serde(default)]
     pub link: Option<String>,
+    /// The id of the shape this text labels. A bound text is still an ordinary text element; the
+    /// binding only says where to centre it and that it goes when the shape goes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<u64>,
 }
+
+/// Padding between a bound label and the container it sits in, in canvas units.
+pub const BOUND_TEXT_PADDING: f32 = 8.0;
 
 /// Padding between a note's text and its edges, its smallest side, the size a click creates, and the
 /// corner radius a note is drawn with. A note's typography is its own: it is a fixed object rather than
@@ -472,6 +479,7 @@ impl Note {
     pub fn text_item(&self) -> TextItem {
         let box_ = self.text_box();
         TextItem {
+            container: None,
             x: box_.x,
             y: box_.y,
             color: self.ink().to_string(),
@@ -599,16 +607,68 @@ impl Board {
         self.shapes.push(shape);
     }
 
+    /// The shape a bound text names by its stable id.
+    pub fn shape_index_by_id(&self, id: u64) -> Option<usize> {
+        self.shapes.iter().position(|shape| shape.id == id)
+    }
+
+    /// The text bound to `shape_id`, if this board already has one. A shape carries at most one
+    /// label; the reverse relation stays in the text's `container`, so it survives copying and the
+    /// file without a parallel map to keep in sync.
+    pub fn bound_text_index(&self, shape_id: u64) -> Option<usize> {
+        self.texts
+            .iter()
+            .position(|text| text.container == Some(shape_id))
+    }
+
+    /// The text bound to `shape_id`.
+    pub fn bound_text(&self, shape_id: u64) -> Option<&TextItem> {
+        self.texts
+            .iter()
+            .find(|text| text.container == Some(shape_id))
+    }
+
+    /// The container a text is bound to, when it is still on this board.
+    pub fn text_container(&self, text: &TextItem) -> Option<&Shape> {
+        let id = text.container?;
+        self.shapes.iter().find(|shape| shape.id == id)
+    }
+
+    /// The width this text wraps at, if it is a container label.
+    pub fn text_wrap(&self, text: &TextItem) -> Option<f32> {
+        self.text_container(text).and_then(Shape::label_wrap)
+    }
+
     /// Give every shape a unique non-zero id. Files written before ids existed load with zeroes;
     /// duplicate ids can only come from a hand-edited file or a copy that forgot to remap.
     pub fn ensure_shape_ids(&mut self) {
         let mut used = BTreeSet::new();
+        let mut remap = BTreeMap::new();
         let mut next = self.next_shape_id();
         for shape in &mut self.shapes {
             if shape.id == 0 || !used.insert(shape.id) {
+                let old = shape.id;
                 shape.id = next;
                 used.insert(next);
+                if old != 0 {
+                    remap.entry(old).or_insert(next);
+                }
                 next += 1;
+            }
+        }
+        if !remap.is_empty() {
+            for text in &mut self.texts {
+                if let Some(container) = text.container {
+                    text.container = remap.get(&container).copied().or(Some(container));
+                }
+            }
+        }
+        // A binding that names no shape on this board is stale; keep the text but let it behave as
+        // an ordinary text box rather than as a label nobody can reach.
+        let ids: BTreeSet<u64> = self.shapes.iter().map(|shape| shape.id).collect();
+        for text in &mut self.texts {
+            if text.container.is_some_and(|id| !ids.contains(&id)) {
+                text.container = None;
             }
         }
     }
@@ -1023,8 +1083,19 @@ impl Board {
                 Some(box_)
             }
             Some(ItemId::Shape(i)) => {
-                let box_ = self.shapes[i].paint_bounds();
+                let mut box_ = self.shapes[i].paint_bounds();
+                let id = self.shapes[i].id;
                 self.shapes.remove(i);
+                if let Some(bound) = self
+                    .texts
+                    .iter()
+                    .filter(|text| text.container == Some(id))
+                    .map(TextItem::paint_bounds)
+                    .reduce(Rect::union)
+                {
+                    box_ = box_.union(bound);
+                    self.texts.retain(|text| text.container != Some(id));
+                }
                 self.drop_dangling_attachments();
                 Some(box_)
             }
@@ -1083,7 +1154,10 @@ impl Board {
                     }
                 }
                 ItemId::Text(i) => {
-                    if let Some(t) = self.texts.get(i).cloned() {
+                    if let Some(mut t) = self.texts.get(i).cloned() {
+                        if let Some(container) = t.container {
+                            t.container = shape_ids.get(&container).copied().or(Some(container));
+                        }
                         copies.push(ItemId::Text(self.texts.len()));
                         union_into(&mut box_, Some(t.paint_bounds()));
                         self.texts.push(t);
@@ -1114,6 +1188,26 @@ impl Board {
                 }
             }
         }
+        // A label follows its container even when only the container was selected. The loop above
+        // has already copied an explicitly selected label, so only the unselected ones are added.
+        for (shape_index, new_id) in &copy_ids {
+            let Some(shape) = self.shapes.get(*shape_index) else {
+                continue;
+            };
+            let Some(text_index) = self.bound_text_index(shape.id) else {
+                continue;
+            };
+            if items.contains(&ItemId::Text(text_index)) {
+                continue;
+            }
+            let Some(mut label) = self.texts.get(text_index).cloned() else {
+                continue;
+            };
+            label.container = Some(*new_id);
+            copies.push(ItemId::Text(self.texts.len()));
+            union_into(&mut box_, Some(label.paint_bounds()));
+            self.texts.push(label);
+        }
         (copies, box_)
     }
 
@@ -1143,6 +1237,31 @@ impl Board {
                         out.notes.push(n.clone());
                     }
                 }
+            }
+        }
+        // The clipboard carries a container's label with it, even when only the container was
+        // selected. The shape id is preserved, so the copied text names the copied shape directly;
+        // `append` remaps both when the clipboard lands on another board.
+        for id in items {
+            let ItemId::Shape(index) = *id else {
+                continue;
+            };
+            let Some(shape) = self.shapes.get(index) else {
+                continue;
+            };
+            let Some(text_index) = self.bound_text_index(shape.id) else {
+                continue;
+            };
+            if items.contains(&ItemId::Text(text_index))
+                || out
+                    .texts
+                    .iter()
+                    .any(|text| text.container == Some(shape.id))
+            {
+                continue;
+            }
+            if let Some(label) = self.texts.get(text_index) {
+                out.texts.push(label.clone());
             }
         }
         out
@@ -1182,9 +1301,11 @@ impl Board {
             self.strokes.push(copy);
         }
         for t in &other.texts {
+            let mut copy = t.clone();
+            copy.container = copy.container.and_then(|id| shape_ids.get(&id).copied());
             ids.push(ItemId::Text(self.texts.len()));
-            union_into(&mut box_, Some(t.paint_bounds()));
-            self.texts.push(t.clone());
+            union_into(&mut box_, Some(copy.paint_bounds()));
+            self.texts.push(copy);
         }
         for mut shape in shapes {
             for attachment in &mut shape.attach {
@@ -1309,6 +1430,20 @@ impl Board {
                 ItemId::Note(i) => notes.push(i),
             }
         }
+        // A label is content of its container: removing the container removes the text too, even
+        // when the selection named only the shape.
+        let label_ids: BTreeSet<u64> = shapes
+            .iter()
+            .filter_map(|index| self.shapes.get(*index).map(|shape| shape.id))
+            .filter(|id| *id != 0)
+            .collect();
+        for (index, text) in self.texts.iter().enumerate() {
+            if text.container.is_some_and(|id| label_ids.contains(&id)) {
+                texts.push(index);
+            }
+        }
+        texts.sort_unstable();
+        texts.dedup();
         let mut removed: Option<Rect> = None;
         for i in &strokes {
             union_into(&mut removed, self.strokes.get(*i).and_then(Stroke::bounds));
@@ -1670,6 +1805,46 @@ impl Shape {
         }
         self.points.insert(segment, point);
         Some(segment + 1)
+    }
+
+    /// The point a bound label is centred on: the middle of a closed container, or the midpoint of a
+    /// line measured along its polyline rather than halfway down its bounding box.
+    pub fn label_point(&self) -> [f32; 2] {
+        if !self.is_linear() {
+            return self.centre();
+        }
+        let vertices = self.linear_vertices();
+        if vertices.len() < 2 {
+            return self.centre();
+        }
+        let total: f32 = vertices
+            .windows(2)
+            .map(|pair| (pair[1][0] - pair[0][0]).hypot(pair[1][1] - pair[0][1]))
+            .sum();
+        if total <= f32::EPSILON {
+            return vertices[0];
+        }
+        let mut left = total / 2.0;
+        for pair in vertices.windows(2) {
+            let (dx, dy) = (pair[1][0] - pair[0][0], pair[1][1] - pair[0][1]);
+            let length = (dx * dx + dy * dy).sqrt();
+            if left <= length {
+                let t = left / length;
+                return [pair[0][0] + dx * t, pair[0][1] + dy * t];
+            }
+            left -= length;
+        }
+        vertices[vertices.len() - 1]
+    }
+
+    /// The width a label wraps at inside a closed container. A line has no width to wrap at: its
+    /// label is a single line like Excalidraw's linear text.
+    pub fn label_wrap(&self) -> Option<f32> {
+        if !self.kind.is_closed() {
+            return None;
+        }
+        let (_, half) = self.box_geometry();
+        Some((2.0 * half[0] - 2.0 * BOUND_TEXT_PADDING).max(16.0))
     }
 
     /// Length of the arrowhead, from the pen width with a floor so a hairline arrow still reads as
@@ -2235,9 +2410,9 @@ fn selection_press_full(
         return Press::Linear(handle);
     }
     let frame = selection_frame_with(ann, held, None, texts);
-    // A linear selection draws point handles instead of the eight-handle frame, so only the points
-    // may be grabbed. A cluster with a line in it still keeps the ordinary frame.
-    if linear.is_none()
+    // Point-edit mode draws no frame, so only its point handles may be grabbed. An ordinary linear
+    // selection keeps both the frame and the point handles.
+    if !(linear.is_some() && linear_edit)
         && let Some(frame) = frame
         && let Some(grab) = grab_at(
             view.screen_rect(frame),
@@ -2332,7 +2507,9 @@ pub fn selection_with_contents(ann: &Board, items: &[ItemId]) -> Vec<ItemId> {
             }
         }
         for (index, text) in ann.texts.iter().enumerate() {
-            if container.contains_rect(text.bounds()) {
+            // A bound label is implicit content of its container, not a second selected object.
+            // Selecting the container must not add the label to the frame or scale its font.
+            if text.container.is_none() && container.contains_rect(text.bounds()) {
                 add(ItemId::Text(index));
             }
         }
@@ -2699,7 +2876,11 @@ impl Transform {
         let origin = self.point([t.x, t.y]);
         out.x = origin[0];
         out.y = origin[1];
-        if let Transform::Scale { sy, .. } = self {
+        // A container label re-wraps when its container resizes; its font size is not the
+        // container's scale. A standalone text box keeps the old scaling behaviour.
+        if t.container.is_none()
+            && let Transform::Scale { sy, .. } = self
+        {
             out.size = (t.size * sy).clamp(TEXT_SIZE_MIN, TEXT_SIZE_MAX);
         }
         out

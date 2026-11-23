@@ -1341,6 +1341,7 @@ struct BaseKey {
 struct TextCacheEntry {
     text: String,
     size: f32,
+    wrap: Option<f32>,
     layout: PreparedText,
 }
 
@@ -1529,22 +1530,31 @@ impl TextLayoutCache {
         }
     }
 
-    fn matches(&self, index: usize, text: &str, size: f32) -> bool {
+    fn matches(&self, index: usize, text: &str, size: f32, wrap: Option<f32>) -> bool {
         self.entries
             .get(index)
             .and_then(Option::as_ref)
-            .is_some_and(|entry| entry.text == text && entry.size == size)
+            .is_some_and(|entry| entry.text == text && entry.size == size && entry.wrap == wrap)
     }
 
     /// `size` is the size the view puts on screen, not the item's own: a shaped line is only reusable
-    /// at the same zoom as well as the same text.
-    fn insert(&mut self, index: usize, text: &str, size: f32, layout: PreparedText) {
+    /// at the same zoom as well as the same text. `wrap` is a canvas width; a label whose container
+    /// changed width has to be shaped again.
+    fn insert(
+        &mut self,
+        index: usize,
+        text: &str,
+        size: f32,
+        wrap: Option<f32>,
+        layout: PreparedText,
+    ) {
         if index >= self.entries.len() {
             self.entries.resize_with(index + 1, || None);
         }
         self.entries[index] = Some(TextCacheEntry {
             text: text.to_string(),
             size,
+            wrap,
             layout,
         });
     }
@@ -1818,8 +1828,9 @@ impl Renderer {
                     }
                 }
                 None => {
+                    let wrap = ann.text_wrap(&t.item);
                     if Self::in_view(screen, t.item.paint_bounds(), surface) {
-                        self.draw_text(&mut pixmap, &t.item, screen, Some(t), None, None);
+                        self.draw_text(&mut pixmap, &t.item, screen, Some(t), None, wrap);
                     }
                 }
             }
@@ -1903,7 +1914,8 @@ impl Renderer {
             .as_ref()
             .filter(|selection| selection.transform.is_none())
             .and_then(|selection| selected_linear(ann, &selection.items));
-        if linear.is_none()
+        let editing_linear = linear.is_some_and(|index| overlay.linear_edit == Some(index));
+        if !editing_linear
             && let Some(frame) = selection_boxes
                 .as_ref()
                 .and_then(|(items, transform, boxes)| {
@@ -1915,12 +1927,7 @@ impl Renderer {
         if let Some(index) = linear
             && let Some(shape) = ann.shapes.get(index)
         {
-            draw_linear_handles(
-                &mut pixmap,
-                shape,
-                screen,
-                overlay.linear_edit == Some(index),
-            );
+            draw_linear_handles(&mut pixmap, shape, screen, editing_linear);
         }
         if let Some(marquee) = overlay.marquee {
             draw_marquee(&mut pixmap, marquee, screen);
@@ -2021,13 +2028,20 @@ impl Renderer {
             if skip.contains(&ItemId::Text(index)) {
                 continue;
             }
-            if !Self::in_view(screen, item.paint_bounds(), surface) {
+            let wrap = ann.text_wrap(item);
+            let bounds = match ann.text_container(item) {
+                Some(shape) => item
+                    .paint_bounds()
+                    .union(shape.paint_bounds().grown(item.size)),
+                None => item.paint_bounds(),
+            };
+            if !Self::in_view(screen, bounds, surface) {
                 continue;
             }
             let size = screen.len(item.size);
-            if !text.matches(index, &item.text, size) {
-                let layout = self.prepare_text(&item.text, item, screen, None);
-                text.insert(index, &item.text, size, layout);
+            if !text.matches(index, &item.text, size, wrap) {
+                let layout = self.prepare_text(&item.text, item, screen, wrap);
+                text.insert(index, &item.text, size, wrap, layout);
             }
             if let Some(layout) = text.get_mut(index) {
                 self.draw_prepared_text(pixmap, item, screen, layout, None);
@@ -3770,15 +3784,51 @@ impl Renderer {
             })
             .filter_map(|i| {
                 let text = ann.texts.get(i)?;
-                Some((i, self.text_edit_bounds(&text.text, text, screen)))
+                let wrap = ann.text_wrap(text);
+                Some((
+                    i,
+                    self.text_edit_bounds_wrapped(&text.text, text, wrap, screen),
+                ))
             })
             .collect()
     }
 
     pub fn text_edit_bounds(&mut self, text: &str, item: &TextItem, screen: Screen) -> Rect {
-        self.prepare_text(text, item, screen, None)
+        self.text_edit_bounds_wrapped(text, item, None, screen)
+    }
+
+    /// The measured box of `text` at the wrap width its container gives it. The selection frame and
+    /// a press that re-enters a label both use this, so a wrapped label is framed where it paints.
+    pub fn text_edit_bounds_wrapped(
+        &mut self,
+        text: &str,
+        item: &TextItem,
+        wrap: Option<f32>,
+        screen: Screen,
+    ) -> Rect {
+        self.prepare_text(text, item, screen, wrap)
             .paint_bounds
             .grown(CURSOR_WIDTH)
+    }
+
+    /// Where a bound label belongs: horizontally centred on the container, or on the measured
+    /// midpoint of a line, and vertically centred on the same point. A closed container also gives
+    /// the text a wrap width, so a long label stays inside it. Measurement runs at 1:1 because the
+    /// stored position is canvas-space, independent of the output showing it.
+    pub fn place_bound_text(&mut self, item: &TextItem, shape: &Shape) -> TextItem {
+        let screen = Screen {
+            scale: 1.0,
+            view: View::default(),
+        };
+        let wrap = shape.label_wrap();
+        let bounds = self
+            .prepare_text(&item.text, item, screen, wrap)
+            .paint_bounds;
+        let centre = shape.label_point();
+        let mut placed = item.clone();
+        placed.x = centre[0] - bounds.w / 2.0;
+        placed.y = centre[1] - bounds.h / 2.0;
+        placed
     }
 
     /// Draw a note: its square, the text on it, and the day it was made. `edit` is the note being
@@ -3818,6 +3868,7 @@ impl Renderer {
         let width = self.text_width(&note.created, NOTE_DATE_SIZE);
         let box_ = note.date_box();
         let item = TextItem {
+            container: None,
             x: box_.x + box_.w - width,
             y: box_.y,
             link: None,
@@ -4436,6 +4487,7 @@ fn text_attrs() -> Attrs<'static> {
 /// A label vertically centred in a `height`-tall box whose top edge is `top`.
 fn toolbar_text(x: f32, top: f32, height: f32, size: f32, color: &str, text: &str) -> TextItem {
     TextItem {
+        container: None,
         x,
         y: top + (height - size * LINE_HEIGHT_SCALE) / 2.0,
         color: color.into(),
@@ -7387,6 +7439,7 @@ mod tests {
 
     fn text_item(text: &str) -> TextItem {
         TextItem {
+            container: None,
             x: 10.0,
             y: 10.0,
             color: "#ffffff".into(),
