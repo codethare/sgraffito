@@ -172,6 +172,7 @@ The pointer follows the armed tool through `wp_cursor_shape_v1`: a crosshair for
 ## Drawer and backdrop
 
 - `more tools` (`M`) opens on a click and then stays open like the boards list: `Esc`, a press outside it, or a pick dismisses it. The pointer leaving it no longer closes it.
+- `edges` in the drawer switches new lines and arrows between sharp and rounded corners, and applies the chosen style to any selected lines or arrows as one undoable change. The row stays open after a click, like the backdrop switch.
 - `backdrop` (`B`) cycles transparent → grid → dots → dim → transparent. Its four mode buttons sit in one horizontal row to the right of the row, joined by a hairline at their middle; each button picks that mode and leaves the drawer open.
 - The grid uses a 24-point cell with a one-point line; the dot matrix uses the same 24-point spacing with two-point dots. Both pan and zoom with the drawing and are painted mid-grey at partial opacity, so they read over light and dark wallpapers without dimming it. `dim` is the previous black 90% scrim.
 
@@ -192,7 +193,8 @@ Errors and state changes go to stderr and to `$XDG_STATE_HOME/sgraffito/sgraffit
 - Stored attachments are routed onto the real outline, not the corner of an ellipse's or diamond's box; rotated shapes keep the joint on the curve the user sees. Attachments are saved with stable shape ids; deleting a shape clears the ends that pointed at it, and copying or moving shapes remaps their connectors to the copies.
 - The geometry path is an affine matrix: translation, scale and rotation compose through one `Affine` map, with `Transform::matrix`, `Affine::then` and `Affine::inverse` available to callers. Gesture previews and committed shapes use the same arithmetic.
 - A single selected line or arrow keeps the ordinary selection frame — four corner handles and the rotation handle — and adds its two endpoints as full point handles, with a small midpoint handle on every segment. Dragging an endpoint retunes that end; dragging a midpoint past a two-pixel slop inserts a real interior vertex and starts dragging it; a plain click leaves the line unchanged. An attached endpoint detaches when pulled away and re-binds when released within 12 logical pixels of a closed outline.
-- `edit` on the selection card or `Enter` enters point editing: every interior vertex becomes a full handle and the midpoint handles stay as insertion points. `Esc` leaves point editing before it drops the selection. The vertices are written to the same shape as the endpoints, so undo, copy, paste and the annotation file all carry them. A quick double click is reserved for the bound label described below.
+- `edit` on the selection card or `Enter` enters point editing: every real vertex becomes a full handle. While one vertex is being dragged, the two adjacent segment midpoints appear as smaller insertion hints; ordinary selection still shows a midpoint on every segment. `Esc` leaves point editing before it drops the selection. The vertices are written to the same shape as the endpoints, so undo, copy, paste and the annotation file all carry them. A quick double click is reserved for the bound label described below.
+- A line's or arrow's `roundness` is a stored style, not a separate curve handle. When it is `Some`, the renderer cuts each interior corner back and joins it with a quadratic bend derived from the two adjacent segment directions; editing a vertex only changes the point array and the corner is rebuilt. The drawer's `edges` row is the UI for that property.
 
 ## Bound labels
 

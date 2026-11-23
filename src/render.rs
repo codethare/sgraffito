@@ -180,6 +180,8 @@ enum Icon {
     Shared,
     /// The link row: two chain links.
     Link,
+    /// A rounded elbow for the edges toggle.
+    Round,
     /// Undo and redo arrows for the history cards.
     Undo,
     Redo,
@@ -276,7 +278,7 @@ fn key_of(action: ToolbarAction) -> Option<&'static str> {
         | ToolbarAction::RenameBoard(_) => "C",
         ToolbarAction::CancelDeleteBoard => return None,
         ToolbarAction::Shared => "F",
-        ToolbarAction::Link => return None,
+        ToolbarAction::Link | ToolbarAction::Round => return None,
         ToolbarAction::Backdrop(_) => return None,
         ToolbarAction::Color(index) => ["1", "2", "3", "4", "5"].get(index).copied().unwrap_or("?"),
         ToolbarAction::SizeStep(dir) => {
@@ -826,11 +828,12 @@ fn toolbar_blocks(toolbar: &Toolbar, surface: f32) -> Vec<Block> {
 /// by choice, so they live in the list the `more` block opens. This is the one list of who they are —
 /// `drawer_blocks` is what they look like — so the rules that open and close the drawer cannot
 /// disagree with what it shows.
-pub const DRAWER: [ToolbarAction; 4] = [
+pub const DRAWER: [ToolbarAction; 5] = [
     ToolbarAction::Tool(Tool::Bucket),
     ToolbarAction::Scrim,
     ToolbarAction::Shared,
     ToolbarAction::Link,
+    ToolbarAction::Round,
 ];
 
 /// How many boards the panel lists before the rest are only reachable from the command line. The rail
@@ -907,6 +910,7 @@ pub fn closes_panel_on_pick(action: ToolbarAction) -> bool {
                 | ToolbarAction::CancelDeleteBoard
                 | ToolbarAction::RenameBoard(_)
                 | ToolbarAction::Link
+                | ToolbarAction::Round
                 | ToolbarAction::Scrim
                 | ToolbarAction::Backdrop(_)
         )
@@ -971,6 +975,21 @@ fn drawer_blocks(toolbar: &Toolbar, overflow: &[Block]) -> Vec<Block> {
                 label: labelled(*action, "link text to board"),
                 action: Some(*action),
                 active: false,
+                gap: TOOLBAR_GAP,
+            }),
+            ToolbarAction::Round => Some(Block {
+                mark: Mark::Icon(Icon::Round),
+                column: 1,
+                label: labelled(
+                    *action,
+                    if toolbar.roundness {
+                        "edges: round"
+                    } else {
+                        "edges: sharp"
+                    },
+                ),
+                action: Some(*action),
+                active: toolbar.roundness,
                 gap: TOOLBAR_GAP,
             }),
             _ => None,
@@ -1116,6 +1135,7 @@ fn drawer_caption(action: ToolbarAction) -> Option<&'static str> {
         ToolbarAction::Scrim => "backdrop",
         ToolbarAction::Shared => "boards",
         ToolbarAction::Link => "link",
+        ToolbarAction::Round => "edges",
         _ => return None,
     })
 }
@@ -1346,6 +1366,7 @@ impl SketchCache {
                 point[0].to_bits().hash(hash);
                 point[1].to_bits().hash(hash);
             }
+            s.roundness.hash(hash);
             s.to[0].to_bits().hash(hash);
             s.to[1].to_bits().hash(hash);
             s.rotate.to_bits().hash(hash);
@@ -1878,7 +1899,13 @@ impl Renderer {
         if let Some(index) = linear
             && let Some(shape) = ann.shapes.get(index)
         {
-            draw_linear_handles(&mut pixmap, shape, screen, editing_linear);
+            draw_linear_handles(
+                &mut pixmap,
+                shape,
+                screen,
+                editing_linear,
+                overlay.linear_drag,
+            );
         }
         if let Some(marquee) = overlay.marquee {
             draw_marquee(&mut pixmap, marquee, screen);
@@ -4297,9 +4324,15 @@ fn draw_selection(pixmap: &mut PixmapMut, frame: Rect, screen: Screen) {
 }
 
 /// The point handles of a selected line or arrow. Selection mode draws the two endpoints and a
-/// small midpoint on every segment; edit mode also exposes every interior vertex at full size. A
-/// dragged midpoint is inserted as a real vertex, so the next frame draws it in the full-size set.
-fn draw_linear_handles(pixmap: &mut PixmapMut, shape: &Shape, screen: Screen, edit: bool) {
+/// small midpoint on every segment; edit mode exposes every vertex at full size and, while one is
+/// being dragged, shows midpoint insertion hints only on the two segments beside it.
+fn draw_linear_handles(
+    pixmap: &mut PixmapMut,
+    shape: &Shape,
+    screen: Screen,
+    edit: bool,
+    drag: Option<usize>,
+) {
     let c = parse_hex(TOOLBAR_ACCENT);
     let mut paint = Paint::default();
     paint.set_color_rgba8(c[0], c[1], c[2], c[3]);
@@ -4325,7 +4358,12 @@ fn draw_linear_handles(pixmap: &mut PixmapMut, shape: &Shape, screen: Screen, ed
             );
         }
     }
-    for point in shape.linear_midpoints() {
+    for (segment, point) in shape.linear_midpoints().into_iter().enumerate() {
+        // In edit mode the small insertion handles appear only beside the vertex being dragged;
+        // ordinary selection keeps one on every segment.
+        if edit && !drag.is_some_and(|vertex| segment + 1 == vertex || segment == vertex) {
+            continue;
+        }
         let point = screen.point(point);
         let mut dot = PathBuilder::new();
         dot.push_circle(point[0], point[1], screen.ui(LINEAR_MIDPOINT / 2.0));
@@ -4373,6 +4411,7 @@ fn same_layout(a: &Toolbar, b: &Toolbar) -> bool {
         && a.boards_open == b.boards_open
         && a.size_open == b.size_open
         && a.can_duplicate == b.can_duplicate
+        && a.roundness == b.roundness
         && a.target == b.target
         && a.rename == b.rename
         && a.delete_confirm == b.delete_confirm
@@ -5042,6 +5081,7 @@ fn draw_icon(
         draw_shape(
             pixmap,
             &Shape {
+                roundness: None,
                 points: Vec::new(),
                 kind,
                 color: color.into(),
@@ -5331,6 +5371,13 @@ fn draw_icon(
                 }
             }
         }
+        Icon::Round => {
+            // A line that turns through a rounded elbow.
+            path.move_to(x + w * 0.2, y + h * 0.82);
+            path.line_to(x + w * 0.2, y + h * 0.52);
+            path.quad_to(x + w * 0.2, y + h * 0.18, x + w * 0.54, y + h * 0.18);
+            path.line_to(x + w * 0.82, y + h * 0.18);
+        }
         Icon::Link => {
             // Two chain links, overlapping at the middle.
             for dx in [0.1, 0.4] {
@@ -5507,13 +5554,18 @@ fn sketched_shape(s: &Shape, seed: u64) -> Vec<Seg> {
         }
         ShapeKind::Line | ShapeKind::Arrow => {
             let vertices = s.linear_vertices();
-            let mut segs = Vec::new();
-            for (index, pair) in vertices.windows(2).enumerate() {
-                // A different salt per segment keeps a bend from looking like two copies of the
-                // same bow, while the first segment still sits under the hand that drew it.
-                let segment_seed = seed ^ (index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-                segs.extend(sketch::line(pair[0], pair[1], s.width, segment_seed));
-            }
+            let mut segs = if s.is_round() {
+                sketch::rounded_line(&vertices, s.width, seed)
+            } else {
+                let mut segs = Vec::new();
+                for (index, pair) in vertices.windows(2).enumerate() {
+                    // A different salt per segment keeps a bend from looking like two copies of the
+                    // same bow, while the first segment still sits under the hand that drew it.
+                    let segment_seed = seed ^ (index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+                    segs.extend(sketch::line(pair[0], pair[1], s.width, segment_seed));
+                }
+                segs
+            };
             if s.kind == ShapeKind::Arrow
                 && let Some(head) = arrow_head(s)
             {
@@ -6574,6 +6626,7 @@ mod tests {
     #[test]
     fn a_snap_marks_its_target_and_its_endpoint() {
         let target = Shape {
+            roundness: None,
             points: Vec::new(),
             kind: ShapeKind::Rect,
             color: "#ffffff".into(),
@@ -6589,6 +6642,7 @@ mod tests {
         ann.add_shape(target.clone());
         let overlay = Overlay {
             shape: Some(Shape {
+                roundness: None,
                 points: Vec::new(),
                 kind: ShapeKind::Line,
                 color: "#ffffff".into(),
@@ -6642,6 +6696,7 @@ mod tests {
     #[test]
     fn a_live_connector_joins_the_transient_damage() {
         let connector = Shape {
+            roundness: None,
             points: Vec::new(),
             kind: ShapeKind::Line,
             color: "#ffffff".into(),
@@ -7294,6 +7349,7 @@ mod tests {
             can_undo: false,
             can_redo: false,
             can_duplicate: false,
+            roundness: false,
             colors_open: false,
             colors_grow: 1.0,
         }
@@ -7595,6 +7651,7 @@ mod tests {
                 can_undo: false,
                 can_redo: false,
                 can_duplicate: false,
+                roundness: false,
                 colors_open: false,
                 colors_grow: 1.0,
             }),
@@ -7841,6 +7898,7 @@ mod tests {
         // a document that already holds it.
         let held = [ItemId::Shape(0)];
         let shape = Shape {
+            roundness: None,
             points: Vec::new(),
             kind: ShapeKind::Circle,
             color: "#e01b24".into(),
@@ -7950,6 +8008,7 @@ mod tests {
             can_undo: false,
             can_redo: false,
             can_duplicate: false,
+            roundness: false,
             colors_open: false,
             colors_grow: 1.0,
         }
@@ -8210,6 +8269,7 @@ mod tests {
                 // These live in the drawer (closed here) and name no single key: their block labels
                 // are never walked by this test.
                 ToolbarAction::Link
+                | ToolbarAction::Round
                 | ToolbarAction::AskDeleteBoard(_)
                 | ToolbarAction::CancelDeleteBoard
                 | ToolbarAction::Undo

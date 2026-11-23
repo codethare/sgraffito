@@ -203,6 +203,8 @@ pub enum ToolbarAction {
     Shared,
     /// Link the selected text box to a board: opens the board list as a target picker.
     Link,
+    /// Switch the edges of new and selected lines/arrows between sharp and round.
+    Round,
 }
 
 /// What edit mode paints behind the document. Locked mode always paints nothing, because that
@@ -558,6 +560,11 @@ pub struct Shape {
     /// points stay in `from`/`to`, so an attachment continues to name an endpoint.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub points: Vec<[f32; 2]>,
+    /// `Some(2)` draws a line or arrow's polyline with rounded corners; `None` keeps every vertex
+    /// sharp. The value is the Excalidraw roundness kind, kept so a file can carry it even though
+    /// this build draws only the one smooth style.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roundness: Option<u8>,
     /// For a line or arrow, the closed shapes its two ends stick to.
     #[serde(default)]
     pub attach: [Option<Attachment>; 2],
@@ -1722,6 +1729,11 @@ impl Shape {
         matches!(self.kind, ShapeKind::Line | ShapeKind::Arrow)
     }
 
+    /// Whether the polyline should be drawn with rounded corners.
+    pub fn is_round(&self) -> bool {
+        self.is_linear() && self.roundness.is_some()
+    }
+
     /// Every vertex of a linear element in draw order: `from`, the interior points, `to`. Empty for
     /// a closed shape. The endpoints stay in `from`/`to`, so connector attachments still name the
     /// two ends while the interior points make the line bend.
@@ -2301,6 +2313,7 @@ pub fn linear_handle_at(
     view: View,
     screen: [f32; 2],
     edit: bool,
+    drag: Option<usize>,
 ) -> Option<LinearHandle> {
     let limit = SELECT_HANDLE_HIT * SELECT_HANDLE_HIT;
     let count = shape.linear_vertex_count();
@@ -2323,6 +2336,9 @@ pub fn linear_handle_at(
         .linear_midpoints()
         .into_iter()
         .enumerate()
+        .filter(|(segment, _)| {
+            !edit || drag.is_some_and(|vertex| *segment + 1 == vertex || *segment == vertex)
+        })
         .find(|(_, point)| dist_squared(screen, view.to_screen(*point)) <= limit)
         .map(|(segment, _)| LinearHandle::Midpoint(segment))
 }
@@ -2358,12 +2374,14 @@ pub fn selection_press_with(
     shift: bool,
     texts: &[(usize, Rect)],
 ) -> Press {
-    selection_press_full(ann, held, view, screen, tolerance, shift, texts, false)
+    selection_press_full(
+        ann, held, view, screen, tolerance, shift, texts, false, None,
+    )
 }
 
-/// The press for a single linear selection, with the edit-mode flag the caller keeps on the output.
-/// In selection mode only the endpoints are vertex handles; edit mode exposes the interior points
-/// too. Both modes show a small midpoint handle on every segment.
+/// The press for a single linear selection, with the edit-mode and drag state the caller keeps on
+/// the output. Selection mode exposes the endpoints and every segment midpoint; edit mode exposes
+/// every vertex, and only the midpoint hints beside a vertex being dragged.
 #[allow(clippy::too_many_arguments)]
 pub fn selection_press_linear(
     ann: &Board,
@@ -2374,6 +2392,7 @@ pub fn selection_press_linear(
     shift: bool,
     texts: &[(usize, Rect)],
     linear_edit: bool,
+    linear_drag: Option<usize>,
 ) -> Press {
     selection_press_full(
         ann,
@@ -2384,6 +2403,7 @@ pub fn selection_press_linear(
         shift,
         texts,
         linear_edit,
+        linear_drag,
     )
 }
 
@@ -2397,11 +2417,13 @@ fn selection_press_full(
     shift: bool,
     texts: &[(usize, Rect)],
     linear_edit: bool,
+    linear_drag: Option<usize>,
 ) -> Press {
     let canvas = view.to_canvas(screen);
     let linear = selected_linear(ann, held);
     if let Some(index) = linear
-        && let Some(handle) = linear_handle_at(&ann.shapes[index], view, screen, linear_edit)
+        && let Some(handle) =
+            linear_handle_at(&ann.shapes[index], view, screen, linear_edit, linear_drag)
     {
         return Press::Linear(handle);
     }
@@ -2907,6 +2929,7 @@ impl Transform {
     pub fn shape(self, s: &Shape) -> Shape {
         let matrix = self.matrix();
         let mut out = Shape {
+            roundness: s.roundness,
             points: s.points.iter().map(|point| matrix.apply(*point)).collect(),
             from: matrix.apply(s.from),
             to: matrix.apply(s.to),
@@ -3818,6 +3841,8 @@ pub struct Overlay {
     /// The shape index whose linear points are in edit mode. Transient; the points themselves are
     /// document content and are written as they move.
     pub linear_edit: Option<usize>,
+    /// The vertex currently being dragged, so edit mode can show midpoint hints only beside it.
+    pub linear_drag: Option<usize>,
     /// Attached connectors redrawn while a selection gesture moves their shapes. The document
     /// raster still holds their old geometry, so the frame paints these and skips those ids.
     pub connectors: Vec<LiveConnector>,
@@ -3892,6 +3917,9 @@ pub struct Toolbar {
     pub can_redo: bool,
     /// Whether this output holds a selection that `duplicate` can clone.
     pub can_duplicate: bool,
+    /// Whether new lines and arrows are drawn with rounded corners, and the selected ones currently
+    /// carry that style.
+    pub roundness: bool,
     /// Whether the collapsed colour swatch is showing the other four colours beside it.
     pub colors_open: bool,
     /// How far that flyout has unfurled, 0 to about 1.

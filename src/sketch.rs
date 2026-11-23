@@ -111,6 +111,54 @@ pub fn line(from: [f32; 2], to: [f32; 2], width: f32, seed: u64) -> Vec<Seg> {
     segs
 }
 
+/// A polyline whose interior corners are cut back by a radius and joined with a quadratic bend,
+/// which is what Excalidraw's `roundness` calls a rounded edge. The vertices stay the stored points;
+/// only the painted path is rounded, so point editing keeps changing the same array.
+pub fn rounded_line(points: &[[f32; 2]], width: f32, seed: u64) -> Vec<Seg> {
+    if points.len() < 2 {
+        return Vec::new();
+    }
+    let mut segs = Vec::with_capacity(points.len() * 6);
+    let mut cursor = points[0];
+    for index in 1..points.len() - 1 {
+        let previous = points[index - 1];
+        let vertex = points[index];
+        let next = points[index + 1];
+        let incoming = (vertex[0] - previous[0]).hypot(vertex[1] - previous[1]);
+        let outgoing = (next[0] - vertex[0]).hypot(next[1] - vertex[1]);
+        if incoming <= f32::EPSILON || outgoing <= f32::EPSILON {
+            continue;
+        }
+        let radius = (incoming.min(outgoing) * 0.25).min(width.max(1.0) * 80.0);
+        if radius < 0.5 {
+            segs.extend(line(cursor, vertex, width, seed ^ index as u64));
+            cursor = vertex;
+            continue;
+        }
+        let in_dir = [
+            (vertex[0] - previous[0]) / incoming,
+            (vertex[1] - previous[1]) / incoming,
+        ];
+        let out_dir = [
+            (next[0] - vertex[0]) / outgoing,
+            (next[1] - vertex[1]) / outgoing,
+        ];
+        let before = [
+            vertex[0] - in_dir[0] * radius,
+            vertex[1] - in_dir[1] * radius,
+        ];
+        let after = [
+            vertex[0] + out_dir[0] * radius,
+            vertex[1] + out_dir[1] * radius,
+        ];
+        segs.extend(line(cursor, before, width, seed ^ index as u64));
+        segs.push(Seg::Quad(vertex, after));
+        cursor = after;
+    }
+    segs.extend(line(cursor, points[points.len() - 1], width, seed));
+    segs
+}
+
 /// The per-trace salts, so trace two sees a different stream from trace one under the same seed.
 const PASS_SALT: [u64; 2] = [0x243f_6a88_85a3_08d3, 0x1319_8a2e_0370_7344];
 
@@ -338,6 +386,16 @@ mod tests {
         let first = line(FROM, TO, WIDTH, seed);
         let _other = line([0.0, 0.0], [1.0, 1.0], WIDTH, seed ^ 0x5eed);
         assert_eq!(first, line(FROM, TO, WIDTH, seed));
+    }
+
+    #[test]
+    fn a_rounded_polyline_bends_at_its_vertices() {
+        let points = [[0.0, 0.0], [100.0, 100.0], [200.0, 0.0]];
+        let segs = rounded_line(&points, WIDTH, seed_for(0, "#e01b24", WIDTH, points[0]));
+        assert!(
+            segs.iter().any(|seg| matches!(seg, Seg::Quad(_, _))),
+            "the rounded polyline has no corner bend"
+        );
     }
 
     #[test]

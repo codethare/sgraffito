@@ -1269,6 +1269,7 @@ impl App {
             ToolbarAction::Boards => self.toggle_boards(),
             ToolbarAction::Shared => self.toggle_shared(),
             ToolbarAction::Link => self.open_target(acting, Target::Link),
+            ToolbarAction::Round => self.toggle_roundness(acting),
             // The panel's rows are the document's boards in name order, which is the order the rail was
             // drawn from, so an index names the same board it was drawn as.
             ToolbarAction::Board(index) => {

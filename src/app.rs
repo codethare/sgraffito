@@ -414,6 +414,8 @@ pub struct App {
     /// A connector end that a shape has magnetically met during the drag, written when the gesture
     /// lands. Indices are valid until the gesture ends, like the selection's.
     pub(crate) pending_links: Vec<PendingLink>,
+    /// Whether new lines and arrows use rounded corners. Session state, like the active tool.
+    pub(crate) roundness: bool,
     /// Whether the drawer of rarely used controls is open. Transient, like the selection.
     pub(crate) more: bool,
     /// What edit mode paints behind the document. A preference about reading, so it is not persisted.
@@ -725,6 +727,7 @@ impl App {
             alt: false,
             pending_duplicate: None,
             pending_links: Vec::new(),
+            roundness: false,
             more: false,
             backdrop: Backdrop::Black,
             pan: None,
@@ -967,6 +970,7 @@ impl App {
                             .as_ref()
                             .is_some_and(|selection| !selection.items.is_empty())
                     }),
+                    roundness: self.roundness,
                     colors_open: self.colors_open,
                     colors_grow: hover_grow(self.colors_since, Instant::now()),
                 })
@@ -1151,6 +1155,68 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Toggle the rounded-edge style for new linear elements and for any selected ones. With no
+    /// selection this only changes the next line or arrow; with a selection it is one undoable edit.
+    pub(crate) fn toggle_roundness(&mut self, acting: Option<u32>) {
+        self.roundness = !self.roundness;
+        let wanted = self.roundness.then_some(2);
+        let keys: Vec<u32> = match acting.or(self.keyboard_focus) {
+            Some(key) => vec![key],
+            None => self.outputs.keys().copied().collect(),
+        };
+        let before = self.doc.clone();
+        let mut changed = false;
+        for key in keys {
+            let Some(out) = self.outputs.get(&key) else {
+                continue;
+            };
+            let board_name = out.board().to_string();
+            let items = out
+                .overlay
+                .selection
+                .as_ref()
+                .map(|selection| selection.items.clone())
+                .unwrap_or_default();
+            let damage = {
+                let Some(ann) = self.doc.boards.get_mut(&board_name) else {
+                    continue;
+                };
+                let mut damage: Option<Rect> = None;
+                for item in &items {
+                    let ItemId::Shape(index) = *item else {
+                        continue;
+                    };
+                    let Some(shape) = ann.shapes.get_mut(index) else {
+                        continue;
+                    };
+                    if !shape.is_linear() || shape.roundness == wanted {
+                        continue;
+                    }
+                    damage = Some(match damage {
+                        Some(box_) => box_.union(shape.paint_bounds()),
+                        None => shape.paint_bounds(),
+                    });
+                    shape.roundness = wanted;
+                    changed = true;
+                }
+                damage
+            };
+            if let Some(box_) = damage {
+                self.doc_changed_at(key, box_);
+            }
+        }
+        if changed {
+            self.undo.record(before, &self.doc);
+        }
+        self.refresh_toolbar();
+        self.dirty = true;
+        log(if self.roundness {
+            "rounded edges armed"
+        } else {
+            "sharp edges armed"
+        });
     }
 
     /// Open or close the drawer. It changes which controls exist, not the rail's height, so the rail's
@@ -2064,6 +2130,7 @@ impl App {
             || out.overlay.note.take().is_some()
             || out.overlay.selection.take().is_some()
             || out.overlay.linear_edit.take().is_some()
+            || out.overlay.linear_drag.take().is_some()
             || out.overlay.marquee.take().is_some();
         out.overlay.connectors.clear();
         if changed {
@@ -2115,6 +2182,7 @@ impl App {
                 self.shift,
                 &boxes,
                 linear_edit,
+                out.overlay.linear_drag,
             );
             let frame = selection_frame_with(ann, &held, None, &boxes);
             (press, frame, view.to_canvas([x, y]), linear_edit)
@@ -2595,7 +2663,8 @@ impl App {
         for out in self.outputs.values_mut() {
             let had = out.overlay.selection.take().is_some()
                 | out.overlay.marquee.take().is_some()
-                | out.overlay.linear_edit.take().is_some();
+                | out.overlay.linear_edit.take().is_some()
+                | out.overlay.linear_drag.take().is_some();
             out.overlay.connectors.clear();
             if had {
                 out.transient_dirty = true;
@@ -2700,6 +2769,7 @@ impl App {
                 out.overlay.selection = next;
                 // Point editing names an index in the selection that just changed.
                 out.overlay.linear_edit = None;
+                out.overlay.linear_drag = None;
                 out.overlay.connectors.clear();
                 out.transient_dirty = true;
                 self.dirty = true;
@@ -3221,6 +3291,9 @@ impl App {
         }
         if !edit {
             self.linear_drag = None;
+            if let Some(out) = self.outputs.get_mut(&key) {
+                out.overlay.linear_drag = None;
+            }
         }
     }
 
@@ -3314,6 +3387,7 @@ impl App {
         }
         if let Some(out) = self.outputs.get_mut(&key) {
             out.transient_dirty = true;
+            out.overlay.linear_drag = Some(vertex);
         }
         self.linear_drag = Some(LinearDrag {
             key,
@@ -3371,6 +3445,9 @@ impl App {
             return;
         }
         let after = shape.paint_bounds();
+        if let Some(out) = self.outputs.get_mut(&key) {
+            out.overlay.linear_drag = Some(drag.vertex);
+        }
         self.doc_changed_at(drag.key, before.union(after));
         self.refresh_bound_label(drag.key, drag.shape);
     }
@@ -3385,6 +3462,10 @@ impl App {
         if drag.key != key {
             self.linear_drag = Some(drag);
             return;
+        }
+        if let Some(out) = self.outputs.get_mut(&key) {
+            out.overlay.linear_drag = None;
+            out.transient_dirty = true;
         }
         if drag.pending.is_some() {
             // The press never turned into a drag: leave the line exactly as it was.
@@ -3695,6 +3776,8 @@ impl App {
             return;
         };
         out.overlay.shape = Some(Shape {
+            roundness: (self.roundness && matches!(kind, ShapeKind::Line | ShapeKind::Arrow))
+                .then_some(2),
             points: Vec::new(),
             kind,
             color,

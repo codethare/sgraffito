@@ -399,6 +399,7 @@ fn toolbar(tool: Tool, color: &'static str, size: f32, hover: Option<ToolbarActi
         can_undo: false,
         can_redo: false,
         can_duplicate: false,
+        roundness: false,
         colors_open: false,
         colors_grow: 1.0,
     }
@@ -1735,6 +1736,7 @@ fn the_default_view_draws_what_no_view_drew() {
             from: [200.0, 150.0],
             to: [300.0, 250.0],
             points: Vec::new(),
+            roundness: None,
             rotate: 0.0,
             id: 0,
             attach: [None, None],
@@ -2499,6 +2501,7 @@ fn a_row_of_the_panel_can_be_clicked_with_the_pointer_on_the_block_that_opened_i
         can_undo: false,
         can_redo: false,
         can_duplicate: false,
+        roundness: false,
         colors_open: false,
         colors_grow: 1.0,
     };
@@ -2520,7 +2523,7 @@ fn a_row_of_the_panel_can_be_clicked_with_the_pointer_on_the_block_that_opened_i
     // The panel's control answers on a row, and the block's own strip covers the rail's column beside it.
     assert_eq!(
         hit(&mut renderer, 60.0, last_row - 5.0),
-        Some(ToolbarAction::Link)
+        Some(ToolbarAction::Round)
     );
     assert_eq!(
         hit(&mut renderer, 20.0, last_row - 5.0),
@@ -2584,6 +2587,7 @@ fn a_shape_is_drawn_as_a_hand_drawn_outline() {
             from: [60.0, 50.0],
             to: [180.0, 120.0],
             points: Vec::new(),
+            roundness: None,
             rotate: 0.0,
             id: 0,
             attach: [None, None],
@@ -2617,6 +2621,7 @@ fn sole_shape(shape: Shape) -> Board {
 
 fn rect_shape(from: [f32; 2], to: [f32; 2]) -> Shape {
     Shape {
+        roundness: None,
         points: Vec::new(),
         kind: ShapeKind::Rect,
         color: "#3584e4".into(),
@@ -2650,6 +2655,7 @@ fn sketched_ink_stays_inside_the_paint_box() {
         ShapeKind::Arrow,
     ] {
         let shape = Shape {
+            roundness: None,
             points: Vec::new(),
             kind,
             fill: None,
@@ -2776,6 +2782,7 @@ fn a_moved_sketched_shape_leaves_no_trail() {
     // A heavy pen, because a light one's wander is inside what the half-width already allows for:
     // the point is the ink that only the style puts past the box.
     let heavy = |from: [f32; 2], to: [f32; 2]| Shape {
+        roundness: None,
         points: Vec::new(),
         width: 8.0,
         fill: None,
@@ -2939,6 +2946,7 @@ fn the_interface_over_a_sketched_document_is_exact() {
     const WHITE: (u8, u8, u8) = (255, 255, 255);
     let (w, h) = (400u32, 300u32);
     let shape = Shape {
+        roundness: None,
         points: Vec::new(),
         color: "#e01b24".into(),
         fill: None,
@@ -2949,6 +2957,7 @@ fn the_interface_over_a_sketched_document_is_exact() {
         if !bare {
             doc.strokes = vec![line(40.0, 260.0, 360.0)];
             doc.shapes.push(Shape {
+                roundness: None,
                 points: Vec::new(),
                 kind: ShapeKind::Circle,
                 fill: None,
@@ -3077,6 +3086,7 @@ fn every_shape_kind_puts_ink_outside_its_own_outline() {
         ShapeKind::Arrow,
     ] {
         let shape = Shape {
+            roundness: None,
             points: Vec::new(),
             kind,
             width: 3.0,
@@ -4019,6 +4029,7 @@ fn a_link_draws_an_underline_and_the_action_card_is_bottom_centred() {
 #[test]
 fn a_bound_label_wraps_and_centres_inside_its_container() {
     let shape = Shape {
+        roundness: None,
         kind: ShapeKind::Rect,
         color: "#ffffff".into(),
         width: 2.0,
@@ -4072,6 +4083,7 @@ fn a_bound_label_wraps_and_centres_inside_its_container() {
 fn linear_edit_mode_promotes_interior_vertices() {
     let (w, h) = (220u32, 120u32);
     let line = Shape {
+        roundness: None,
         kind: ShapeKind::Line,
         color: "#e01b24".into(),
         width: 3.0,
@@ -4108,12 +4120,56 @@ fn linear_edit_mode_promotes_interior_vertices() {
     );
 }
 
+#[test]
+fn a_rounded_line_cuts_the_sharp_corner_away() {
+    let (w, h) = (220u32, 140u32);
+    let line = |roundness| Shape {
+        roundness,
+        points: vec![[100.0, 30.0]],
+        kind: ShapeKind::Line,
+        color: "#e01b24".into(),
+        width: 4.0,
+        from: [20.0, 110.0],
+        to: [180.0, 110.0],
+        rotate: 0.0,
+        id: 1,
+        attach: [None, None],
+        fill: None,
+    };
+    let draw = |roundness| {
+        let board = Board {
+            shapes: vec![line(roundness)],
+            ..Board::default()
+        };
+        let mut buf = buffer(w, h);
+        Renderer::new().render(
+            &mut buf,
+            w,
+            h,
+            1.0,
+            View::default(),
+            &board,
+            &Overlay::default(),
+            None,
+        );
+        alpha(&buf, w, 100, 30)
+    };
+    let sharp = draw(None);
+    let round = draw(Some(2));
+    assert!(sharp > 0, "the sharp corner was not drawn");
+    assert!(
+        round < sharp,
+        "the rounded edge did not cut the sharp corner: {sharp} vs {round}"
+    );
+}
+
 /// A selected line keeps the ordinary selection frame: the four corner handles and the rotation
 /// handle are still there, alongside the point handles.
 #[test]
 fn a_selected_line_keeps_the_frame_and_rotation_handle() {
     let (w, h) = (220u32, 140u32);
     let line = Shape {
+        roundness: None,
         kind: ShapeKind::Line,
         color: "#e01b24".into(),
         width: 2.0,

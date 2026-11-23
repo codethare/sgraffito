@@ -269,6 +269,7 @@ fn rail_state() -> Toolbar {
         can_undo: false,
         can_redo: false,
         can_duplicate: false,
+        roundness: false,
         colors_open: false,
         colors_grow: 1.0,
         tool: Tool::Pen,
