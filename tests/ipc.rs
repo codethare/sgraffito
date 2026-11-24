@@ -76,3 +76,11 @@ fn the_word_that_creates_a_board_is_a_word_of_its_own() {
         Ok(Command::Board("newton".into()))
     );
 }
+
+/// The panel is reachable from a key binding too: the locked surface is click-through, so a compositor
+/// shortcut is the only way in before edit mode is up.
+#[test]
+fn opens_the_ai_panel() {
+    assert_eq!(Command::parse("ai"), Ok(Command::Ai));
+    assert_eq!(Command::parse("  ai  "), Ok(Command::Ai));
+}

@@ -29,12 +29,13 @@
 //!   mrelease 500 300
 //!   key Tab
 //!   key shift+Right
+//!   key ctrl+z
 //!   key Delete
 //! EOF
 //! ```
 //!
 //! A key is named as `xkeysym` names it without its `XK_` prefix — `Tab`, `Right`, `Delete`, `plus`, `0` —
-//! and `shift+` in front of it holds `Shift` across the press. The keycode is found by scanning the
+//! and `shift+` / `ctrl+` in front of it hold that modifier across the press (both may be given). The keycode is found by scanning the
 //! keymap, so no table of Linux keycodes is written down here, and a name the keymap does not have is an
 //! error rather than a key that quietly does nothing.
 //!
@@ -68,7 +69,9 @@ const BTN_MIDDLE: u32 = 0x112;
 
 /// `XKB_KEYMAP_FORMAT_TEXT_V1`, and the xkb modifier mask's own `Shift` bit.
 const KEYMAP_FORMAT_XKB_V1: u32 = 1;
+/// The modifier masks a `wl_keyboard.modifiers` event uses: bit 0 is Shift, bit 2 is Control.
 const SHIFT_MASK: u32 = 1;
+const CTRL_MASK: u32 = 1 << 2;
 
 /// The offset between a keymap's keycodes and the evdev codes this protocol's `key` request takes, which
 /// is what `wl_keyboard`'s own `key` event carries too. It is a fixed eight, not the keymap's minimum.
@@ -103,10 +106,12 @@ enum Step {
         button: u32,
         state: ButtonState,
     },
-    /// A press and a release of one key, by keysym name, with `Shift` held across it when asked.
+    /// A press and a release of one key, by keysym name, with `Shift` and/or `Ctrl` held across it when
+    /// asked.
     Key {
         name: String,
         shift: bool,
+        ctrl: bool,
     },
     /// A wait, so the daemon has time to act on what it was just sent before the next thing arrives.
     Sleep(Duration),
@@ -278,18 +283,31 @@ fn single(command: &str, rest: &[String]) -> Result<Vec<Step>, String> {
     Ok(plan)
 }
 
-/// A key, by the name `xkeysym` gives it, with `shift+` in front holding `Shift` across the press.
+/// A key, by the name `xkeysym` gives it, with `shift+` / `ctrl+` in front holding those modifiers across
+/// the press.
 fn key_step(spec: &str) -> Result<Step, String> {
-    let (shift, name) = match spec.split_once('+') {
-        Some(("shift", name)) => (true, name),
-        _ => (false, spec),
-    };
+    let (mut shift, mut ctrl) = (false, false);
+    let mut name = spec;
+    loop {
+        match name.split_once('+') {
+            Some(("shift", rest)) => {
+                shift = true;
+                name = rest;
+            }
+            Some(("ctrl" | "control", rest)) => {
+                ctrl = true;
+                name = rest;
+            }
+            _ => break,
+        }
+    }
     if name.is_empty() {
         return Err("key wants a name, as `key Tab` or `key shift+Right`".to_string());
     }
     Ok(Step::Key {
         name: name.to_string(),
         shift,
+        ctrl,
     })
 }
 
@@ -463,16 +481,18 @@ fn inject(plan: &[Step], extent_w: u32, extent_h: u32) -> anyhow::Result<()> {
                 queue.roundtrip(&mut state)?;
                 time = time.wrapping_add(1);
             }
-            Step::Key { name, shift } => {
+            Step::Key { name, shift, ctrl } => {
                 let (code, shifted) = key_named(&keymap, name)
                     .ok_or_else(|| anyhow::anyhow!("{name} is not a key of the us layout"))?;
                 let shifted = *shift || shifted;
-                if shifted {
-                    keyboard.modifiers(SHIFT_MASK, 0, 0, 0);
+                let mask =
+                    (if shifted { SHIFT_MASK } else { 0 }) | (if *ctrl { CTRL_MASK } else { 0 });
+                if mask != 0 {
+                    keyboard.modifiers(mask, 0, 0, 0);
                 }
                 keyboard.key(time, code, KeyState::Pressed as u32);
                 keyboard.key(time.wrapping_add(1), code, KeyState::Released as u32);
-                if shifted {
+                if mask != 0 {
                     keyboard.modifiers(0, 0, 0, 0);
                 }
                 queue.roundtrip(&mut state)?;

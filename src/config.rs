@@ -5,9 +5,11 @@
 //! leaves the built-in default in place and logs why, because a typo in a preference must not stop the
 //! daemon from running.
 
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use serde::Deserialize;
 
@@ -117,6 +119,56 @@ pub fn parse_card_position(input: &str) -> Option<CardPosition> {
     }
 }
 
+/// The model the AI panel asks for when `[ai].model` is empty: the one the Go endpoint lists for the
+/// account this was built against.
+pub const DEFAULT_AI_MODEL: &str = "deepseek-v4.1-flash";
+/// The AI request's timeout unless the file says otherwise, in seconds, clamped to this range.
+pub const AI_TIMEOUT_MIN_SECS: u64 = 5;
+pub const AI_TIMEOUT_MAX_SECS: u64 = 600;
+
+/// The AI panel's own settings. An empty string means "derive it": the base URL and the key come
+/// from the OpenCode environment when it has one, so a key exported once needs nothing else.
+#[derive(Clone, PartialEq)]
+pub struct AiConfig {
+    /// Empty means the base is picked from whichever key the environment holds.
+    pub base_url: String,
+    /// Empty is [`DEFAULT_AI_MODEL`] during resolution; the file is kept as written.
+    pub model: String,
+    /// Fallback only; a key in the environment wins.
+    pub api_key: String,
+    pub timeout: Duration,
+}
+
+impl Default for AiConfig {
+    fn default() -> Self {
+        Self {
+            base_url: String::new(),
+            model: DEFAULT_AI_MODEL.to_string(),
+            api_key: String::new(),
+            timeout: Duration::from_secs(180),
+        }
+    }
+}
+
+/// A key must never reach a log line, and `Debug` is what a log line is built from.
+impl fmt::Debug for AiConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AiConfig")
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("api_key", &self.api_key_status())
+            .field("timeout", &self.timeout)
+            .finish()
+    }
+}
+
+impl AiConfig {
+    /// What `Debug` prints for the key: whether there is one, never which.
+    fn api_key_status(&self) -> &'static str {
+        if self.api_key.is_empty() { "" } else { "<set>" }
+    }
+}
+
 /// The values the daemon reads once at startup.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
@@ -131,6 +183,8 @@ pub struct Config {
     /// The system font family used for canvas text. Empty means the system's default sans-serif;
     /// the format (TTC/TTF/OTF) and availability are whatever the user's font system provides.
     pub font: String,
+    /// The AI panel's endpoint, model, fallback key and timeout.
+    pub ai: AiConfig,
 }
 
 impl Default for Config {
@@ -141,6 +195,7 @@ impl Default for Config {
             toolbar: ToolbarPosition::default(),
             cards: CardPosition::default(),
             font: String::new(),
+            ai: AiConfig::default(),
         }
     }
 }
@@ -262,6 +317,34 @@ pub fn load_from(path: &Path) -> Config {
             )),
         }
     }
+    if let Some(ai) = file.ai {
+        if let Some(base_url) = ai.base_url {
+            config.ai.base_url = base_url.trim().to_string();
+        }
+        // An empty model is not an error: it is resolved to the default when a request starts, which
+        // keeps a file that says `model = ""` meaning "whatever this build ships with".
+        if let Some(model) = ai.model {
+            config.ai.model = model.trim().to_string();
+        }
+        if let Some(api_key) = ai.api_key {
+            config.ai.api_key = api_key.trim().to_string();
+            if !config.ai.api_key.is_empty() {
+                crate::log::write("config: [ai].api_key is set; a key in the environment wins");
+            }
+        }
+        if let Some(timeout) = ai.timeout_secs {
+            let secs = timeout.value();
+            if secs.is_finite() && secs > 0.0 {
+                let clamped = secs.clamp(AI_TIMEOUT_MIN_SECS as f64, AI_TIMEOUT_MAX_SECS as f64);
+                config.ai.timeout = Duration::from_secs_f64(clamped);
+            } else {
+                crate::log::write(&format!(
+                    "config: [ai].timeout_secs must be a positive number; using {}s",
+                    config.ai.timeout.as_secs()
+                ));
+            }
+        }
+    }
     config
 }
 
@@ -277,6 +360,22 @@ struct File {
     cards: Option<String>,
     #[serde(default)]
     font: Option<String>,
+    #[serde(default)]
+    ai: Option<AiFile>,
+}
+
+/// The `[ai]` table. Every value is optional and every string is trimmed, so a stray space in a model
+/// name is not a different model.
+#[derive(Deserialize)]
+struct AiFile {
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    timeout_secs: Option<Number>,
 }
 
 /// TOML has separate integer and float types, and `border = 2` must mean the same as `2.0`.

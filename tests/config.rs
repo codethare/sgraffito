@@ -114,3 +114,57 @@ fn config_paints_the_palette_and_the_note_border() {
 
     fs::remove_dir_all(&dir).unwrap();
 }
+
+/// The `[ai]` table is read by `load_from`, which takes its path and touches no process-wide state, so
+/// this test can run beside the one above.
+#[test]
+fn the_ai_table_is_read_and_its_key_is_never_printed() {
+    let dir = std::env::temp_dir().join(format!("sgraffito-ai-config-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.toml");
+
+    fs::write(
+        &path,
+        "[ai]\nbase_url = \"  http://127.0.0.1:8765  \"\nmodel = \"  test  \"\napi_key = \"  sk-secret  \"\ntimeout_secs = 30\n",
+    )
+    .unwrap();
+    let config = sgraffito::config::load_from(&path);
+    assert_eq!(config.ai.base_url, "http://127.0.0.1:8765", "trimmed");
+    assert_eq!(config.ai.model, "test");
+    assert_eq!(config.ai.api_key, "sk-secret");
+    assert_eq!(config.ai.timeout, std::time::Duration::from_secs(30));
+    let printed = format!("{config:?}");
+    assert!(
+        !printed.contains("sk-secret"),
+        "the key was printed: {printed}"
+    );
+    assert!(
+        printed.contains("<set>"),
+        "the key is not even marked: {printed}"
+    );
+
+    // A timeout that is not a positive number keeps the default; one out of range is clamped.
+    fs::write(&path, "[ai]\ntimeout_secs = -4\n").unwrap();
+    assert_eq!(
+        sgraffito::config::load_from(&path).ai.timeout,
+        std::time::Duration::from_secs(180)
+    );
+    fs::write(&path, "[ai]\ntimeout_secs = 3600\n").unwrap();
+    assert_eq!(
+        sgraffito::config::load_from(&path).ai.timeout,
+        std::time::Duration::from_secs(600)
+    );
+
+    // An empty model stays empty in the file's terms; resolution is what turns it into the default.
+    fs::write(&path, "[ai]\nmodel = \"\"\n").unwrap();
+    let config = sgraffito::config::load_from(&path);
+    assert!(config.ai.model.is_empty());
+    assert_eq!(
+        config.ai.timeout,
+        std::time::Duration::from_secs(180),
+        "an omitted timeout is the default"
+    );
+
+    fs::remove_dir_all(&dir).unwrap();
+}

@@ -17,10 +17,10 @@ use tiny_skia::{
 use wayland_client::protocol::wl_shm::Format;
 
 use crate::canvas::{
-    Backdrop, Board, GRID_SPACING, Handle, ItemId, LINEAR_MIDPOINT, LiveConnector, NOTE_DATE_SIZE,
-    NOTE_RADIUS, Note, Overlay, Rect, SELECT_HANDLE, SELECT_ROTATE_GAP, Shape, ShapeKind, Stroke,
-    TextItem, TextOverlay, Tool, Toolbar, ToolbarAction, View, note_ink, parse_hex, rect_of,
-    rotate_handle, selected_linear, selection_frame_with,
+    AiView, Backdrop, Board, GRID_SPACING, Handle, ItemId, LINEAR_MIDPOINT, LiveConnector,
+    NOTE_DATE_SIZE, NOTE_RADIUS, Note, Overlay, Rect, SELECT_HANDLE, SELECT_ROTATE_GAP, Shape,
+    ShapeKind, Stroke, TextItem, TextOverlay, Tool, Toolbar, ToolbarAction, View, note_ink,
+    parse_hex, rect_of, rotate_handle, selected_linear, selection_frame_with,
 };
 use crate::config;
 use crate::config::{CardPosition, ToolbarPosition};
@@ -128,7 +128,7 @@ const TOOLBAR_SWATCH_EDGE: &str = "#ffffff4d";
 const TOOLBAR_HOVER_FILL: &str = "#ffffff3d";
 const TOOLBAR_CARD_EDGE: &str = "#ffffff59";
 const TOOLBAR_CARD_SHADOW: &str = "#00000073";
-const TOOLBAR_SHADOW_REACH: f32 = 2.0;
+pub const TOOLBAR_SHADOW_REACH: f32 = 2.0;
 /// How far inside its cell a hovered button's outline sits, so it never touches the row's edge.
 const TOOLBAR_HOVER_INSET: f32 = 2.0;
 const UNDERLINE_HEIGHT: f32 = 1.5;
@@ -191,6 +191,8 @@ enum Icon {
     Grid,
     /// A dot matrix.
     Dots,
+    /// The AI panel: a four-point sparkle.
+    Sparkle,
 }
 
 /// What a canvas coordinate has to be multiplied by to become a device pixel: the output's scale, and
@@ -278,6 +280,7 @@ fn key_of(action: ToolbarAction) -> Option<&'static str> {
         | ToolbarAction::RenameBoard(_) => "C",
         ToolbarAction::CancelDeleteBoard => return None,
         ToolbarAction::Shared => "F",
+        ToolbarAction::Ai => "I",
         ToolbarAction::Link | ToolbarAction::Round => return None,
         ToolbarAction::Backdrop(_) => return None,
         ToolbarAction::Color(index) => ["1", "2", "3", "4", "5"].get(index).copied().unwrap_or("?"),
@@ -828,7 +831,8 @@ fn toolbar_blocks(toolbar: &Toolbar, surface: f32) -> Vec<Block> {
 /// by choice, so they live in the list the `more` block opens. This is the one list of who they are —
 /// `drawer_blocks` is what they look like — so the rules that open and close the drawer cannot
 /// disagree with what it shows.
-pub const DRAWER: [ToolbarAction; 5] = [
+pub const DRAWER: [ToolbarAction; 6] = [
+    ToolbarAction::Ai,
     ToolbarAction::Tool(Tool::Bucket),
     ToolbarAction::Scrim,
     ToolbarAction::Shared,
@@ -935,6 +939,14 @@ fn drawer_blocks(toolbar: &Toolbar, overflow: &[Block]) -> Vec<Block> {
     let mut rows: Vec<Block> = DRAWER
         .iter()
         .filter_map(|action| match action {
+            ToolbarAction::Ai => Some(Block {
+                mark: Mark::Icon(Icon::Sparkle),
+                column: 1,
+                label: labelled(*action, "AI mind map"),
+                action: Some(*action),
+                active: false,
+                gap: TOOLBAR_GAP,
+            }),
             ToolbarAction::Tool(tool) => Some(Block {
                 mark: Mark::Icon(Icon::Bucket),
                 column: 1,
@@ -1140,6 +1152,7 @@ fn drawer_legend(toolbar: &Toolbar, overflow: &[Block]) -> Option<String> {
 /// the full label and key; the legend only has the one line under the capsule and has to fit it.
 fn drawer_caption(action: ToolbarAction) -> Option<&'static str> {
     Some(match action {
+        ToolbarAction::Ai => "AI",
         ToolbarAction::Tool(Tool::Bucket) => "fill",
         ToolbarAction::Scrim => "backdrop",
         ToolbarAction::Shared => "boards",
@@ -1880,6 +1893,11 @@ impl Renderer {
                 }
             }
         }
+        // The AI diagram while it is still an answer: drawn where the commit will put it, so the live
+        // preview and the committed shapes cannot disagree.
+        if let Some(preview) = &overlay.ai_preview {
+            self.draw_ai_preview(&mut pixmap, preview, screen, sketch);
+        }
         draw_snap_hints(&mut pixmap, ann, overlay, screen);
         // The frame is drawn on the measured text, not on the damage estimate, so its trailing edge
         // sits on the last glyph instead of past it.
@@ -1964,6 +1982,349 @@ impl Renderer {
             let p = screen.point(at);
             draw_eraser_marker(&mut pixmap, p, screen.ui(1.0));
         }
+        // The AI panel is interface and topmost: it is drawn last, over everything the canvas holds.
+        if let Some(view) = &overlay.ai {
+            let (w, h) = (
+                pixmap.width() as f32 / scale,
+                pixmap.height() as f32 / scale,
+            );
+            let layout = ai_panel_layout((w, h), overlay.toolbar.as_ref());
+            if damage
+                .is_none_or(|damage| damage.intersects(layout.panel.grown(TOOLBAR_SHADOW_REACH)))
+            {
+                self.draw_ai_panel(&mut pixmap, &layout, view, scale);
+            }
+        }
+    }
+
+    /// The measured size of `text` at `size`, in canvas units, wrapping at `wrap`.
+    ///
+    /// Measured at 1:1: the AI diagram is stored once, in canvas coordinates, and drawn at whatever
+    /// zoom each output is showing. This is the same measurement the text path uses for a click, so a
+    /// box the layout sized is the box the glyphs land in.
+    pub fn measure_text(&mut self, text: &str, size: f32, wrap: Option<f32>) -> (f32, f32) {
+        let item = TextItem {
+            x: 0.0,
+            y: 0.0,
+            color: AI_TEXT.to_string(),
+            size,
+            text: text.to_string(),
+            link: None,
+            container: None,
+        };
+        let screen = Screen {
+            scale: 1.0,
+            view: View::default(),
+        };
+        let bounds = self.prepare_text(text, &item, screen, wrap).paint_bounds;
+        (bounds.w, bounds.h)
+    }
+
+    /// How tall the AI transcript is at `width`: every bubble, the gap between them, the error row and
+    /// the inset above the first message. Zero when there is nothing to say, so the panel knows it has
+    /// no scrollbar.
+    pub fn ai_log_height(&mut self, view: &AiView, width: f32) -> f32 {
+        if view.messages.is_empty() && view.error.is_none() {
+            return 0.0;
+        }
+        let wrap = ai_bubble_wrap(width);
+        let mut height = AI_LOG_INSET;
+        for message in &view.messages {
+            let (_, text_h) = self.measure_text(&message.text, AI_TEXT_SIZE, Some(wrap));
+            height += text_h + 2.0 * AI_BUBBLE_PAD + AI_MESSAGE_GAP;
+        }
+        if let Some(error) = &view.error {
+            let (_, text_h) = self.measure_text(error, AI_TEXT_SIZE, Some(wrap));
+            height += text_h + AI_MESSAGE_GAP;
+        }
+        height
+    }
+
+    /// The diagram the answer is producing, drawn on the board it will be committed to: shapes first,
+    /// in the order they were laid out (edges, then nodes), and every label centred on its node the way
+    /// the commit will centre it.
+    fn draw_ai_preview(
+        &mut self,
+        pixmap: &mut PixmapMut,
+        preview: &Board,
+        screen: Screen,
+        sketch: &mut SketchCache,
+    ) {
+        let surface = (pixmap.width(), pixmap.height());
+        for shape in &preview.shapes {
+            if Self::in_view(screen, shape.paint_bounds(), surface) {
+                draw_shape_cached(pixmap, shape, screen, sketch);
+            }
+        }
+        for text in &preview.texts {
+            let shape = text
+                .container
+                .and_then(|id| preview.shapes.iter().find(|shape| shape.id == id));
+            let wrap = shape.and_then(Shape::label_wrap);
+            let item = match shape {
+                Some(shape) => self.place_bound_text(text, shape),
+                None => text.clone(),
+            };
+            if Self::in_view(screen, item.paint_bounds(), surface) {
+                self.draw_text(pixmap, &item, screen, None, None, wrap);
+            }
+        }
+    }
+
+    /// The AI panel: a card on the right of the output, the transcript on it, the input line under the
+    /// transcript and a send button. Screen space, so it is the same size at every zoom.
+    fn draw_ai_panel(
+        &mut self,
+        pixmap: &mut PixmapMut,
+        layout: &AiPanelLayout,
+        view: &AiView,
+        scale: f32,
+    ) {
+        let screen = Screen {
+            scale,
+            view: View::default(),
+        };
+        let panel = screen.ui_rect(layout.panel);
+        round_rect(
+            pixmap,
+            panel,
+            AI_PANEL_RADIUS * scale,
+            parse_hex(AI_PANEL_FILL),
+            Some((parse_hex(TOOLBAR_BLOCK_EDGE), TOOLBAR_HAIRLINE * scale)),
+        );
+        draw_card_shadow(pixmap, panel, AI_PANEL_RADIUS * scale, scale);
+
+        // The header: what the panel is, what the request is doing, and the way out.
+        let title = toolbar_text(
+            layout.header.x,
+            layout.header.y,
+            layout.header.h,
+            AI_TITLE_SIZE,
+            TOOLBAR_FOREGROUND,
+            "AI mind map",
+        );
+        self.draw_text(pixmap, &title, screen, None, None, None);
+        if view.streaming {
+            let width = self.measure_text("AI mind map", AI_TITLE_SIZE, None).0;
+            let status = toolbar_text(
+                layout.header.x + width + AI_TITLE_GAP,
+                layout.header.y,
+                layout.header.h,
+                AI_STATUS_SIZE,
+                AI_MUTED,
+                "thinking\u{2026}",
+            );
+            self.draw_text(pixmap, &status, screen, None, None, None);
+        }
+        let glyph = self.measure_text("\u{00d7}", AI_CLOSE_SIZE, None).0;
+        let close = toolbar_text(
+            layout.close.x + (layout.close.w - glyph) / 2.0,
+            layout.close.y,
+            layout.close.h,
+            AI_CLOSE_SIZE,
+            TOOLBAR_LABEL_TEXT,
+            "\u{00d7}",
+        );
+        self.draw_text(pixmap, &close, screen, None, None, None);
+
+        // The transcript, clipped to its window: it scrolls under the header and the input line.
+        let wrap = ai_bubble_wrap(layout.log.w);
+        let mut y = layout.log.y + AI_LOG_INSET - view.scroll;
+        for message in &view.messages {
+            let mut display = message.text.clone();
+            if message.streaming {
+                // The cursor is display only: it is never part of the answer that is sent back or
+                // parsed for a diagram.
+                display.push('\u{258d}');
+            }
+            let natural = self.measure_text(&display, AI_TEXT_SIZE, None).0;
+            let bubble_w = (natural + 2.0 * AI_BUBBLE_PAD).min(wrap).max(1.0);
+            let bubble_wrap = (bubble_w - 2.0 * AI_BUBBLE_PAD).max(1.0);
+            let text_h = self
+                .measure_text(&display, AI_TEXT_SIZE, Some(bubble_wrap))
+                .1;
+            let bubble = Rect {
+                x: if message.user {
+                    layout.log.x + layout.log.w - bubble_w
+                } else {
+                    layout.log.x
+                },
+                y,
+                w: bubble_w,
+                h: text_h + 2.0 * AI_BUBBLE_PAD,
+            };
+            y += bubble.h + AI_MESSAGE_GAP;
+            if bubble.y + bubble.h < layout.log.y || bubble.y > layout.log.y + layout.log.h {
+                continue;
+            }
+            round_rect(
+                pixmap,
+                screen.ui_rect(bubble),
+                AI_BUBBLE_RADIUS * scale,
+                parse_hex(if message.user {
+                    AI_BUBBLE_USER
+                } else {
+                    AI_BUBBLE_ASSISTANT
+                }),
+                None,
+            );
+            let item = TextItem {
+                x: bubble.x + AI_BUBBLE_PAD,
+                y: bubble.y + AI_BUBBLE_PAD,
+                color: AI_TEXT.to_string(),
+                size: AI_TEXT_SIZE,
+                text: display,
+                link: None,
+                container: None,
+            };
+            self.draw_text_clipped(
+                pixmap,
+                &item,
+                screen,
+                None,
+                Some(bubble_wrap),
+                Some(layout.log),
+            );
+        }
+        if let Some(error) = &view.error {
+            let item = TextItem {
+                x: layout.log.x,
+                y,
+                color: AI_ERROR.to_string(),
+                size: AI_TEXT_SIZE,
+                text: error.clone(),
+                link: None,
+                container: None,
+            };
+            self.draw_text_clipped(pixmap, &item, screen, None, Some(wrap), Some(layout.log));
+        }
+        if view.messages.is_empty() && view.error.is_none() {
+            let welcome = toolbar_text(
+                layout.log.x,
+                layout.log.y + AI_LOG_INSET,
+                AI_TITLE_SIZE,
+                AI_TITLE_SIZE,
+                AI_MUTED,
+                "Describe a mind map",
+            );
+            self.draw_text_clipped(pixmap, &welcome, screen, None, Some(wrap), Some(layout.log));
+            let hint = toolbar_text(
+                layout.log.x,
+                layout.log.y + AI_LOG_INSET + AI_TITLE_SIZE * LINE_HEIGHT_SCALE + AI_MESSAGE_GAP,
+                AI_STATUS_SIZE,
+                AI_STATUS_SIZE,
+                AI_MUTED,
+                "Enter sends \u{00b7} Shift+Enter adds a line",
+            );
+            self.draw_text_clipped(pixmap, &hint, screen, None, Some(wrap), Some(layout.log));
+        }
+        let content = self.ai_log_height(view, layout.log.w);
+        if content > layout.log.h {
+            let max = content - layout.log.h;
+            let thumb =
+                (layout.log.h * (layout.log.h / content).clamp(0.0, 1.0)).max(AI_SCROLLBAR_MIN);
+            let at = if max > 0.0 {
+                (view.scroll / max).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let bar = Rect {
+                x: layout.scrollbar.x,
+                y: layout.log.y + at * (layout.log.h - thumb),
+                w: layout.scrollbar.w,
+                h: thumb,
+            };
+            let bar = screen.ui_rect(bar);
+            fill(
+                pixmap,
+                bar.x,
+                bar.y,
+                bar.w.max(1.0),
+                bar.h,
+                Color::rgba(10, 132, 255, 128),
+            );
+        }
+
+        // The input line: the typed question, the input method's preedit where the caret is, and a
+        // placeholder when there is nothing to type over.
+        round_rect(
+            pixmap,
+            screen.ui_rect(layout.input),
+            AI_BUBBLE_RADIUS * scale,
+            parse_hex(AI_INPUT_FILL),
+            Some((parse_hex(TOOLBAR_BLOCK_EDGE), TOOLBAR_HAIRLINE * scale)),
+        );
+        let text_box = Rect {
+            x: layout.input.x + AI_BUBBLE_PAD,
+            y: layout.input.y + AI_BUBBLE_PAD,
+            w: (layout.input.w - 2.0 * AI_BUBBLE_PAD).max(1.0),
+            h: (layout.input.h - 2.0 * AI_BUBBLE_PAD).max(1.0),
+        };
+        let item = TextItem {
+            x: text_box.x,
+            y: text_box.y,
+            color: AI_TEXT.to_string(),
+            size: AI_TEXT_SIZE,
+            text: view.input.text.clone(),
+            link: None,
+            container: None,
+        };
+        if view.input.text.is_empty() && view.preedit.is_empty() {
+            let placeholder = TextItem {
+                text: "Ask for a mind map\u{2026}".to_string(),
+                color: AI_MUTED.to_string(),
+                ..item
+            };
+            self.draw_text_clipped(
+                pixmap,
+                &placeholder,
+                screen,
+                None,
+                Some(text_box.w),
+                Some(layout.input),
+            );
+        } else {
+            let live = TextOverlay {
+                item: item.clone(),
+                buffer: view.input.clone(),
+                index: None,
+                note: None,
+                preedit: view.preedit.clone(),
+            };
+            self.draw_text_clipped(
+                pixmap,
+                &item,
+                screen,
+                Some(&live),
+                Some(text_box.w),
+                Some(layout.input),
+            );
+        }
+
+        // The button says what it does: send while there is nothing to stop, stop while an answer is
+        // arriving. A muted fill rather than a disabled control, because stopping is the useful action.
+        let label = if view.streaming { "stop" } else { "send" };
+        round_rect(
+            pixmap,
+            screen.ui_rect(layout.send),
+            AI_BUBBLE_RADIUS * scale,
+            parse_hex(if view.streaming {
+                AI_BUTTON_MUTED
+            } else {
+                TOOLBAR_ACCENT
+            }),
+            None,
+        );
+        let label_w = self.measure_text(label, AI_SEND_SIZE, None).0;
+        let button = toolbar_text(
+            layout.send.x + (layout.send.w - label_w) / 2.0,
+            layout.send.y,
+            layout.send.h,
+            AI_SEND_SIZE,
+            TOOLBAR_FOREGROUND,
+            label,
+        );
+        self.draw_text(pixmap, &button, screen, None, None, None);
     }
 
     /// Draw the committed document into `pixmap`: the raster build, and the fallback for a frame
@@ -3890,11 +4251,28 @@ impl Renderer {
         prepared: &mut PreparedText,
         reveal: Option<Reveal>,
     ) {
+        self.draw_prepared_text_clipped(pixmap, item, screen, prepared, reveal, None);
+    }
+
+    /// The same, with a **screen** rectangle the glyphs are kept inside. A panel's log scrolls under
+    /// its own header and input line, so its text is laid out whole and clipped to the window it
+    /// belongs to; `None` is the canvas, where the surface is the only clip.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_prepared_text_clipped(
+        &mut self,
+        pixmap: &mut PixmapMut,
+        item: &TextItem,
+        screen: Screen,
+        prepared: &mut PreparedText,
+        reveal: Option<Reveal>,
+        clip: Option<Rect>,
+    ) {
         let origin = screen.point([item.x, item.y]);
         let (ox, oy) = (origin[0], origin[1]);
         let c = parse_hex(&item.color);
         let color = Color::rgba(c[0], c[1], c[2], c[3]);
         let (clip_w, clip_h) = (pixmap.width(), pixmap.height());
+        let clip = clip.map(|clip| screen.ui_rect(clip));
         let reveal = reveal.map(|reveal| match reveal {
             Reveal::After(x) => Reveal::After(screen.point([x, 0.0])[0]),
             Reveal::Before(x) => Reveal::Before(screen.point([x, 0.0])[0]),
@@ -3904,12 +4282,23 @@ impl Renderer {
             &mut self.cache,
             color,
             |x, y, w, h, c| {
+                let (gx, gy) = (ox + x as f32, oy + y as f32);
                 let hidden = match reveal {
-                    Some(Reveal::After(reveal)) => ox + x as f32 > reveal,
-                    Some(Reveal::Before(reveal)) => ox + x as f32 + (w as f32) < reveal,
+                    Some(Reveal::After(reveal)) => gx > reveal,
+                    Some(Reveal::Before(reveal)) => gx + (w as f32) < reveal,
                     None => false,
                 };
                 if hidden {
+                    return;
+                }
+                // Whole glyphs are skipped at the edge rather than cut: an edge that fell through a
+                // letter would leave a half-row of pixels that the next frame is not told about.
+                if clip.is_some_and(|clip| {
+                    gx < clip.x
+                        || gy < clip.y
+                        || gx + w as f32 > clip.x + clip.w
+                        || gy + h as f32 > clip.y + clip.h
+                }) {
                     return;
                 }
                 blend(
@@ -4008,6 +4397,67 @@ impl Renderer {
             // The caret is the line box the text sits in, so it matches the typed text instead
             // of floating at a hardcoded fraction of the font size (the empty-line baseline and
             // a real glyph's baseline are not the same fraction).
+            fill(
+                pixmap,
+                ox + geometry.x,
+                oy + geometry.top,
+                screen.ui(CURSOR_WIDTH),
+                geometry.height,
+                color,
+            );
+        }
+    }
+
+    /// Text drawn into a panel: the same layout as [`Self::draw_text`], kept inside `clip`.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_text_clipped(
+        &mut self,
+        pixmap: &mut PixmapMut,
+        item: &TextItem,
+        screen: Screen,
+        edit: Option<&TextOverlay>,
+        wrap: Option<f32>,
+        clip: Option<Rect>,
+    ) {
+        let (committed, preedit, caret) = match edit {
+            Some(e) => (
+                e.buffer.text.as_str(),
+                e.preedit.as_str(),
+                Some(e.buffer.cursor_bytes()),
+            ),
+            None => (item.text.as_str(), "", None),
+        };
+        let display = match caret.filter(|_| !preedit.is_empty()) {
+            Some(at) => Cow::Owned(format!(
+                "{}{}{}",
+                &committed[..at],
+                preedit,
+                &committed[at..]
+            )),
+            None => Cow::Borrowed(committed),
+        };
+        if display.is_empty() {
+            return;
+        }
+        let mut prepared = self.prepare_text(display.as_ref(), item, screen, wrap);
+        let geometry = caret_geometry(&prepared, caret.unwrap_or(committed.len()), preedit.len());
+        self.draw_prepared_text_clipped(pixmap, item, screen, &mut prepared, None, clip);
+        if edit.is_some() {
+            let size = screen.len(item.size);
+            let c = parse_hex(&item.color);
+            let color = Color::rgba(c[0], c[1], c[2], c[3]);
+            let origin = screen.point([item.x, item.y]);
+            let (ox, oy) = (origin[0], origin[1]);
+            if let Some((x0, x1)) = geometry.preedit {
+                fill(
+                    pixmap,
+                    ox + x0,
+                    oy + (geometry.baseline + size * 0.15),
+                    (x1 - x0).max(0.0),
+                    screen.ui(UNDERLINE_HEIGHT),
+                    color,
+                );
+            }
             fill(
                 pixmap,
                 ox + geometry.x,
@@ -4160,7 +4610,17 @@ pub fn transient_bounds(overlay: &Overlay) -> Option<Rect> {
             LiveConnector::Stroke(_, stroke) => stroke.paint_bounds(),
             LiveConnector::Shape(_, shape) => Some(shape.paint_bounds()),
         });
-    [stroke, shape, note, eraser, marquee]
+    // The AI preview is drawn live from canvas geometry, so its box is canvas too: the caller maps it
+    // through the view like every other transient.
+    let preview = overlay.ai_preview.as_ref().and_then(|board| {
+        board
+            .shapes
+            .iter()
+            .map(Shape::paint_bounds)
+            .chain(board.texts.iter().map(TextItem::paint_bounds))
+            .reduce(Rect::union)
+    });
+    [stroke, shape, note, eraser, marquee, preview]
         .into_iter()
         .flatten()
         .chain(connectors)
@@ -4710,6 +5170,156 @@ pub fn color_strip_bounds(position: ToolbarPosition, surface: (f32, f32), column
     })
 }
 
+/// The AI panel's geometry, in logical screen pixels. One value for the layout, the hit test and the
+/// damage box: a panel whose clicks and pixels came from two different functions would drift apart.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AiPanelLayout {
+    pub panel: Rect,
+    pub header: Rect,
+    pub log: Rect,
+    pub input: Rect,
+    pub close: Rect,
+    pub send: Rect,
+    pub scrollbar: Rect,
+}
+
+/// The panel's margin from the output's edges and from the rail, in logical pixels.
+const AI_PANEL_MARGIN: f32 = 18.0;
+/// The panel's width, clamped when the output is narrower than a panel plus its margins.
+const AI_PANEL_WIDTH: f32 = 360.0;
+/// The gap between the panel and the rail it sits beside.
+const AI_RAIL_GAP: f32 = 12.0;
+const AI_PANEL_RADIUS: f32 = 14.0;
+const AI_BUBBLE_RADIUS: f32 = 10.0;
+const AI_PANEL_PAD: f32 = 12.0;
+const AI_HEADER_HEIGHT: f32 = 38.0;
+const AI_INPUT_HEIGHT: f32 = 88.0;
+const AI_PANEL_GAP: f32 = 8.0;
+const AI_BUBBLE_PAD: f32 = 8.0;
+const AI_MESSAGE_GAP: f32 = 8.0;
+const AI_LOG_INSET: f32 = 8.0;
+const AI_TITLE_SIZE: f32 = 14.0;
+const AI_TITLE_GAP: f32 = 8.0;
+const AI_STATUS_SIZE: f32 = 11.0;
+const AI_CLOSE_SIZE: f32 = 14.0;
+const AI_TEXT_SIZE: f32 = 13.0;
+const AI_SEND_SIZE: f32 = 12.0;
+/// The button's box, and the two squares at the panel's corners.
+const AI_SEND_WIDTH: f32 = 56.0;
+const AI_SEND_HEIGHT: f32 = 28.0;
+const AI_CLOSE_SIDE: f32 = 24.0;
+const AI_INSET: f32 = 7.0;
+const AI_SCROLLBAR_WIDTH: f32 = 2.0;
+const AI_SCROLLBAR_MIN: f32 = 24.0;
+
+/// `#rrggbbaa`: the card, its two bubble fills, the ink on them, and the input plate.
+const AI_PANEL_FILL: &str = "#1c1c1ce6";
+const AI_BUBBLE_ASSISTANT: &str = "#ffffff12";
+const AI_BUBBLE_USER: &str = "#3584e459";
+const AI_TEXT: &str = "#f2f2f2";
+const AI_MUTED: &str = "#ebebf59e";
+const AI_ERROR: &str = "#ff7b72";
+const AI_INPUT_FILL: &str = "#00000033";
+const AI_BUTTON_MUTED: &str = "#ffffff26";
+
+/// The width a bubble's text may wrap at inside a log of `width`.
+fn ai_bubble_wrap(width: f32) -> f32 {
+    ((0.78 * width).min(width) - 2.0 * AI_BUBBLE_PAD).max(1.0)
+}
+
+/// Where the AI panel and its controls are on one output.
+///
+/// The panel sits at the top-right of the interior, clear of whichever edge the rail is docked to: a
+/// rail on the right pushes it left by the rail's own box, and a rail along the top or bottom pushes it
+/// past the strip. It is not modal — the rail stays clickable beside it — so it has to leave the rail's
+/// box alone rather than cover it.
+pub fn ai_panel_layout(surface: (f32, f32), toolbar: Option<&Toolbar>) -> AiPanelLayout {
+    ai_panel_layout_at(config::current().toolbar, surface, toolbar)
+}
+
+/// The same for a known edge, which is what the edge tests drive: the configuration is process-wide and
+/// deciding the layout from it directly would leave no way to check the other three.
+pub fn ai_panel_layout_at(
+    position: ToolbarPosition,
+    surface: (f32, f32),
+    toolbar: Option<&Toolbar>,
+) -> AiPanelLayout {
+    let (w, h) = surface;
+    let margin = AI_PANEL_MARGIN;
+    let width = AI_PANEL_WIDTH.min((w - 2.0 * margin).max(0.0));
+    let rail = toolbar.map(|toolbar| toolbar_bounds(toolbar, w, h));
+    let (x, y, height) = match position {
+        ToolbarPosition::Right => {
+            let right = rail.map_or(w - margin, |rail| rail.x - AI_RAIL_GAP);
+            (right - width, margin, (h - 2.0 * margin).max(0.0))
+        }
+        ToolbarPosition::Left => (w - margin - width, margin, (h - 2.0 * margin).max(0.0)),
+        ToolbarPosition::Top => {
+            let top = rail.map_or(margin, |rail| rail.y + rail.h + AI_RAIL_GAP);
+            (w - margin - width, top, (h - margin - top).max(0.0))
+        }
+        ToolbarPosition::Bottom => {
+            let bottom = rail.map_or(h - margin, |rail| rail.y - AI_RAIL_GAP);
+            (w - margin - width, margin, (bottom - margin).max(0.0))
+        }
+    };
+    let panel = Rect {
+        x: x.max(0.0),
+        y: y.max(0.0),
+        w: width.max(0.0),
+        h: height.max(0.0),
+    };
+    let inner_w = (panel.w - 2.0 * AI_PANEL_PAD).max(0.0);
+    let header = Rect {
+        x: panel.x + AI_PANEL_PAD,
+        y: panel.y + AI_PANEL_PAD,
+        w: inner_w,
+        h: AI_HEADER_HEIGHT.min((panel.h - 2.0 * AI_PANEL_PAD).max(0.0)),
+    };
+    let input_h = AI_INPUT_HEIGHT.min((panel.h - 2.0 * AI_PANEL_PAD).max(0.0));
+    let input = Rect {
+        x: panel.x + AI_PANEL_PAD,
+        y: panel.y + panel.h - AI_PANEL_PAD - input_h,
+        w: inner_w,
+        h: input_h,
+    };
+    let log_top = header.y + header.h + AI_PANEL_GAP;
+    let log_bottom = (input.y - AI_PANEL_GAP).max(log_top);
+    let log = Rect {
+        x: panel.x + AI_PANEL_PAD,
+        y: log_top,
+        w: inner_w,
+        h: (log_bottom - log_top).max(0.0),
+    };
+    let close = Rect {
+        x: header.x + header.w - AI_CLOSE_SIDE - AI_INSET,
+        y: header.y + AI_INSET,
+        w: AI_CLOSE_SIDE.min(header.w.max(0.0)),
+        h: AI_CLOSE_SIDE.min(header.h.max(0.0)),
+    };
+    let send = Rect {
+        x: input.x + input.w - AI_SEND_WIDTH - AI_INSET,
+        y: input.y + input.h - AI_SEND_HEIGHT - AI_INSET,
+        w: AI_SEND_WIDTH.min(input.w.max(0.0)),
+        h: AI_SEND_HEIGHT.min(input.h.max(0.0)),
+    };
+    let scrollbar = Rect {
+        x: log.x + log.w - AI_SCROLLBAR_WIDTH,
+        y: log.y,
+        w: AI_SCROLLBAR_WIDTH,
+        h: log.h,
+    };
+    AiPanelLayout {
+        panel,
+        header,
+        log,
+        input,
+        close,
+        send,
+        scrollbar,
+    }
+}
+
 /// Everything the rail paints. A stretched block's width depends on the font, so the damage
 /// accounting reserves the widest block `toolbar_pill` will build, as a strip on the output's edge
 /// the rail is docked to; the strip only joins a damage box that reaches it.
@@ -4719,7 +5329,7 @@ pub fn toolbar_bounds(toolbar: &Toolbar, width: f32, height: f32) -> Rect {
 
 /// The damage box for a rail docked to `position`. The public [`toolbar_bounds`] uses the
 /// configured edge; this is the one the edge tests drive directly.
-fn toolbar_bounds_at(
+pub fn toolbar_bounds_at(
     position: ToolbarPosition,
     toolbar: &Toolbar,
     width: f32,
@@ -5108,6 +5718,33 @@ fn draw_icon(
         );
         return;
     }
+    if icon == Icon::Sparkle {
+        // A four-point star: the shape every assistant in the platform's own furniture uses, drawn
+        // with pinched points rather than a glyph so it cannot arrive as tofu.
+        let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+        let reach = w.min(h) * 0.5;
+        let pinch = reach * 0.28;
+        let mut star = PathBuilder::new();
+        star.move_to(cx, cy - reach);
+        star.line_to(cx + pinch, cy - pinch);
+        star.line_to(cx + reach, cy);
+        star.line_to(cx + pinch, cy + pinch);
+        star.line_to(cx, cy + reach);
+        star.line_to(cx - pinch, cy + pinch);
+        star.line_to(cx - reach, cy);
+        star.line_to(cx - pinch, cy - pinch);
+        star.close();
+        if let Some(path) = star.finish() {
+            pixmap.fill_path(
+                &path,
+                &paint,
+                tiny_skia::FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
+        }
+        return;
+    }
     if icon == Icon::More {
         // Three dots: the macOS way of saying "there is more here".
         for at in [0.3, 0.5, 0.7] {
@@ -5250,6 +5887,8 @@ fn draw_icon(
     let mut path = PathBuilder::new();
     let mut filled: Vec<tiny_skia::Path> = Vec::new();
     match icon {
+        // Drawn and returned above, before a path is built.
+        Icon::Sparkle => {}
         Icon::Bucket => {
             // A tilted pail with a drip: a filled interior is the one thing this tool changes.
             path.move_to(x + w * 0.22, y + h * 0.34);
@@ -8309,6 +8948,9 @@ mod tests {
                 }
                 ToolbarAction::Shared => {
                     panel_action_for_keysym(keysym, shift) == Some(ToolbarAction::Shared)
+                }
+                ToolbarAction::Ai => {
+                    panel_action_for_keysym(keysym, shift) == Some(ToolbarAction::Ai)
                 }
                 // A row of the boards panel states its name and no key: it is picked from the list the
                 // `boards` block opened, and that block carries the key.

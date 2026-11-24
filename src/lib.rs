@@ -1,5 +1,6 @@
 //! sgraffito: doodle and sticky notes on the Wayland wallpaper layer.
 
+pub mod ai;
 pub mod app;
 pub mod canvas;
 pub mod config;

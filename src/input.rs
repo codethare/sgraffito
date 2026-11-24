@@ -257,6 +257,7 @@ pub fn panel_action_for_keysym(keysym: Keysym, shift: bool) -> Option<ToolbarAct
         Keysym::b | Keysym::B if shift => Some(ToolbarAction::Scrim),
         Keysym::c | Keysym::C => Some(ToolbarAction::Boards),
         Keysym::f | Keysym::F => Some(ToolbarAction::Shared),
+        Keysym::i | Keysym::I => Some(ToolbarAction::Ai),
         _ => None,
     }
 }
@@ -369,6 +370,11 @@ impl KeyboardHandler for App {
         if self.keyboard_focus.is_some() && self.keyboard_focus != next_focus {
             self.end_text_edit();
         }
+        // The panel's input line belongs to the screen the keyboard is on. Moving to another screen
+        // leaves the panel open and readable and takes its cursor away.
+        if self.ai.open && self.ai.focus && next_focus != self.ai.output {
+            self.blur_ai();
+        }
         self.keyboard_focus = next_focus;
         // Focus changed, so the text input has to be enabled again.
         self.text_input_enabled = false;
@@ -386,6 +392,8 @@ impl KeyboardHandler for App {
         if self.output_of(surface) == self.keyboard_focus {
             self.end_text_edit();
             self.keyboard_focus = None;
+            // The panel keeps its keyboard until some other screen takes it: a compositor that drops
+            // and re-adds focus on the same surface must not take the input line away with it.
             self.sync_text_input();
         }
     }
@@ -427,6 +435,34 @@ impl KeyboardHandler for App {
                 RenameKey::Ignore => {}
             }
             return;
+        }
+        // The AI panel's input line takes its own keys first: `Enter` sends, `Shift+Enter` adds a line,
+        // `Esc` closes the panel, and everything else — including `Ctrl+V` — is the ordinary text path.
+        if self.ai.open && self.ai.focus {
+            if event.keysym == Keysym::Escape {
+                if self.preedit_is_empty() {
+                    self.close_ai();
+                } else {
+                    // The input method owns `Esc` while it has a preedit; all it does here is drop it.
+                    self.ai.preedit.clear();
+                    self.refresh_ai();
+                    self.sync_text_input();
+                }
+                return;
+            }
+            if !self.preedit_is_empty() {
+                // A composition in flight owns the keyboard: a key that reached the buffer now would
+                // interleave with the characters the input method is about to commit.
+                return;
+            }
+            if matches!(event.keysym, Keysym::Return | Keysym::KP_Enter) {
+                if self.shift {
+                    self.edit_buffer(|buffer| buffer.insert("\n"));
+                } else {
+                    self.send_ai();
+                }
+                return;
+            }
         }
         // While a text box is edited, printable characters are content, not shortcuts.
         if self.edit_target_mut().is_some() {
@@ -781,6 +817,12 @@ impl App {
     /// Mark the output that owns the focused text edit for a whole-surface redraw: typed
     /// content and the caret are not localisable to a transient box.
     fn mark_edit_dirty(&mut self) {
+        if self.ai.open && self.ai.focus {
+            // The panel's input line is not an output's overlay text box: its own refresh is what puts
+            // the typed characters, the caret and the preedit on screen.
+            self.refresh_ai();
+            return;
+        }
         self.grow_note();
         self.recenter_bound_edit();
         self.dirty = true;
@@ -806,6 +848,11 @@ impl App {
         if let Some(rename) = self.rename.as_mut() {
             return Some((&mut rename.text, &mut rename.preedit));
         }
+        // The AI panel's input line is a text target too: the same caret, preedit and paste machinery
+        // serve it, so the input method needs no second path.
+        if self.ai.open && self.ai.focus {
+            return Some((&mut self.ai.input, &mut self.ai.preedit));
+        }
         let out = self
             .outputs
             .values_mut()
@@ -816,6 +863,9 @@ impl App {
     fn edit_target(&self) -> Option<(&TextBuffer, &str)> {
         if let Some(rename) = self.rename.as_ref() {
             return Some((&rename.text, &rename.preedit));
+        }
+        if self.ai.open && self.ai.focus {
+            return Some((&self.ai.input, &self.ai.preedit));
         }
         let out = self
             .outputs
@@ -834,6 +884,12 @@ impl App {
     /// keystroke is a request to abort, unlike the interruptions that commit — then a text box under
     /// edit ends, then a selection is dropped, and only then does the daemon lock.
     fn escape(&mut self) {
+        // The AI panel is the largest transient thing on screen: it goes before the rail's menus, and
+        // before `Esc` locks. A focused input line has already handled its own `Esc` in `press_key`.
+        if self.ai.open {
+            self.close_ai();
+            return;
+        }
         // An open menu is the most transient thing on the screen, so it closes first: a second `Esc` then
         // does whatever it did before the menu was opened. The three panels are menus, and only one is open.
         if self.boards_open {
@@ -948,6 +1004,28 @@ impl App {
         vertical: AxisScroll,
         source: Option<AxisSource>,
     ) {
+        // A wheel over the AI panel scrolls its transcript, and over the rest of the panel it does
+        // nothing: zooming the canvas behind a panel the pointer is on is never what was meant.
+        if self.ai.open
+            && self.ai.output == Some(key)
+            && let Some(size) = self.output_size(key)
+            && let Some(toolbar) = self
+                .outputs
+                .get(&key)
+                .map(|out| out.overlay.toolbar.clone())
+        {
+            let layout = crate::render::ai_panel_layout(size, toolbar.as_ref());
+            if layout.panel.contains(at[0], at[1]) {
+                if layout.log.contains(at[0], at[1]) {
+                    let max = self.ai_max_scroll(key);
+                    self.ai.scroll =
+                        (self.ai.scroll + vertical.absolute as f32 * 40.0).clamp(0.0, max);
+                    self.ai.follow = self.ai.scroll >= max;
+                    self.refresh_ai();
+                }
+                return;
+            }
+        }
         // A wheel over the boards panel scrolls its fixed-height window. The panel has no room to
         // grow with the document, so this is how a board past the visible rows is reached. At the
         // ends the wheel is still consumed, rather than zooming the canvas behind the panel.
@@ -992,6 +1070,47 @@ impl App {
     fn pointer_press(&mut self, key: &u32, x: f32, y: f32) {
         if self.mode != Mode::Edit {
             return;
+        }
+        // The AI panel is not modal: a press inside it is the panel's, and a press outside it goes on to
+        // the rail or the canvas, taking the keyboard out of the input line on the way.
+        if self.ai.open
+            && self.ai.output == Some(*key)
+            && let Some(size) = self.output_size(*key)
+            && let Some(toolbar) = self.outputs.get(key).map(|out| out.overlay.toolbar.clone())
+        {
+            let layout = crate::render::ai_panel_layout(size, toolbar.as_ref());
+            if layout.panel.contains(x, y) {
+                self.ai.pointer_captured = true;
+                if layout.close.contains(x, y) {
+                    self.close_ai();
+                    return;
+                }
+                if layout.send.contains(x, y) {
+                    if self.ai.streaming() {
+                        self.stop_ai();
+                    } else {
+                        self.send_ai();
+                    }
+                    return;
+                }
+                if layout.input.contains(x, y) {
+                    self.ai.focus = true;
+                    self.ai.input.cursor = self.ai.input.text.chars().count();
+                    self.sync_text_input();
+                    self.refresh_ai();
+                    return;
+                }
+                // The transcript and the card itself: the panel keeps the press, the input line loses
+                // the keyboard.
+                if self.ai.focus {
+                    self.blur_ai();
+                }
+                return;
+            }
+            self.ai.pointer_captured = false;
+            if self.ai.focus {
+                self.blur_ai();
+            }
         }
         if let Some(action) = self.toolbar_hit(key, x, y) {
             // The rows were drawn from the list as it stands, and committing a name can re-sort it, so
@@ -1122,6 +1241,9 @@ impl App {
     }
 
     fn pointer_motion(&mut self, key: &u32, x: f32, y: f32) {
+        if self.ai.pointer_captured {
+            return;
+        }
         if self.mode != Mode::Edit {
             return;
         }
@@ -1284,6 +1406,9 @@ impl App {
         self.end_text_edit();
         self.commit_transient_drawing();
         match action {
+            ToolbarAction::Ai => {
+                self.open_ai(acting);
+            }
             ToolbarAction::Tool(tool) => self.set_tool(tool),
             ToolbarAction::Color(index) => {
                 self.set_color(index);
@@ -1437,6 +1562,10 @@ impl App {
     }
 
     fn pointer_release(&mut self, key: &u32) {
+        if self.ai.pointer_captured {
+            self.ai.pointer_captured = false;
+            return;
+        }
         let tool = self.tool;
         let board_name = self.outputs.get(key).map(|o| o.board().to_string());
         // The eraser's radius is what the pointer aims with, so it is a screen length expressed in

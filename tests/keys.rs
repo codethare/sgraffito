@@ -1,8 +1,10 @@
 use sgraffito::app::{MAX_PASTE_BYTES, Tool, read_selection, text_mime};
 use sgraffito::canvas::Caret;
+use sgraffito::canvas::ToolbarAction;
 use sgraffito::input::{
     BoardListKey, EditAction, RenameKey, board_list_key, bytes_to_delete, color_for_keysym,
-    edit_action, rename_key, size_step_for_keysym, tool_for_keysym, wants_sampling,
+    edit_action, panel_action_for_keysym, rename_key, size_step_for_keysym, tool_for_keysym,
+    wants_sampling,
 };
 use smithay_client_toolkit::seat::keyboard::Keysym;
 
@@ -481,4 +483,25 @@ fn the_open_board_list_has_its_own_d_r_n_keys() {
     assert_eq!(board_list_key(Keysym::n), Some(BoardListKey::New));
     assert_eq!(board_list_key(Keysym::N), Some(BoardListKey::New));
     assert_eq!(board_list_key(Keysym::v), None);
+}
+
+/// `I` opens the AI panel, and the drawer is where its control lives: the key and the rail have to agree,
+/// because the rail's block states the key that does the same thing.
+#[test]
+fn i_opens_the_ai_panel_from_the_drawer() {
+    assert_eq!(
+        panel_action_for_keysym(Keysym::i, false),
+        Some(ToolbarAction::Ai)
+    );
+    assert_eq!(
+        panel_action_for_keysym(Keysym::I, false),
+        Some(ToolbarAction::Ai)
+    );
+    assert_eq!(sgraffito::render::DRAWER[0], ToolbarAction::Ai);
+    assert!(sgraffito::render::DRAWER.contains(&ToolbarAction::Ai));
+    assert_eq!(
+        sgraffito::render::DRAWER.len(),
+        6,
+        "one row per drawer control"
+    );
 }

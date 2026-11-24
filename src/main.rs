@@ -42,6 +42,12 @@ Usage:
   sgraffito board <name>       show a board on every screen
   sgraffito board new [name]   create a board and show it
   sgraffito share on|off       one board for every screen, or one board per screen
+  sgraffito ai                 open the AI mind-map panel in edit mode
+
+The AI panel turns a sentence into a Mermaid mind map on the board: bind `sgraffito ai`, or press
+`I` in edit mode to open it. It asks the OpenCode endpoint named by `OPENCODE_GO_API_KEY`,
+`OPENCODE_ZEN_API_KEY` or `OPENCODE_API_KEY`, or by `[ai].base_url` in the configuration file, through
+`bwrap` and `curl`. The answer is drawn while it streams and committed as ordinary shapes and text.
 
 Boards are what a drawing belongs to, so a drawing made on one screen is still there when only
 another one is connected: `sgraffito board office` before leaving the desk, and the laptop shows the
@@ -62,6 +68,7 @@ fn main() -> ExitCode {
         Some("edit") => send_command("edit"),
         Some("lock") => send_command("lock"),
         Some("clear") => send_command("clear"),
+        Some("ai") => send_command("ai"),
         Some("boards") => list_boards(),
         // The rest of the line is the command: a board name keeps its spaces, and `board new` takes the
         // rest of the line as the name it creates.

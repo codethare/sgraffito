@@ -205,6 +205,8 @@ pub enum ToolbarAction {
     Link,
     /// Switch the edges of new and selected lines/arrows between sharp and round.
     Round,
+    /// Open the AI mind-map panel on this screen.
+    Ai,
 }
 
 /// What edit mode paints behind the document. Locked mode always paints nothing, because that
@@ -3866,6 +3868,32 @@ pub struct Overlay {
     pub connectors: Vec<LiveConnector>,
     /// The rectangle a selection drag is sweeping, before it becomes a selection.
     pub marquee: Option<Rect>,
+    /// The AI chat panel, only on the output it was opened on.
+    pub ai: Option<AiView>,
+    /// The uncommitted mind map drawn live while the AI streams.
+    pub ai_preview: Option<Board>,
+}
+
+/// One message of the AI panel as the frame draws it: which side it sits on, what it says, and whether
+/// it is still arriving.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AiMessageView {
+    /// A user message sits on the right; the assistant's on the left.
+    pub user: bool,
+    pub text: String,
+    pub streaming: bool,
+}
+
+/// The AI panel's whole visible state: the transcript, the input line and what the request is doing.
+/// A copy of the app's chat, so the renderer never reads live request state.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AiView {
+    pub messages: Vec<AiMessageView>,
+    pub input: TextBuffer,
+    pub preedit: String,
+    pub streaming: bool,
+    pub error: Option<String>,
+    pub scroll: f32,
 }
 
 /// One board as the rail's panel states it: its name, and whether this output is showing it.

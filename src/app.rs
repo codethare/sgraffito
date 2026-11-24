@@ -181,6 +181,8 @@ pub enum Command {
     Board(String),
     /// Create a board — one `Board N` when no name is given — and switch every output to it.
     NewBoard(Option<String>),
+    /// Open the AI mind-map panel on the focused screen.
+    Ai,
     /// List every board, with the one picked last marked.
     Boards,
     /// Whether every screen shows the board picked on any of them.
@@ -196,6 +198,7 @@ impl Command {
             "lock" => Ok(Command::Lock),
             "clear" => Ok(Command::Clear),
             "boards" => Ok(Command::Boards),
+            "ai" => Ok(Command::Ai),
             "" => Err("empty command".into()),
             other => {
                 if let Some(rest) = other.strip_prefix("board ") {
@@ -454,6 +457,9 @@ pub struct App {
     /// The board whose row is asking whether to delete it. The name survives a list re-sort; it is
     /// cleared when the panel closes, a pick is made, or `no` is chosen.
     pub(crate) delete_confirm: Option<String>,
+    /// The AI mind-map panel: its transcript, the request in flight and the preview. Memory only: the
+    /// diagram it commits is ordinary board content, the conversation is not content at all.
+    pub(crate) ai: crate::ai::Chat,
     /// When the open panel opened, for its own transition: `None` when no panel is open. Panels close at
     /// once, so only the opening has a clock.
     panel_open_since: Option<Instant>,
@@ -701,6 +707,7 @@ impl App {
             linear_drag: None,
             rename: None,
             delete_confirm: None,
+            ai: crate::ai::Chat::new(),
             panel_open_since: None,
             text_input_manager: None,
             text_input: None,
@@ -775,6 +782,7 @@ impl App {
 
     /// Flush pending annotations before exiting.
     pub fn shutdown(&mut self) {
+        self.ai.abort();
         if let Err(e) = self.store.flush(&self.doc) {
             log(&format!(
                 "failed to write {} on exit: {e}",
@@ -875,6 +883,11 @@ impl App {
     pub(crate) fn set_mode(&mut self, mode: Mode) {
         if self.mode == mode {
             return;
+        }
+        if mode == Mode::Locked {
+            // The panel is an edit-mode surface; locking is what hides it, and an answer that was
+            // still arriving has nowhere to land.
+            self.close_ai();
         }
         self.end_text_edit();
         self.commit_rename();
@@ -1379,6 +1392,17 @@ impl App {
             (false, Some(key)) => vec![key],
             _ => self.outputs.keys().copied().collect(),
         };
+        // The panel belongs to the board it was opened on. A screen that moves to another board hides it
+        // rather than leaving a preview over a board nobody will commit to.
+        if self.ai.output.is_some_and(|key| {
+            keys.contains(&key)
+                && self
+                    .outputs
+                    .get(&key)
+                    .is_some_and(|out| out.board() != name)
+        }) {
+            self.close_ai();
+        }
         // A gesture in flight is not in the document, and the duplicate an `Alt` drag made names indices on
         // the board being left: kept, the next `Esc` would remove an element of the board switched to.
         self.gesture = None;
@@ -1650,6 +1674,372 @@ impl App {
         self.doc_changed_at(key, item.paint_bounds());
         log("pasted system text");
         true
+    }
+
+    // The AI panel. Its whole visible state is memory: opening it changes no document, and closing it
+    // keeps the transcript so reopening in the same session continues the conversation. The diagram it
+    // produces is committed as ordinary board content and is undoable, selectable and editable there.
+
+    /// Open the panel on `acting`'s screen — else the focused one, else the first — and give it the
+    /// keyboard. The document is not touched.
+    pub(crate) fn open_ai(&mut self, acting: Option<u32>) -> bool {
+        if self.mode != Mode::Edit {
+            self.set_mode(Mode::Edit);
+        }
+        let key = acting
+            .or(self.keyboard_focus)
+            .or_else(|| self.outputs.keys().next().copied());
+        let Some(key) = key.filter(|key| self.outputs.contains_key(key)) else {
+            return false;
+        };
+        self.end_text_edit();
+        self.commit_rename();
+        self.close_panels();
+        self.ai.open = true;
+        self.ai.output = Some(key);
+        self.ai.focus = true;
+        self.ai.preedit.clear();
+        self.sync_text_input();
+        self.refresh_ai();
+        self.dirty = true;
+        true
+    }
+
+    /// Hide the panel and stop the request. The transcript and the ids of the diagram this chat placed
+    /// stay, so a later prompt in the same session replaces the same diagram.
+    pub(crate) fn close_ai(&mut self) {
+        if !self.ai.open {
+            return;
+        }
+        self.ai.abort();
+        self.ai.preview = None;
+        self.ai.focus = false;
+        self.ai.preedit.clear();
+        self.ai.pointer_captured = false;
+        self.ai.output = None;
+        self.ai.open = false;
+        self.sync_text_input();
+        self.refresh_ai();
+        self.dirty = true;
+    }
+
+    /// Take the keyboard out of the panel's input line and leave the panel open: a press on the canvas
+    /// goes on to draw, but the conversation stays readable.
+    pub(crate) fn blur_ai(&mut self) {
+        if !self.ai.focus && self.ai.preedit.is_empty() {
+            return;
+        }
+        self.ai.focus = false;
+        self.ai.preedit.clear();
+        self.sync_text_input();
+        self.refresh_ai();
+        self.dirty = true;
+    }
+
+    /// The furthest the transcript can scroll on `key`'s screen, in logical pixels.
+    pub(crate) fn ai_max_scroll(&mut self, key: u32) -> f32 {
+        let Some((size, toolbar)) = self.outputs.get(&key).map(|out| {
+            (
+                (out.width as f32, out.height as f32),
+                out.overlay.toolbar.clone(),
+            )
+        }) else {
+            return 0.0;
+        };
+        let layout = crate::render::ai_panel_layout(size, toolbar.as_ref());
+        let view = self.ai.view();
+        (self.renderer.ai_log_height(&view, layout.log.w) - layout.log.h).max(0.0)
+    }
+
+    /// Draw the chat's current state on the screen that owns the panel, and clear it everywhere else.
+    /// One panel, on one output: the others must not keep a stale copy of it.
+    pub(crate) fn refresh_ai(&mut self) {
+        let Some(key) = self.ai.output else {
+            for out in self.outputs.values_mut() {
+                if out.overlay.ai.take().is_some() {
+                    out.transient_dirty = true;
+                }
+                out.overlay.ai_preview = None;
+            }
+            self.dirty = true;
+            return;
+        };
+        let Some((size, toolbar)) = self.outputs.get(&key).map(|out| {
+            (
+                (out.width as f32, out.height as f32),
+                out.overlay.toolbar.clone(),
+            )
+        }) else {
+            return;
+        };
+        let layout = crate::render::ai_panel_layout(size, toolbar.as_ref());
+        let mut view = self.ai.view();
+        let content = self.renderer.ai_log_height(&view, layout.log.w);
+        let max = (content - layout.log.h).max(0.0);
+        self.ai.scroll = if self.ai.follow {
+            max
+        } else {
+            self.ai.scroll.clamp(0.0, max)
+        };
+        view.scroll = self.ai.scroll;
+        let preview = self.ai.preview.clone();
+        for (output_key, out) in self.outputs.iter_mut() {
+            let had_panel = out.overlay.ai.is_some();
+            let had_preview = out.overlay.ai_preview.is_some();
+            if *output_key != key {
+                out.overlay.ai = None;
+                out.overlay.ai_preview = None;
+            }
+            if had_panel || had_preview {
+                out.transient_dirty = true;
+            }
+        }
+        if let Some(out) = self.outputs.get_mut(&key) {
+            out.overlay.ai = Some(view);
+            out.overlay.ai_preview = preview;
+            out.transient_dirty = true;
+        }
+        self.dirty = true;
+    }
+
+    /// Send the typed prompt. Every refusal leaves the prompt in the input so it can be edited rather
+    /// than retyped.
+    pub(crate) fn send_ai(&mut self) {
+        if self.ai.streaming() {
+            return;
+        }
+        let prompt = self.ai.input.text.trim().to_string();
+        if prompt.is_empty() {
+            return;
+        }
+        if prompt.len() > crate::ai::MAX_PROMPT_BYTES {
+            self.ai.error = Some("prompt is too long".into());
+            self.refresh_ai();
+            return;
+        }
+        let settings = match crate::ai::resolve(crate::config::current()) {
+            Ok(settings) => settings,
+            Err(e) => {
+                self.ai.error = Some(e);
+                self.refresh_ai();
+                return;
+            }
+        };
+        let Some(key) = self.ai.output else {
+            self.cancel_ai("the AI panel has no screen");
+            return;
+        };
+        let Some((size, toolbar, view, board)) = self.outputs.get(&key).map(|out| {
+            (
+                (out.width as f32, out.height as f32),
+                out.overlay.toolbar.clone(),
+                out.view,
+                out.board().to_string(),
+            )
+        }) else {
+            self.cancel_ai("the AI panel's screen is gone");
+            return;
+        };
+        if !self.doc.boards.contains_key(&board) {
+            self.cancel_ai("the AI panel's board is gone");
+            return;
+        }
+        // The diagram goes where the panel is not: the left half of what the panel leaves, at the
+        // middle of the output's height, in canvas coordinates.
+        let layout = crate::render::ai_panel_layout(size, toolbar.as_ref());
+        let at = [(layout.panel.x * 0.5).max(120.0), size.1 * 0.5];
+        self.ai.anchor = view.to_canvas(at);
+        self.ai.target_board = board;
+        let colors = &crate::config::current().colors;
+        self.ai.color = colors
+            .get(self.color_idx)
+            .cloned()
+            .unwrap_or_else(|| colors[0].clone());
+        self.ai.preview = None;
+        self.ai.error = None;
+        self.ai.follow = true;
+        self.ai.messages.push(crate::ai::Message {
+            role: crate::ai::Role::User,
+            text: prompt,
+            streaming: false,
+        });
+        self.ai.messages.push(crate::ai::Message {
+            role: crate::ai::Role::Assistant,
+            text: String::new(),
+            streaming: true,
+        });
+        self.ai.input = TextBuffer::new("");
+        self.ai.preedit.clear();
+        self.refresh_ai();
+        if let Err(e) = self.ai.start(settings, self.ping.clone()) {
+            if let Some(last) = self.ai.messages.last_mut() {
+                last.streaming = false;
+            }
+            self.ai.error = Some(e);
+            self.refresh_ai();
+        }
+    }
+
+    /// The send button while an answer streams: stop it, keeping what arrived.
+    pub(crate) fn stop_ai(&mut self) {
+        self.cancel_ai("stopped");
+    }
+
+    /// Give up on the request in flight for `reason` and say so. The document is untouched: a partial
+    /// answer was never content.
+    pub(crate) fn cancel_ai(&mut self, reason: &str) {
+        self.ai.abort();
+        self.ai.preview = None;
+        self.ai.error = Some(reason.to_string());
+        self.refresh_ai();
+        self.dirty = true;
+    }
+
+    /// The stream's own tick: drain the reader, rebuild the preview when it is due, and commit the
+    /// diagram once the answer is complete.
+    fn pump_ai(&mut self) {
+        let was = self.ai.streaming();
+        if self.ai.poll() {
+            self.refresh_ai();
+        }
+        let streaming = self.ai.streaming();
+        if streaming
+            && self.ai.last_preview.elapsed() >= crate::ai::PREVIEW_INTERVAL
+            && self
+                .ai
+                .messages
+                .last()
+                .is_some_and(|message| !message.text.is_empty())
+        {
+            self.refresh_ai_preview();
+        }
+        if was && !streaming {
+            if self.ai.error.is_some() {
+                // A failed or stopped request leaves nothing on the board, not even the part that parsed.
+                self.ai.preview = None;
+                self.refresh_ai();
+            } else {
+                self.refresh_ai_preview();
+                if self.ai.error.is_none() {
+                    self.commit_ai_preview();
+                }
+            }
+            self.ai.follow = true;
+            self.refresh_ai();
+        }
+    }
+
+    /// Re-parse the answer so far and lay it out. A half-received answer that does not parse yet keeps
+    /// the previous preview; a complete one that does not parse is an error and changes no document.
+    fn refresh_ai_preview(&mut self) {
+        let Some(last) = self.ai.messages.last() else {
+            return;
+        };
+        if last.role != crate::ai::Role::Assistant {
+            return;
+        }
+        let text = last.text.clone();
+        let streaming = last.streaming;
+        let made = crate::ai::extract_mermaid(&text)
+            .ok_or_else(|| "AI did not return a valid Mermaid mindmap".to_string())
+            .and_then(|mermaid| crate::ai::parse_mindmap(&mermaid));
+        let tree = match made {
+            Ok(tree) => tree,
+            Err(reason) => {
+                if !streaming && self.ai.error.is_none() {
+                    self.ai.error = Some(reason);
+                    self.ai.preview = None;
+                    self.refresh_ai();
+                    self.dirty = true;
+                }
+                return;
+            }
+        };
+        let anchor = self.ai.anchor;
+        let color = self.ai.color.clone();
+        let renderer = &mut self.renderer;
+        let board = crate::ai::layout_mindmap(&tree, anchor, &color, &mut |text, size, wrap| {
+            renderer.measure_text(text, size, wrap)
+        });
+        self.ai.preview = Some(board);
+        self.ai.last_preview = Instant::now();
+        self.refresh_ai();
+    }
+
+    /// Write the preview into its board as one change: the diagram this chat placed last time is
+    /// removed, the new one appended, and the whole replacement is one undo step.
+    fn commit_ai_preview(&mut self) {
+        let Some(preview) = self.ai.preview.take() else {
+            return;
+        };
+        let before = self.doc.clone();
+        let target = self.ai.target_board.clone();
+        let Some(board) = self.doc.boards.get_mut(&target) else {
+            self.ai.error = Some(format!("the AI diagram's board '{target}' is gone"));
+            self.refresh_ai();
+            return;
+        };
+        let mut removed_items = Vec::new();
+        for id in &self.ai.placed_shapes {
+            if let Some(index) = board.shape_index_by_id(*id) {
+                removed_items.push(ItemId::Shape(index));
+            }
+        }
+        let removed = board.remove(&removed_items);
+        let (appended, added) = board.append(&preview);
+        let synced = board.sync_connectors();
+        // The commit centres every label on its node with the renderer's own measurement, so the
+        // committed text sits exactly where the preview drew it.
+        let labels: Vec<usize> = appended
+            .iter()
+            .filter_map(|id| match id {
+                ItemId::Text(index) => Some(*index),
+                _ => None,
+            })
+            .collect();
+        for index in labels {
+            let Some(item) = board.texts.get(index).cloned() else {
+                continue;
+            };
+            let Some(container) = item.container else {
+                continue;
+            };
+            let Some(shape) = board
+                .shapes
+                .iter()
+                .find(|shape| shape.id == container)
+                .cloned()
+            else {
+                continue;
+            };
+            let placed = self.renderer.place_bound_text(&item, &shape);
+            if let Some(text) = board.texts.get_mut(index) {
+                *text = placed;
+            }
+        }
+        self.ai.placed_shapes = appended
+            .iter()
+            .filter_map(|id| match id {
+                ItemId::Shape(index) => board.shapes.get(*index).map(|shape| shape.id),
+                _ => None,
+            })
+            .collect();
+        let count = self.ai.placed_shapes.len();
+        let mut box_: Option<Rect> = None;
+        for part in [removed, added, synced].into_iter().flatten() {
+            box_ = Some(box_.map_or(part, |box_| box_.union(part)));
+        }
+        self.undo.record(before, &self.doc);
+        match (self.ai.output, box_) {
+            (Some(key), Some(box_)) if self.outputs.contains_key(&key) => {
+                self.doc_changed_at(key, box_)
+            }
+            _ => self.doc_changed(),
+        }
+        self.ai.preview = None;
+        self.ai.follow = true;
+        self.refresh_ai();
+        log(&format!("AI diagram committed: {count} shapes"));
     }
 
     /// Delete a board by name, from the panel's row that owns it. Everything the board holds goes with
@@ -4133,6 +4523,13 @@ impl App {
                 self.set_shared(on);
                 "ok".into()
             }
+            Command::Ai => {
+                if self.open_ai(None) {
+                    "ok".into()
+                } else {
+                    "error: no screen".into()
+                }
+            }
             Command::Clear => {
                 self.end_text_edit();
                 // `clear` empties the document, so a gesture still holding elements of it is
@@ -4198,6 +4595,9 @@ impl App {
             }
         }
         self.dirty |= settled;
+        // The AI stream is drained before the store deadline: a delta that arrived while the loop was
+        // idle is drawn on this tick, not on the next input event.
+        self.pump_ai();
         if self.store.due(Instant::now())
             && let Err(e) = self.store.flush(&self.doc)
         {
@@ -4253,6 +4653,9 @@ impl App {
     fn next_wait(&self) -> Duration {
         if self.animating() {
             FRAME_WAIT
+        } else if self.ai.streaming() {
+            // An answer arrives as tokens on another thread; the loop has to come back for them.
+            crate::ai::STREAM_FRAME
         } else if let Some(until) = self.colors_until {
             until
                 .saturating_duration_since(Instant::now())
@@ -4448,6 +4851,18 @@ impl App {
         let transient = if out.overlay.selection.is_some() {
             let button = action_card_bounds((w as f32, h as f32)).grown(2.0);
             Some(transient.map_or(button, |box_| box_.union(button)))
+        } else {
+            transient
+        };
+        // The AI panel is screen-space interface: its box joins the transient damage so the frame that
+        // closes it repaints every pixel it covered, and a frame that only changes the transcript
+        // touches nothing else.
+        let transient = if out.overlay.ai.is_some() {
+            let panel =
+                crate::render::ai_panel_layout((w as f32, h as f32), out.overlay.toolbar.as_ref())
+                    .panel
+                    .grown(crate::render::TOOLBAR_SHADOW_REACH);
+            Some(transient.map_or(panel, |box_| box_.union(panel)))
         } else {
             transient
         };
@@ -4869,6 +5284,9 @@ impl OutputHandler for App {
         output: wl_output::WlOutput,
     ) {
         let key = key_of(&output);
+        if self.ai.output == Some(key) {
+            self.close_ai();
+        }
         if self.outputs.contains_key(&key) {
             self.end_text_edit();
             self.cancel_transient(key);
@@ -4886,6 +5304,9 @@ impl OutputHandler for App {
 impl LayerShellHandler for App {
     fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, layer: &LayerSurface) {
         if let Some(key) = self.key_of_layer(layer) {
+            if self.ai.output == Some(key) {
+                self.close_ai();
+            }
             self.end_text_edit();
             self.cancel_transient(key);
             if self.keyboard_focus == Some(key) {

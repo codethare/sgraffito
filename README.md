@@ -78,9 +78,10 @@ Every mark on the canvas is drawn as a **hand-drawn** one: a pen stroke is one s
 | `C` | open the boards panel beside the rail: pick a board, create one, delete or rename the one under the pointer; with more boards than the panel's rows, the wheel or a two-finger scroll over the rows moves the window (it closes on a pick, on a press elsewhere, or on `Esc`) |
 | `d` / `r` / `n` while the boards panel is open | delete / rename the board this screen shows / create `Board N`; these are the list's own keys, not the diamond, rectangle or note tools |
 | `F` | switch between one board on every screen and one board per screen — the drawer's own row |
+| `I` | open the AI mind-map panel: describe a map, and the Mermaid `mindmap` the model streams back is drawn on the board as it arrives and committed as ordinary shapes and text when it is complete (`Enter` sends, `Shift`+`Enter` adds a line, `Esc` closes it) |
 | `1`–`5` | pick a colour |
 | `[` / `]` | shrink / grow the active tool's size — pen width, or text size while the text tool is armed — and, with a selection held, the width of its strokes and shapes and the size of its text boxes |
-| `Esc` | close the open drawer, else cancel the drag in progress, else finish the text edit, else clear the selection, else return to the locked mode |
+| `Esc` | close the AI panel, else the open drawer, else cancel the drag in progress, else finish the text edit, else clear the selection, else return to the locked mode |
 | `Delete` | remove everything the selection holds, as one change |
 | `Ctrl`+`Z` | undo the last document change; outside a text box, because the editor owns the keys while it is focused |
 | `Ctrl`+`Shift`+`Z` | redo the change last undone |
@@ -280,6 +281,23 @@ colors = [
   "rgba(53, 132, 228, 0.8)",
   "#ffffff",
 ]
+
+# The AI mind-map panel's endpoint. Everything here is optional: a key exported as
+# OPENCODE_GO_API_KEY, OPENCODE_ZEN_API_KEY or OPENCODE_API_KEY is enough, and the
+# endpoint is derived from it. A generic OPENCODE_API_KEY is taken to be a Go key
+# (https://opencode.ai/inference/go); a Zen-only account with that one variable sets
+# base_url below. A base_url with no key is allowed too, for a local or already
+# authenticated gateway.
+[ai]
+base_url = ""                  # empty: derived from whichever key the environment holds
+model = "deepseek-v4.1-flash"  # empty: this default
+api_key = ""                   # fallback only; a key in the environment wins
+timeout_secs = 180             # clamped to 5..=600
+
+# A request runs `curl` inside `bwrap`: both are runtime prerequisites, and the panel
+# reports an error instead of quietly falling back to an unsandboxed request. Only the
+# chat transcript is memory-only; the diagram the panel commits is ordinary board
+# content, saved and undoable like anything drawn by hand.
 ```
 
 The file is read once when the daemon starts.

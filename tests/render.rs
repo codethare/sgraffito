@@ -4701,3 +4701,211 @@ fn a_localized_rebuild_with_an_off_screen_element_matches_a_cold_frame() {
         }
     }
 }
+
+// ---- the AI panel ---------------------------------------------------------------------------------
+
+use sgraffito::canvas::{AiMessageView, AiView};
+use sgraffito::config::ToolbarPosition;
+use sgraffito::render::{ai_panel_layout, ai_panel_layout_at, toolbar_bounds_at};
+
+fn ai_toolbar() -> Toolbar {
+    Toolbar {
+        tool: Tool::Selection,
+        color: PALETTE[0].to_string(),
+        size: 3.0,
+        hover: None,
+        grow: 0.0,
+        panel_grow: 1.0,
+        more: false,
+        boards_open: false,
+        size_open: false,
+        target: None,
+        rename: None,
+        delete_confirm: None,
+        boards: Vec::new(),
+        board_scroll: 0,
+        shared: false,
+        backdrop: Backdrop::Black,
+        zoom: 1.0,
+        can_undo: false,
+        can_redo: false,
+        can_duplicate: false,
+        roundness: true,
+        colors_open: false,
+        colors_grow: 1.0,
+    }
+}
+
+fn ai_view() -> AiView {
+    AiView {
+        messages: vec![
+            AiMessageView {
+                user: false,
+                text: "Here is the map.".into(),
+                streaming: false,
+            },
+            AiMessageView {
+                user: true,
+                text: "robot mind map".into(),
+                streaming: false,
+            },
+        ],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn the_panel_sits_left_of_a_right_docked_rail_and_never_overlaps_it() {
+    let (w, h) = (900.0f32, 600.0f32);
+    let toolbar = ai_toolbar();
+    let rail = toolbar_bounds_at(ToolbarPosition::Right, &toolbar, w, h);
+    let layout = ai_panel_layout_at(ToolbarPosition::Right, (w, h), Some(&toolbar));
+    assert!(
+        layout.panel.x + layout.panel.w <= rail.x,
+        "panel {:?} reaches the rail {:?}",
+        layout.panel,
+        rail
+    );
+    assert!(layout.panel.w > 100.0 && layout.panel.h > 100.0);
+    // Every control is inside the card its layout names.
+    for part in [
+        layout.header,
+        layout.log,
+        layout.input,
+        layout.close,
+        layout.send,
+    ] {
+        assert!(
+            part.x >= layout.panel.x - 0.01
+                && part.y >= layout.panel.y - 0.01
+                && part.x + part.w <= layout.panel.x + layout.panel.w + 0.01
+                && part.y + part.h <= layout.panel.y + layout.panel.h + 0.01,
+            "{part:?} escapes {:?}",
+            layout.panel
+        );
+    }
+}
+
+#[test]
+fn the_panel_stays_clear_of_a_top_or_bottom_rail_too() {
+    let (w, h) = (900.0f32, 600.0f32);
+    let toolbar = ai_toolbar();
+    let top_rail = toolbar_bounds_at(ToolbarPosition::Top, &toolbar, w, h);
+    let top = ai_panel_layout_at(ToolbarPosition::Top, (w, h), Some(&toolbar));
+    assert!(
+        top.panel.y >= top_rail.y + top_rail.h,
+        "top rail is covered: panel {:?} rail {:?}",
+        top.panel,
+        top_rail
+    );
+    let bottom_rail = toolbar_bounds_at(ToolbarPosition::Bottom, &toolbar, w, h);
+    let bottom = ai_panel_layout_at(ToolbarPosition::Bottom, (w, h), Some(&toolbar));
+    assert!(
+        bottom.panel.y + bottom.panel.h <= bottom_rail.y,
+        "bottom rail is covered: panel {:?} rail {:?}",
+        bottom.panel,
+        bottom_rail
+    );
+}
+
+#[test]
+fn the_transcript_puts_the_user_on_the_right_and_the_ai_on_the_left() {
+    let (w, h) = (900u32, 600u32);
+    let mut buf = buffer(w, h);
+    let overlay = Overlay {
+        toolbar: Some(ai_toolbar()),
+        ai: Some(ai_view()),
+        ..Default::default()
+    };
+    Renderer::new().render(
+        &mut buf,
+        w,
+        h,
+        1.0,
+        View::default(),
+        &Board::default(),
+        &overlay,
+        None,
+    );
+    let layout = ai_panel_layout((w as f32, h as f32), overlay.toolbar.as_ref());
+    let mut left = 0;
+    let mut right = 0;
+    for y in layout.log.y as u32..(layout.log.y + layout.log.h) as u32 {
+        for x in layout.log.x as u32..(layout.log.x + layout.log.w) as u32 {
+            if !content(&buf, w, x, y) {
+                continue;
+            }
+            if (x as f32) < layout.log.x + layout.log.w / 2.0 {
+                left += 1;
+            } else {
+                right += 1;
+            }
+        }
+    }
+    assert!(
+        left > 20,
+        "the assistant's message is not on the left: {left}"
+    );
+    assert!(
+        right > 20,
+        "the user's message is not on the right: {right}"
+    );
+}
+
+#[test]
+fn an_open_panel_damages_its_box_and_a_closed_one_is_painted_over() {
+    let (w, h) = (900u32, 600u32);
+    let mut buf = buffer(w, h);
+    let mut cache = FrameCache::default();
+    let mut renderer = Renderer::new();
+    let toolbar = ai_toolbar();
+    let shown = Overlay {
+        toolbar: Some(toolbar.clone()),
+        ai: Some(ai_view()),
+        ..Default::default()
+    };
+    renderer.render_with_cache(
+        &mut buf,
+        w,
+        h,
+        1.0,
+        1.0,
+        View::default(),
+        &Board::default(),
+        &shown,
+        None,
+        &mut cache,
+        &[],
+    );
+    let layout = ai_panel_layout((w as f32, h as f32), Some(&toolbar));
+    let probe = (
+        (layout.panel.x + layout.panel.w / 2.0) as u32,
+        (layout.panel.y + layout.panel.h / 2.0) as u32,
+    );
+    let painted = alpha(&buf, w, probe.0, probe.1);
+    assert!(painted > SCRIM, "the panel was not painted at {probe:?}");
+
+    // The frame that hides it damages the box the panel occupied and nothing else.
+    let hidden = Overlay {
+        toolbar: Some(toolbar.clone()),
+        ..Default::default()
+    };
+    renderer.render_with_cache(
+        &mut buf,
+        w,
+        h,
+        1.0,
+        1.0,
+        View::default(),
+        &Board::default(),
+        &hidden,
+        Some(layout.panel.grown(2.0)),
+        &mut cache,
+        &[],
+    );
+    assert_eq!(
+        alpha(&buf, w, probe.0, probe.1),
+        SCRIM,
+        "the closed panel left pixels behind at {probe:?}"
+    );
+}
