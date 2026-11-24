@@ -113,8 +113,41 @@ fn the_file_key_is_the_fallback_and_a_configured_base_overrides_the_key_base() {
     let ai = resolve_with(&config, |_| Some("env-key".into())).unwrap();
     assert_eq!(ai.key, "env-key", "the environment still wins on the key");
     assert_eq!(
+        ai.endpoint, "https://gateway.example/v1/chat/completions",
+        "a base that already ends in /v1 is completed, not doubled"
+    );
+}
+
+/// A base that is itself an OpenAI-compatible base — a host plus `/v1` — gets only the completions
+/// name. Doubling the path (`.../v1/openai/v1/chat/completions`) is what answers 404.
+#[test]
+fn a_versioned_base_is_completed_not_doubled() {
+    let mut config = config();
+    config.ai.base_url = "https://opencode.ai/zen/go/v1".into();
+    let ai = resolve_env(&config, &[]).unwrap();
+    assert_eq!(
         ai.endpoint,
-        "https://gateway.example/v1/openai/v1/chat/completions"
+        "https://opencode.ai/zen/go/v1/chat/completions"
+    );
+
+    config.ai.base_url = "https://opencode.ai/zen/v1/".into();
+    assert_eq!(
+        resolve_env(&config, &[]).unwrap().endpoint,
+        "https://opencode.ai/zen/v1/chat/completions"
+    );
+
+    // A base that stops at `/openai` is the one shape that still needs the version.
+    config.ai.base_url = "https://opencode.ai/inference/go/openai".into();
+    assert_eq!(
+        resolve_env(&config, &[]).unwrap().endpoint,
+        "https://opencode.ai/inference/go/openai/v1/chat/completions"
+    );
+
+    // And the built-in Go base keeps the documented full path.
+    let ai = resolve_env(&Config::default(), &[("OPENCODE_GO_API_KEY", "k")]).unwrap();
+    assert_eq!(
+        ai.endpoint,
+        "https://opencode.ai/inference/go/openai/v1/chat/completions"
     );
 }
 

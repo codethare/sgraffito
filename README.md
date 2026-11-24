@@ -300,6 +300,12 @@ timeout_secs = 180             # clamped to 5..=600
 # content, saved and undoable like anything drawn by hand.
 ```
 
+`base_url` is completed to the completions URL, never doubled: a base that already ends in
+`/chat/completions` is used as it is, one that ends in `/v1` gets `/chat/completions`, one that ends in
+`/openai` gets `/v1/chat/completions`, and anything else — a bare host, or the built-in
+`https://opencode.ai/inference/go` — gets `/openai/v1/chat/completions`. So
+`base_url = "https://opencode.ai/zen/go/v1"` posts to `https://opencode.ai/zen/go/v1/chat/completions`.
+
 The file is read once when the daemon starts.
 
 ## Known limitations

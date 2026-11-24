@@ -159,12 +159,21 @@ pub fn resolve_with(
     })
 }
 
-/// The base a request is posted to. A base that already names the completions path is used as it is,
-/// so a gateway with its own layout is not given a second suffix.
+/// The URL a request is posted to, from the base the file or the key chose.
+///
+/// A base may be a host, a host plus `/openai`, or a host plus `/v1`, so only the missing part of the
+/// path is appended. Appending the whole path to a base that already ends in `/v1` builds
+/// `.../v1/openai/v1/chat/completions`, which every gateway answers with 404 — the documented
+/// OpenCode bases (`/inference/go`, `/inference`) take the full suffix, while
+/// `https://opencode.ai/zen/go/v1` takes only `/chat/completions`.
 fn endpoint_for(base: &str) -> String {
     let base = base.trim_end_matches('/');
     if base.ends_with("/chat/completions") {
         base.to_string()
+    } else if base.ends_with("/v1") {
+        format!("{base}/chat/completions")
+    } else if base.ends_with("/openai") {
+        format!("{base}/v1/chat/completions")
     } else {
         format!("{base}/openai/v1/chat/completions")
     }
