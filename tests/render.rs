@@ -4121,7 +4121,7 @@ fn linear_edit_mode_promotes_interior_vertices() {
 }
 
 #[test]
-fn a_rounded_line_cuts_the_sharp_corner_away() {
+fn a_rounded_line_curves_through_the_bend() {
     let (w, h) = (220u32, 140u32);
     let line = |roundness| Shape {
         roundness,
@@ -4152,14 +4152,18 @@ fn a_rounded_line_cuts_the_sharp_corner_away() {
             &Overlay::default(),
             None,
         );
-        alpha(&buf, w, 100, 30)
+        buf
     };
     let sharp = draw(None);
     let round = draw(Some(2));
-    assert!(sharp > 0, "the sharp corner was not drawn");
+    let changed = sharp
+        .chunks(4)
+        .zip(round.chunks(4))
+        .filter(|(a, b)| a != b)
+        .count();
     assert!(
-        round < sharp,
-        "the rounded edge did not cut the sharp corner: {sharp} vs {round}"
+        changed > 20,
+        "the rounded path did not bend the segments: {changed} pixels changed"
     );
 }
 

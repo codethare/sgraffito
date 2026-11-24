@@ -111,52 +111,43 @@ pub fn line(from: [f32; 2], to: [f32; 2], width: f32, seed: u64) -> Vec<Seg> {
     segs
 }
 
-/// A polyline whose interior corners are cut back by a radius and joined with a quadratic bend,
-/// which is what Excalidraw's `roundness` calls a rounded edge. The vertices stay the stored points;
-/// only the painted path is rounded, so point editing keeps changing the same array.
+/// A smooth curve through all of a linear element's points, the same idea as Excalidraw's
+/// `generator.curve`: a Catmull-Rom spline is sampled into a freehand trace, so moving one vertex
+/// bends both neighbouring segments instead of leaving a straight corner. The stored vertices are
+/// never replaced by control points; they are the points the curve passes through.
 pub fn rounded_line(points: &[[f32; 2]], width: f32, seed: u64) -> Vec<Seg> {
     if points.len() < 2 {
         return Vec::new();
     }
-    let mut segs = Vec::with_capacity(points.len() * 6);
-    let mut cursor = points[0];
-    for index in 1..points.len() - 1 {
-        let previous = points[index - 1];
-        let vertex = points[index];
-        let next = points[index + 1];
-        let incoming = (vertex[0] - previous[0]).hypot(vertex[1] - previous[1]);
-        let outgoing = (next[0] - vertex[0]).hypot(next[1] - vertex[1]);
-        if incoming <= f32::EPSILON || outgoing <= f32::EPSILON {
-            continue;
-        }
-        let radius = (incoming.min(outgoing) * 0.25).min(width.max(1.0) * 80.0);
-        if radius < 0.5 {
-            segs.extend(line(cursor, vertex, width, seed ^ index as u64));
-            cursor = vertex;
-            continue;
-        }
-        let in_dir = [
-            (vertex[0] - previous[0]) / incoming,
-            (vertex[1] - previous[1]) / incoming,
-        ];
-        let out_dir = [
-            (next[0] - vertex[0]) / outgoing,
-            (next[1] - vertex[1]) / outgoing,
-        ];
-        let before = [
-            vertex[0] - in_dir[0] * radius,
-            vertex[1] - in_dir[1] * radius,
-        ];
-        let after = [
-            vertex[0] + out_dir[0] * radius,
-            vertex[1] + out_dir[1] * radius,
-        ];
-        segs.extend(line(cursor, before, width, seed ^ index as u64));
-        segs.push(Seg::Quad(vertex, after));
-        cursor = after;
+    if points.len() == 2 {
+        return line(points[0], points[1], width, seed);
     }
-    segs.extend(line(cursor, points[points.len() - 1], width, seed));
-    segs
+    let mut samples = Vec::new();
+    for index in 0..points.len() - 1 {
+        let p0 = points[index.saturating_sub(1)];
+        let p1 = points[index];
+        let p2 = points[index + 1];
+        let p3 = points[(index + 2).min(points.len() - 1)];
+        let length = (p2[0] - p1[0]).hypot(p2[1] - p1[1]);
+        let steps = ((length / 12.0).ceil() as usize).clamp(4, 32);
+        for step in 0..steps {
+            let t = step as f32 / steps as f32;
+            let t2 = t * t;
+            let t3 = t2 * t;
+            let at = |a: f32, b: f32, c: f32, d: f32| {
+                0.5 * (2.0 * b
+                    + (-a + c) * t
+                    + (2.0 * a - 5.0 * b + 4.0 * c - d) * t2
+                    + (-a + 3.0 * b - 3.0 * c + d) * t3)
+            };
+            samples.push([
+                at(p0[0], p1[0], p2[0], p3[0]),
+                at(p0[1], p1[1], p2[1], p3[1]),
+            ]);
+        }
+    }
+    samples.push(points[points.len() - 1]);
+    stroke(&samples, width, seed)
 }
 
 /// The per-trace salts, so trace two sees a different stream from trace one under the same seed.

@@ -727,7 +727,7 @@ impl App {
             alt: false,
             pending_duplicate: None,
             pending_links: Vec::new(),
-            roundness: false,
+            roundness: true,
             more: false,
             backdrop: Backdrop::Black,
             pan: None,
