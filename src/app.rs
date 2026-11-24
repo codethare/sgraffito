@@ -426,6 +426,8 @@ pub struct App {
     pub(crate) shared: bool,
     /// Whether the rail's boards panel is open. One panel at a time: opening it closes the drawer.
     pub(crate) boards_open: bool,
+    /// First board in the panel's fixed-height window. The list is unbounded; the wheel moves it.
+    pub(crate) board_scroll: usize,
     /// Whether the rail's width list is open. The readout toggles it; one at a time like the others.
     pub(crate) size_open: bool,
 
@@ -688,6 +690,7 @@ impl App {
             exit: false,
             shared: false,
             boards_open: false,
+            board_scroll: 0,
             size_open: false,
             target: None,
             colors_open: false,
@@ -959,6 +962,7 @@ impl App {
                             current: Some(name.as_str()) == board,
                         })
                         .collect(),
+                    board_scroll: self.board_scroll,
                     shared: self.shared,
                     backdrop: self.backdrop,
                     zoom: self.outputs.get(&key).map_or(1.0, |out| out.view.zoom),
@@ -1275,8 +1279,37 @@ impl App {
         }
     }
 
-    pub(crate) fn toggle_boards(&mut self) {
-        self.set_boards(!self.boards_open);
+    pub(crate) fn toggle_boards(&mut self, acting: Option<u32>) {
+        let open = !self.boards_open;
+        self.set_boards(open);
+        if open {
+            self.reveal_board_in_panel(acting);
+        }
+    }
+
+    /// Put the board on screen inside the panel's window when the panel opens. A long list that
+    /// always starts at the top would hide the board the current output is showing.
+    fn reveal_board_in_panel(&mut self, acting: Option<u32>) {
+        let key = acting
+            .or(self.keyboard_focus)
+            .or_else(|| self.outputs.keys().next().copied());
+        let Some(out) = key.and_then(|key| self.outputs.get(&key)) else {
+            return;
+        };
+        let Some(index) = self.doc.names().position(|name| name == &out.board) else {
+            return;
+        };
+        let visible = crate::render::board_visible_rows(out.height as f32);
+        if visible == 0 {
+            return;
+        }
+        let max = self.doc.boards.len().saturating_sub(visible);
+        let next = index.saturating_sub(visible / 2).min(max);
+        if next == self.board_scroll {
+            return;
+        }
+        self.board_scroll = next;
+        self.refresh_toolbar();
     }
 
     /// Open or close the width list. Unlike `set_boards` it keeps the hover: clearing it would make the
@@ -1365,7 +1398,13 @@ impl App {
             out.dirty = true;
             out.pending = None;
         }
+        let active_changed = self.doc.active != name;
         self.doc.active = name.to_string();
+        if active_changed {
+            // The picked board is what a screen connected after a restart shows, so a switch is
+            // content even though the drawings themselves did not change.
+            self.store.mark_dirty(Instant::now());
+        }
         self.dirty = true;
         log(&format!("board switched to {name}"));
         self.refresh_toolbar();
@@ -1479,6 +1518,7 @@ impl App {
             self.refresh_toolbar();
         } else {
             self.set_boards(true);
+            self.reveal_board_in_panel(acting);
         }
     }
 
@@ -1798,6 +1838,25 @@ impl App {
         let toolbar = out.overlay.toolbar.clone()?;
         let (width, height) = (out.width as f32, out.height as f32);
         self.renderer.toolbar_hit(&toolbar, width, height, x, y)
+    }
+
+    /// Move the boards panel's window by `steps` rows. The panel has a fixed height, so this is the
+    /// only way to reach a board past the visible rows; the document index in each row does not move.
+    pub(crate) fn scroll_board_panel(&mut self, key: &u32, steps: i32) {
+        let Some(out) = self.outputs.get(key) else {
+            return;
+        };
+        let visible = crate::render::board_visible_rows(out.height as f32);
+        if visible == 0 {
+            return;
+        }
+        let max = self.doc.boards.len().saturating_sub(visible);
+        let next = (self.board_scroll as i64 + i64::from(steps)).clamp(0, max as i64) as usize;
+        if next == self.board_scroll {
+            return;
+        }
+        self.board_scroll = next;
+        self.refresh_toolbar();
     }
 
     /// Whether a pointer position sits on the open colour card, gaps included.

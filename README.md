@@ -75,7 +75,7 @@ Every mark on the canvas is drawn as a **hand-drawn** one: a pen stroke is one s
 | `N` | sticky note: drag out the square to create one and start typing; click an existing one to write in it |
 | `M` | open the drawer of rarely used tools beside the rail, and close it again (it also closes when something in it is picked, the pointer leaves it, or `Esc` is pressed) |
 | `Shift`+`B` | switch the edit-mode backdrop off and on |
-| `C` | open the boards panel beside the rail: pick a board, create one, or delete the board this screen shows (it closes on a pick, on a press elsewhere, or on `Esc`) |
+| `C` | open the boards panel beside the rail: pick a board, create one, delete or rename the one under the pointer; with more boards than the panel's rows, the wheel or a two-finger scroll over the rows moves the window (it closes on a pick, on a press elsewhere, or on `Esc`) |
 | `d` / `r` / `n` while the boards panel is open | delete / rename the board this screen shows / create `Board N`; these are the list's own keys, not the diamond, rectangle or note tools |
 | `F` | switch between one board on every screen and one board per screen — the drawer's own row |
 | `1`–`5` | pick a colour |
@@ -212,24 +212,38 @@ Errors and state changes go to stderr and to `$XDG_STATE_HOME/sgraffito/sgraffit
 
 ## Data
 
-`$XDG_DATA_HOME/sgraffito/annotations.json` (default `~/.local/share/sgraffito/`):
+`$XDG_DATA_HOME/sgraffito/` (default `~/.local/share/sgraffito/`):
 
-```json
-{"version":6,
- "boards":{"office":{"strokes":[{"color":"#e01b24","width":3,"points":[[12,40],[14,44]],"attach":[null,null]}],
-  "texts":[{"x":100,"y":200,"color":"#ffffff","size":18,"text":"buy milk","link":"desk"}],
-  "shapes":[{"kind":"rect","color":"#3584e4","width":3,"from":[30,400],"to":[180,260],"rotate":0.4,"id":2,"attach":[null,null]},
-            {"kind":"arrow","color":"#3584e4","width":3,"from":[180,430],"to":[400,430],"id":3,"attach":[{"shape":2,"at":[1.0,0.0]},null]}]}},
- "active":"office"}
+```text
+annotations.json          the manifest: board names and the board picked last
+boards/
+  office.json             one board's drawing
+  desk.json
 ```
 
-A shape is a `kind` (`circle`, `rect`, `diamond`, `line` or `arrow`), its colour, its width and its two points — never its outline, and never a box. A closed shape may also carry `rotate`, in radians about its centre; upright shapes omit it. Closed shapes carry a stable board-local `id`; a line, arrow or pen's `attach` names the shapes its two ends stick to, with `at` the point on that shape (the centre is `(0, 0)` and its half-extents are `1`). A text's optional `link` is the board it jumps to; it is absent from files written before version 5. Versions 1 to 5 load as well: old shapes get fresh ids and no attachments, and a version 1–3 `outputs` map, keyed by output name, becomes boards of the same name. `active` is the board picked last — what a screen connected after a restart shows.
+The manifest is small and holds no drawing:
 
-Version 7 was the text-attachment build. This build reads it too: the extra stroke `id` and text `attach` fields are ignored and dropped on the next save, which writes version 6. A file newer than 7, older than 1, or unreadable is backed up rather than guessed at. If the main file is missing and a readable `.bak` remains, the backup is copied back into place on startup, so a rollback does not leave the boards in the backup while the program starts empty. If a main file already exists and the boards are still missing, stop the daemon and copy `annotations.json.bak` over `annotations.json`; version 7 now loads directly, without editing its `version`.
+```json
+{"version":8,"boards":["desk","office"],"active":"office"}
+```
+
+Each board record is independent:
+
+```json
+{"version":8,"name":"office",
+ "board":{"strokes":[{"color":"#e01b24","width":3,"points":[[12,40],[14,44]],"attach":[null,null]}],
+  "texts":[{"x":100,"y":200,"color":"#ffffff","size":18,"text":"buy milk","link":"desk"}],
+  "shapes":[{"kind":"rect","color":"#3584e4","width":3,"from":[30,400],"to":[180,260],"rotate":0.4,"id":2,"attach":[null,null]},
+            {"kind":"arrow","color":"#3584e4","width":3,"from":[180,430],"to":[400,430],"id":3,"attach":[{"shape":2,"at":[1.0,0.0]},null]}]}}
+```
+
+A board name is percent-encoded in its file name where it is not a safe path component, so `a/b` cannot become a directory. A shape is a `kind` (`circle`, `rect`, `diamond`, `line` or `arrow`), its colour, its width and its two points — never its outline, and never a box. A closed shape may also carry `rotate`, in radians about its centre; upright shapes omit it. Closed shapes carry a stable board-local `id`; a line, arrow or pen's `attach` names the shapes its two ends stick to, with `at` the point on that shape (the centre is `(0, 0)` and its half-extents are `1`). A text's optional `link` is the board it jumps to; it is absent from files written before version 5. Versions 1 to 7 load as well: old shapes get fresh ids and no attachments, a version 1–3 `outputs` map becomes boards of the same name, and the first load splits the old single file into one record per board. `active` is the board picked last — what a screen connected after a restart shows.
+
+The number of boards is not limited. Adding, deleting or renaming one does not rewrite the other boards' records, and a board past the rail panel's visible rows is reached by scrolling the open panel with the wheel. A version-8 manifest is backed up and recovered from its board records if it is missing or corrupt; a damaged board record is backed up and that board starts empty. A manifest newer than 8, older than 1, or unreadable is backed up rather than guessed at. If the manifest is missing and a readable `.bak` remains, the backup is copied back into place on startup.
 
 - Coordinates are **canvas coordinates** — the canvas is unbounded and a board is one canvas — and annotations are bucketed by **board name**, not by output.
-- Changes land on disk within 1 second at most, written through a temp file in the same directory plus `rename`; `clear` and shutdown flush immediately. If a write fails, the change stays pending and the daemon retries without dropping the in-memory annotations.
-- A corrupt file or an unsupported version is renamed to `annotations.json.bak` and the daemon starts with no annotations.
+- Changes land on disk within 1 second at most, written through a temp file in the same directory plus `rename`; `clear` and shutdown flush immediately. Only board records whose contents changed are rewritten. If a write fails, the change stays pending and the daemon retries without dropping the in-memory annotations.
+- A corrupt manifest is renamed to `annotations.json.bak`; the daemon recovers the boards from `boards/` and writes a fresh manifest on the next save. A corrupt board record is renamed to `<record>.bak` and that board stays in the document, empty.
 - A board outlives the output that showed it: closing an output changes nothing, whatever was drawn on the board is still there, and the next output to appear adopts the board picked last.
 
 ## Configuration
@@ -276,7 +290,7 @@ The file is read once when the daemon starts.
 - The toolbar is part of the full-screen edit overlay, not a surface of its own, so it cannot respect another layer surface's exclusive zone: a compositor bar or dock that occupies the edge the rail is docked to, or the optical-centre band, is covered by it while editing. Its edge comes from `toolbar` in the configuration file; it cannot be dragged.
 - A block shows an icon of what it does and says what it does only while the pointer is on it, so a first-time user learns the rail by hovering, or from this README's key table. Each block's text ends with its key, and that is the only place a key appears: when a block's text does not fit the room reserved for the rail, the block stays a square showing its icon and no text, and its key is then only in this README. The longest text is `text: click to place (T)`, about 177 logical pixels of capsule, which fits the 320-pixel reserve on any output at least 336 pixels wide.
 - A drawer shows the rows that fit the output. A very short screen folds almost the whole rail into it, and a panel taller than the screen would be rows nobody could click or read, so the rows nearest the `more` block are kept and the rest stay on their keys — a folded control never loses its key.
-- A board can be created, picked, renamed and deleted. A delete is final — there is no undo behind it, and the button sits on the row of the board it removes, so a slip removes that board with everything drawn on it. A name is refused when it is empty or another board already has it: the board keeps the name it had. The last board cannot be deleted, because a document with no boards is nowhere to draw; the panel lists eight boards and `sgraffito boards` lists them all, because the panel is drawn inside a fixed damage box.
+- A board can be created, picked, renamed and deleted. A delete is final — there is no undo behind it, and the button sits on the row of the board it removes, so a slip removes that board with everything drawn on it. A name is refused when it is empty or another board already has it: the board keeps the name it had. The last board cannot be deleted, because a document with no boards is nowhere to draw; there is no maximum number of boards. The panel's window is fixed to the rail's height, and the wheel over its rows scrolls to the rest; `sgraffito boards` always lists them all.
 - Which board a screen shows is not saved, only which board was picked last: after a restart every screen starts on that board, so a per-screen setup has to be picked again. With the screens sharing one board there is nothing to pick again.
 - The rail is only as tall as the output it is drawn on: the palette, the tools and the size keys fill from the top, `boards`, `more` and `Esc` always stay at its foot, and every control that does not fit is a row of the drawer instead — so a short output loses no control, at the price of the tools it cannot show being one click (or one key) away. There is no scrolling rail. The rail sits on a black plate at 90% opacity, so it reads as one control over any wallpaper: the plate is the block column plus 6 pt on every side, and a block stretched into a capsule is wider than the plate, so a capsule reaches out over the wallpaper by design.
 - The hand-drawn style is fixed: there is no roughness setting, no way to switch it off, and no clean-line mode. It is not a configuration option either, so a drawing made before the style existed opens in it.

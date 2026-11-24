@@ -263,6 +263,7 @@ fn rail_state() -> Toolbar {
         rename: None,
         delete_confirm: None,
         boards: Vec::new(),
+        board_scroll: 0,
         shared: false,
         backdrop: Backdrop::Black,
         zoom: 1.0,

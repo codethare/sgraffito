@@ -228,13 +228,15 @@ python3 -c "assert abs(${last%,*} - $x) <= 2 and abs(${last#*,} - $y) <= 2, 'the
 "$bin" boards > "$work/boards.txt" || fail "boards command failed"
 grep -q 'two' "$work/boards.txt" && fail "the deleted board is still listed: $(cat "$work/boards.txt")"
 grep -q 'one' "$work/boards.txt" || fail "the surviving board is gone: $(cat "$work/boards.txt")"
-grep -q '"two"' "$XDG_DATA_HOME/sgraffito/annotations.json" && fail "the deleted board is still in the file"
 grep -q 'board deleted: two' "$work/daemon.log" || fail "the daemon never logged the deletion"
 
-python3 - "$XDG_DATA_HOME/sgraffito/annotations.json" <<'PY'
-import json, sys
-d = json.load(open(sys.argv[1]))
-assert list(d['boards']) == ['one'], d['boards']
+python3 - "$XDG_DATA_HOME/sgraffito" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+d = json.load(open(root / 'annotations.json'))
+assert d['boards'] == ['one'], d['boards']
 assert d['active'] == 'one', d['active']
+records = [json.load(open(p)) for p in (root / 'boards').glob('*.json')]
+assert [r['name'] for r in records] == ['one'], records
 PY
 echo "PASS: windhover warped onto the delete row, clicked it, and the board left the document and the file"

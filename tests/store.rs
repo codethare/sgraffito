@@ -14,6 +14,40 @@ fn tmpdir(tag: &str) -> PathBuf {
     d
 }
 
+/// The board record with `name`, wherever its encoded file name put it.
+fn board_record(dir: &Path, name: &str) -> serde_json::Value {
+    let boards = dir.join("boards");
+    let mut names: Vec<String> = std::fs::read_dir(&boards)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    for file in names {
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(boards.join(&file)).unwrap()).unwrap();
+        if value["name"] == name {
+            return value;
+        }
+    }
+    panic!("{name:?} has no board record in {boards:?}");
+}
+
+fn board_records(dir: &Path) -> Vec<serde_json::Value> {
+    let boards = dir.join("boards");
+    let mut names: Vec<String> = std::fs::read_dir(&boards)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".json"))
+        .collect();
+    names.sort();
+    names
+        .into_iter()
+        .map(|file| {
+            serde_json::from_str(&std::fs::read_to_string(boards.join(file)).unwrap()).unwrap()
+        })
+        .collect()
+}
+
 fn sample() -> Doc {
     let mut doc = Doc::default();
     doc.boards.insert(
@@ -79,19 +113,28 @@ fn round_trip_preserves_everything() {
 }
 
 #[test]
-fn saved_file_has_version_boards_and_the_picked_one() {
+fn the_manifest_names_the_boards_and_the_record_holds_one() {
     let dir = tmpdir("schema");
     let p = dir.join("annotations.json");
     let mut doc = sample();
     doc.active = "eDP-1".into();
     store::save(&p, &doc).unwrap();
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-    assert_eq!(v["version"], 6);
+    assert_eq!(v["version"], 8);
     assert_eq!(v["active"], "eDP-1");
-    assert_eq!(v["boards"]["eDP-1"]["strokes"][0]["points"][0][0], 12.0);
-    assert_eq!(v["boards"]["eDP-1"]["texts"][0]["text"], "买牛奶"); // CJK survives the round trip
+    assert_eq!(v["boards"], serde_json::json!(["eDP-1"]));
+    assert!(
+        v["boards"]["eDP-1"].is_null(),
+        "the manifest must not carry the drawing"
+    );
+
+    let record = board_record(&dir, "eDP-1");
+    assert_eq!(record["version"], 8);
+    let board = &record["board"];
+    assert_eq!(board["strokes"][0]["points"][0][0], 12.0);
+    assert_eq!(board["texts"][0]["text"], "买牛奶"); // CJK survives the round trip
     // A shape is two points and a kind, however large it would be drawn: no samples, no box.
-    let shape = &v["boards"]["eDP-1"]["shapes"][0];
+    let shape = &board["shapes"][0];
     assert_eq!(shape["kind"], "arrow");
     assert_eq!(shape["from"], serde_json::json!([30.0, 400.0]));
     assert_eq!(shape["to"], serde_json::json!([180.0, 260.0]));
@@ -99,6 +142,85 @@ fn saved_file_has_version_boards_and_the_picked_one() {
         shape.as_object().unwrap().len(),
         7,
         "kind, color, width, from, to, id, attach"
+    );
+}
+
+/// Every board has its own record, so one board's save cannot rewrite another board's drawing.
+#[test]
+fn each_board_has_its_own_file() {
+    let dir = tmpdir("one-file-per-board");
+    let p = dir.join("annotations.json");
+    let mut doc = sample();
+    doc.boards.insert("second".into(), Board::default());
+    doc.active = "second".into();
+    store::save(&p, &doc).unwrap();
+
+    let records = board_records(&dir);
+    assert_eq!(records.len(), 2);
+    assert!(
+        records.iter().any(|record| record["name"] == "eDP-1"),
+        "the first board has no record"
+    );
+    assert!(
+        records.iter().any(|record| record["name"] == "second"),
+        "the second board has no record"
+    );
+    assert_eq!(store::load(&p), doc);
+}
+
+/// There is no board-count ceiling: every board gets its own record and the manifest lists them all.
+#[test]
+fn many_boards_round_trip_through_their_own_files() {
+    let dir = tmpdir("many-boards");
+    let p = dir.join("annotations.json");
+    let mut doc = Doc::default();
+    for i in 0..64 {
+        doc.boards.insert(format!("board {i}"), Board::default());
+    }
+    doc.active = "board 42".into();
+    store::save(&p, &doc).unwrap();
+    assert_eq!(board_records(&dir).len(), 64);
+    let back = store::load(&p);
+    assert_eq!(back.boards.len(), 64);
+    assert_eq!(back.active, "board 42");
+}
+
+/// A board that is renamed or deleted loses its old record; a new board gains one.
+#[test]
+fn board_records_follow_rename_and_deletion() {
+    let dir = tmpdir("board-records-move");
+    let p = dir.join("annotations.json");
+    let mut doc = sample();
+    doc.boards.insert("second".into(), Board::default());
+    store::save(&p, &doc).unwrap();
+    assert_eq!(board_records(&dir).len(), 2);
+
+    assert!(doc.rename_board("second", "renamed"));
+    doc.delete_board("eDP-1").unwrap();
+    store::save(&p, &doc).unwrap();
+    let records = board_records(&dir);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["name"], "renamed");
+    assert_eq!(store::load(&p), doc);
+}
+
+/// A board name may contain path separators and non-ASCII text; its file name is encoded, not
+/// interpreted as a directory.
+#[test]
+fn a_board_name_is_safe_as_a_file_name() {
+    let dir = tmpdir("board-name");
+    let p = dir.join("annotations.json");
+    let name = "a/b % 你好";
+    let mut doc = Doc::default();
+    doc.boards.insert(name.into(), Board::default());
+    doc.active = name.into();
+    store::save(&p, &doc).unwrap();
+    assert_eq!(store::load(&p).boards[name].strokes.len(), 0);
+    assert_eq!(board_records(&dir)[0]["name"], name);
+    assert_eq!(
+        std::fs::read_dir(dir.join("boards")).unwrap().count(),
+        1,
+        "the encoded name created more than one record"
     );
 }
 
@@ -142,8 +264,7 @@ fn a_turned_shape_survives_the_round_trip_and_an_old_file_loads_upright() {
     doc.boards.get_mut("eDP-1").unwrap().shapes[0].rotate = angle;
     store::save(&p, &doc).unwrap();
 
-    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-    let saved = v["boards"]["eDP-1"]["shapes"][0]["rotate"]
+    let saved = board_record(&dir, "eDP-1")["board"]["shapes"][0]["rotate"]
         .as_f64()
         .unwrap();
     assert!((saved as f32 - angle).abs() < 1e-6, "the angle is written");
@@ -181,6 +302,31 @@ fn corrupt_file_is_backed_up_and_starts_empty() {
     );
 }
 
+/// The manifest is only an index. Losing it must not lose the board records beside it.
+#[test]
+fn a_corrupt_manifest_recovers_the_board_records() {
+    let dir = tmpdir("recover-manifest");
+    let p = dir.join("annotations.json");
+    let doc = sample();
+    store::save(&p, &doc).unwrap();
+    std::fs::write(&p, "{ not json").unwrap();
+    let recovered = store::load(&p);
+    assert_eq!(recovered.boards, doc.boards);
+    assert!(dir.join("annotations.json.bak").exists());
+}
+
+#[test]
+fn a_missing_manifest_recovers_the_board_records() {
+    let dir = tmpdir("recover-missing-manifest");
+    let p = dir.join("annotations.json");
+    let doc = sample();
+    store::save(&p, &doc).unwrap();
+    std::fs::remove_file(&p).unwrap();
+    let recovered = store::load(&p);
+    assert_eq!(recovered.boards, doc.boards);
+    assert_eq!(recovered.active, "", "no index means no picked board");
+}
+
 #[test]
 fn unsupported_version_is_backed_up() {
     let dir = tmpdir("version");
@@ -196,11 +342,20 @@ fn save_leaves_no_temp_files_and_is_repeatable() {
     let p = dir.join("annotations.json");
     store::save(&p, &sample()).unwrap();
     store::save(&p, &Doc::default()).unwrap();
-    let names: Vec<_> = std::fs::read_dir(&dir)
+    let mut names: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(names, vec!["annotations.json".to_string()]);
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["annotations.json".to_string(), "boards".to_string()]
+    );
+    assert_eq!(
+        std::fs::read_dir(dir.join("boards")).unwrap().count(),
+        0,
+        "the removed board's record survived"
+    );
     assert_eq!(store::load(&p), Doc::default());
 }
 
@@ -323,11 +478,12 @@ fn a_version_3_file_becomes_boards() {
     );
     assert_eq!(doc.adopt("DP-2"), "DP-2", "each screen keeps its own board");
 
-    // The next save is the current version.
-    store::save(&p, &doc).unwrap();
+    // Loading an old single file already splits it into one board record per board.
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-    assert_eq!(v["version"], 6);
-    assert!(v["boards"]["eDP-1"].is_object());
+    assert_eq!(v["version"], 8);
+    assert_eq!(v["boards"], serde_json::json!(["DP-2", "eDP-1"]));
+    assert!(board_record(&dir, "eDP-1")["board"].is_object());
+    assert!(board_record(&dir, "DP-2")["board"].is_object());
 }
 
 /// Which board was picked is content of the file: it is what a screen connected tomorrow lands on.
@@ -680,7 +836,7 @@ fn a_version_4_file_loads_and_a_link_survives_the_round_trip() {
     store::save(&p, &doc).unwrap();
     let saved: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-    assert_eq!(saved["version"], 6);
+    assert_eq!(saved["version"], 8);
     assert_eq!(store::load(&p).boards["a"].texts[0].link, Some("b".into()));
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -844,7 +1000,7 @@ fn connector_attachments_survive_the_round_trip() {
 }
 
 #[test]
-fn a_version_seven_file_loads_and_is_saved_back_as_six() {
+fn a_version_seven_file_loads_and_is_saved_back_as_eight() {
     let dir = tmpdir("version-seven");
     let p = dir.join("annotations.json");
     std::fs::write(
@@ -862,16 +1018,17 @@ fn a_version_seven_file_loads_and_is_saved_back_as_six() {
 
     store::save(&p, &doc).unwrap();
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-    assert_eq!(v["version"], 6);
+    assert_eq!(v["version"], 8);
+    let board = &board_record(&dir, "kept")["board"];
     assert!(
-        v["boards"]["kept"]["strokes"][0].get("id").is_none(),
+        board["strokes"][0].get("id").is_none(),
         "the removed stroke id survived the downgrade"
     );
     assert!(
-        v["boards"]["kept"]["texts"][0].get("attach").is_none(),
+        board["texts"][0].get("attach").is_none(),
         "the removed text attachment survived the downgrade"
     );
-    assert_eq!(v["boards"]["kept"]["texts"][0]["text"], "kept");
+    assert_eq!(board["texts"][0]["text"], "kept");
 }
 
 #[test]

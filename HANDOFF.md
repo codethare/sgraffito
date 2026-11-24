@@ -535,10 +535,10 @@ no capabilities until a device exists.
   would mirror the selection is clamped instead, because a mirrored text box cannot be drawn.
 - The frame and the marquee are drawn in `TOOLBAR_ACCENT` as hairlines and capsules, with no fill of
   their own, so the interface gained no third shape or colour.
-- The boards panel lists at most eight boards (`MAX_BOARD_ROWS`), because it is drawn inside the rail's
-  fixed damage box; past eight, `sgraffito boards` still lists them all and `sgraffito board <name>`
-  still reaches them. The board on screen can therefore fall outside the cap and the panel then states no
-  current board. Board names are also not editable or removable.
+- The boards panel is a fixed-height window over an unbounded board list; the wheel over its rows scrolls
+  the window, and `new board` keeps the row level with the rail block. Each board is a separate record
+  under `boards/`, so a name or a board can be changed without rewriting the others. `sgraffito boards`
+  and `sgraffito board <name>` remain the locked-mode ways to list and pick one.
 - While editing, the desktop is nearly hidden: the scrim is 90% opaque black, which is the point
   (the annotations are what to read) and is one constant if it ever reads as too much. It is also why
   the smoke test cannot see it — that run has no wallpaper client, so its backdrop is already black.

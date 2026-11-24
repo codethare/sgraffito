@@ -836,10 +836,11 @@ pub const DRAWER: [ToolbarAction; 5] = [
     ToolbarAction::Round,
 ];
 
-/// How many boards the panel lists before the rest are only reachable from the command line. The rail
-/// declares a fixed box for damage accounting and a frame that repaints only the rail has to repaint the
-/// whole panel inside it, so the panel cannot grow with the document.
-pub const MAX_BOARD_ROWS: usize = 8;
+/// The number of board rows the boards panel can show on an output of this height. One row is kept
+/// for `new board`, so a long list is a window instead of a row that runs off the output.
+pub fn board_visible_rows(surface: f32) -> usize {
+    panel_room(surface).saturating_sub(1)
+}
 
 /// The panel that is open, and the block that opened it: one panel at a time, so one owner and one list.
 fn open_panel(
@@ -848,7 +849,7 @@ fn open_panel(
     room: usize,
 ) -> Option<(ToolbarAction, Vec<Block>)> {
     let rows = if toolbar.boards_open {
-        Some((ToolbarAction::Boards, board_rows(toolbar)))
+        Some((ToolbarAction::Boards, board_rows(toolbar, room)))
     } else if toolbar.size_open {
         Some((ToolbarAction::Size, size_rows(toolbar)))
     } else if toolbar.more {
@@ -857,9 +858,11 @@ fn open_panel(
         None
     };
     rows.map(|(owner, mut rows)| {
-        // The rows nearest the block are the ones worth keeping: the row level with it is the last when the
-        // panel grows up and the first when it grows down, so the tail is what goes.
-        rows.truncate(room.max(1));
+        // A board list is already a window sized to the panel; truncating it would drop `new board`.
+        // The other panels keep the rows nearest their block and leave the rest on their keys.
+        if owner != ToolbarAction::Boards {
+            rows.truncate(room.max(1));
+        }
         (owner, rows)
     })
 }
@@ -1048,15 +1051,21 @@ fn board_actions(toolbar: &Toolbar, index: usize) -> Option<(bool, bool)> {
     on_it.then_some((toolbar.boards.len() > 1, true))
 }
 
-/// The boards panel's rows: one per board stating its name, the board this output shows accent-filled,
-/// then `new board` and `delete <name>`. A board row says its name and no key: every one of them is
-/// picked from the list the `boards` block opened, so a key on the row would repeat the block's own.
-fn board_rows(toolbar: &Toolbar) -> Vec<Block> {
+/// The boards panel's rows: a window of boards stating their names, the board this output shows
+/// accent-filled, then `new board`. A board row says its name and no key: every one of them is picked
+/// from the list the `boards` block opened, so a key on the row would repeat the block's own. The
+/// window keeps the full document index in each action, so a scroll never changes what a row means.
+fn board_rows(toolbar: &Toolbar, room: usize) -> Vec<Block> {
+    let visible = room.saturating_sub(1);
+    let start = toolbar
+        .board_scroll
+        .min(toolbar.boards.len().saturating_sub(visible));
     let mut rows: Vec<Block> = toolbar
         .boards
         .iter()
-        .take(MAX_BOARD_ROWS)
         .enumerate()
+        .skip(start)
+        .take(visible)
         .map(|(index, board)| Block {
             mark: Mark::None,
             column: 1,
@@ -4417,6 +4426,7 @@ fn same_layout(a: &Toolbar, b: &Toolbar) -> bool {
         && a.delete_confirm == b.delete_confirm
         && a.colors_open == b.colors_open
         && a.boards == b.boards
+        && a.board_scroll == b.board_scroll
         && a.shared == b.shared
         && a.backdrop == b.backdrop
 }
@@ -6873,29 +6883,54 @@ mod tests {
         );
     }
 
-    /// The panel lists at most what the rail's box can hold, and always the row that creates a board:
-    /// the damage box is fixed, so a document with a hundred boards cannot grow the panel past it.
+    /// The panel is a window over an unbounded list: it shows the rows the rail can hold, keeps one
+    /// row for `new board`, and leaves the rest reachable by scrolling.
     #[test]
-    fn the_boards_panel_is_capped() {
+    fn the_boards_panel_windows_a_long_list() {
         let toolbar = Toolbar {
             boards_open: true,
-            boards: (0..MAX_BOARD_ROWS + 4)
+            board_scroll: 3,
+            boards: (0..20)
                 .map(|i| crate::canvas::BoardRow {
                     name: format!("board {i}"),
-                    current: i == 0,
+                    current: i == 3,
                 })
                 .collect(),
             ..crate::render::tests::rail_for_legend()
         };
-        let rows = board_rows(&toolbar);
-        assert_eq!(rows.len(), MAX_BOARD_ROWS + 1);
+        let rows = board_rows(&toolbar, 6);
+        assert_eq!(
+            rows.len(),
+            6,
+            "five board rows and the row that creates one"
+        );
+        assert_eq!(rows[0].action, Some(ToolbarAction::Board(3)));
+        assert_eq!(rows[4].action, Some(ToolbarAction::Board(7)));
         assert_eq!(
             rows.last().and_then(|row| row.action),
             Some(ToolbarAction::NewBoard),
             "the row that creates a board is the last one, so it is the row level with the block"
         );
-        assert_eq!(rows[0].action, Some(ToolbarAction::Board(0)));
         assert!(rows[0].active, "the board on screen is marked");
+    }
+
+    /// The last window starts at the last full page, not past the end of the list.
+    #[test]
+    fn the_boards_panel_stops_at_a_full_last_page() {
+        let toolbar = Toolbar {
+            boards_open: true,
+            board_scroll: 999,
+            boards: (0..10)
+                .map(|i| crate::canvas::BoardRow {
+                    name: format!("board {i}"),
+                    current: false,
+                })
+                .collect(),
+            ..crate::render::tests::rail_for_legend()
+        };
+        let rows = board_rows(&toolbar, 5);
+        assert_eq!(rows[0].action, Some(ToolbarAction::Board(6)));
+        assert_eq!(rows[3].action, Some(ToolbarAction::Board(9)));
     }
 
     /// A board's row shows its two buttons only while the pointer is on the row or on one of them: the
@@ -7019,7 +7054,7 @@ mod tests {
             delete_confirm: Some("laptop".into()),
             ..crate::render::tests::rail_for_legend()
         };
-        let rows = board_rows(&toolbar);
+        let rows = board_rows(&toolbar, 8);
         assert_eq!(rows[0].label, "delete laptop?");
         assert_eq!(rows[0].action, Some(ToolbarAction::Board(0)));
         assert_eq!(board_actions(&toolbar, 0), Some((true, true)));
@@ -7064,7 +7099,7 @@ mod tests {
             }],
             ..crate::render::tests::rail_for_legend()
         };
-        let row = board_rows(&toolbar)
+        let row = board_rows(&toolbar, 8)
             .into_iter()
             .find(|row| row.action == Some(ToolbarAction::Board(0)))
             .expect("no row for the first board");
@@ -7183,6 +7218,14 @@ mod tests {
             !same_layout(&rail("office", true), &rail("office", false)),
             "a shut panel reused the open one's layout"
         );
+        let scrolled = Toolbar {
+            board_scroll: 1,
+            ..rail("office", true)
+        };
+        assert!(
+            !same_layout(&rail("office", true), &scrolled),
+            "a scrolled board window reused the previous rows"
+        );
     }
 
     /// The rail is as tall as the controls that fit: the palette, the tools and the size group fill from the
@@ -7248,7 +7291,7 @@ mod tests {
             }],
             ..crate::render::tests::rail_for_legend()
         };
-        let rows = board_rows(&toolbar);
+        let rows = board_rows(&toolbar, 8);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].mark, Mark::None, "a board row draws an icon");
         assert_eq!(
@@ -7343,6 +7386,7 @@ mod tests {
             rename: None,
             delete_confirm: None,
             boards: Vec::new(),
+            board_scroll: 0,
             shared: false,
             backdrop: Backdrop::Black,
             zoom: 1.0,
@@ -7645,6 +7689,7 @@ mod tests {
                 rename: None,
                 delete_confirm: None,
                 boards: Vec::new(),
+                board_scroll: 0,
                 shared: false,
                 backdrop: Backdrop::Black,
                 zoom: 1.0,
@@ -8002,6 +8047,7 @@ mod tests {
             rename: None,
             delete_confirm: None,
             boards: Vec::new(),
+            board_scroll: 0,
             shared: false,
             backdrop: Backdrop::Black,
             zoom: 1.0,

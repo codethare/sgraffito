@@ -49,6 +49,7 @@ fn config_paints_the_palette_and_the_note_border() {
             rename: None,
             delete_confirm: None,
             boards: Vec::new(),
+            board_scroll: 0,
             shared: false,
             backdrop: sgraffito::canvas::Backdrop::Black,
             zoom: 1.0,

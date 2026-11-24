@@ -169,6 +169,20 @@ pub fn axis_intent(source: Option<AxisSource>) -> AxisIntent {
     }
 }
 
+/// One wheel event's board-list rows, with the direction the wheel reports: one row per event is
+/// deliberate, so a high-resolution wheel cannot jump past the board the user is aiming at.
+fn board_scroll_steps(vertical: AxisScroll) -> Option<i32> {
+    if vertical.value120 != 0 {
+        Some(vertical.value120.signum())
+    } else if vertical.discrete != 0 {
+        Some(vertical.discrete.signum())
+    } else if vertical.absolute != 0.0 {
+        Some(vertical.absolute.signum() as i32)
+    } else {
+        None
+    }
+}
+
 /// The zoom factor one axis event asks for: a wheel notch is exactly one step, and a high-resolution
 /// wheel is the same step to that fraction of a notch.
 pub fn zoom_factor(vertical: AxisScroll, horizontal: AxisScroll) -> f32 {
@@ -934,6 +948,28 @@ impl App {
         vertical: AxisScroll,
         source: Option<AxisSource>,
     ) {
+        // A wheel over the boards panel scrolls its fixed-height window. The panel has no room to
+        // grow with the document, so this is how a board past the visible rows is reached. At the
+        // ends the wheel is still consumed, rather than zooming the canvas behind the panel.
+        if self.mode == Mode::Edit
+            && self.boards_open
+            && matches!(axis_intent(source), AxisIntent::Pan | AxisIntent::Zoom)
+            && let Some(steps) = board_scroll_steps(vertical)
+            && self.toolbar_hit(&key, at[0], at[1]).is_some_and(|action| {
+                matches!(
+                    action,
+                    ToolbarAction::Board(_)
+                        | ToolbarAction::AskDeleteBoard(_)
+                        | ToolbarAction::DeleteBoard(_)
+                        | ToolbarAction::RenameBoard(_)
+                        | ToolbarAction::CancelDeleteBoard
+                        | ToolbarAction::NewBoard
+                )
+            })
+        {
+            self.scroll_board_panel(&key, steps);
+            return;
+        }
         match axis_intent(source) {
             AxisIntent::Pan => {
                 // 1:1 with the axis value, in the direction the compositor's own natural-scrolling
@@ -1268,7 +1304,7 @@ impl App {
             }
             ToolbarAction::Scrim => self.cycle_backdrop(),
             ToolbarAction::Backdrop(mode) => self.set_backdrop(mode),
-            ToolbarAction::Boards => self.toggle_boards(),
+            ToolbarAction::Boards => self.toggle_boards(acting),
             ToolbarAction::Shared => self.toggle_shared(),
             ToolbarAction::Link => self.open_target(acting, Target::Link),
             ToolbarAction::Round => self.toggle_roundness(acting),

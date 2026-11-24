@@ -3924,6 +3924,9 @@ pub struct Toolbar {
     /// rail's own value because the panel's rows are document names: the layout, the hit test and the
     /// cache all read one value rather than three functions taking the list beside the rail.
     pub boards: Vec<BoardRow>,
+    /// The first board the panel shows. The panel has a fixed height, so a long board list is a
+    /// window that the wheel moves rather than a list that runs off the output.
+    pub board_scroll: usize,
     /// Whether every screen shows the board picked on any of them.
     pub shared: bool,
     /// What edit mode paints behind the document.
