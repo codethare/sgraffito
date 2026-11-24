@@ -268,7 +268,7 @@ fn key_of(action: ToolbarAction) -> Option<&'static str> {
     Some(match action {
         ToolbarAction::Tool(tool) => tool.key(),
         ToolbarAction::More => "M",
-        ToolbarAction::Scrim => "B",
+        ToolbarAction::Scrim => "Shift+B",
         // The panel's own rows are picks out of the list the block opens, so they name that block's key.
         ToolbarAction::Boards
         | ToolbarAction::Board(_)
@@ -8201,7 +8201,8 @@ mod tests {
             "Esc" => Some(Keysym::Escape),
             "P" => Some(Keysym::P),
             "E" => Some(Keysym::E),
-            "G" => Some(Keysym::G),
+            "B" => Some(Keysym::B),
+            "Shift+B" => Some(Keysym::B),
             "T" => Some(Keysym::T),
             "V" => Some(Keysym::V),
             "O" => Some(Keysym::O),
@@ -8243,6 +8244,7 @@ mod tests {
             );
             stated += 1;
             let keysym = keysym_of(key).unwrap_or_else(|| panic!("'{key}' is not a key we draw"));
+            let shift = key == "Shift+B";
             let applies = match action {
                 ToolbarAction::Tool(tool) => tool_for_keysym(keysym) == Some(tool),
                 ToolbarAction::Color(index) => color_for_keysym(keysym) == Some(index),
@@ -8250,15 +8252,17 @@ mod tests {
                     size_step_for_keysym(keysym).is_some_and(|step| step == dir)
                 }
                 ToolbarAction::Lock => keysym == Keysym::Escape,
-                ToolbarAction::More => panel_action_for_keysym(keysym) == Some(ToolbarAction::More),
+                ToolbarAction::More => {
+                    panel_action_for_keysym(keysym, shift) == Some(ToolbarAction::More)
+                }
                 ToolbarAction::Scrim => {
-                    panel_action_for_keysym(keysym) == Some(ToolbarAction::Scrim)
+                    panel_action_for_keysym(keysym, shift) == Some(ToolbarAction::Scrim)
                 }
                 ToolbarAction::Boards => {
-                    panel_action_for_keysym(keysym) == Some(ToolbarAction::Boards)
+                    panel_action_for_keysym(keysym, shift) == Some(ToolbarAction::Boards)
                 }
                 ToolbarAction::Shared => {
-                    panel_action_for_keysym(keysym) == Some(ToolbarAction::Shared)
+                    panel_action_for_keysym(keysym, shift) == Some(ToolbarAction::Shared)
                 }
                 // A row of the boards panel states its name and no key: it is picked from the list the
                 // `boards` block opened, and that block carries the key.

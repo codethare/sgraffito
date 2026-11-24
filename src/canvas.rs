@@ -287,7 +287,7 @@ impl Tool {
         match self {
             Tool::Pen => "P",
             Tool::Eraser => "E",
-            Tool::Bucket => "G",
+            Tool::Bucket => "B",
             Tool::Text => "T",
             Tool::Selection => "V",
             Tool::Circle => "O",

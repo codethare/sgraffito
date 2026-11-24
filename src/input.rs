@@ -220,7 +220,7 @@ pub fn tool_for_keysym(keysym: Keysym) -> Option<Tool> {
     match keysym {
         Keysym::p | Keysym::P => Some(Tool::Pen),
         Keysym::e | Keysym::E => Some(Tool::Eraser),
-        Keysym::g | Keysym::G => Some(Tool::Bucket),
+        Keysym::b | Keysym::B => Some(Tool::Bucket),
         Keysym::t | Keysym::T => Some(Tool::Text),
         Keysym::v | Keysym::V => Some(Tool::Selection),
         Keysym::o | Keysym::O => Some(Tool::Circle),
@@ -234,13 +234,13 @@ pub fn tool_for_keysym(keysym: Keysym) -> Option<Tool> {
     }
 }
 
-/// `M` opens and closes the drawer, `B` switches the backdrop, `C` the boards panel and `F` the mode in
-/// which the screens share one board. Mapped like the other keys, so a control in a panel teaches its key
-/// exactly as a rail block does.
-pub fn panel_action_for_keysym(keysym: Keysym) -> Option<ToolbarAction> {
+/// `M` opens and closes the drawer, `Shift+B` switches the backdrop, `C` the boards panel and `F` the
+/// mode in which the screens share one board. `B` alone arms the bucket, matching Excalidraw. Mapped
+/// like the other keys, so a control in a panel teaches its key exactly as a rail block does.
+pub fn panel_action_for_keysym(keysym: Keysym, shift: bool) -> Option<ToolbarAction> {
     match keysym {
         Keysym::m | Keysym::M => Some(ToolbarAction::More),
-        Keysym::b | Keysym::B => Some(ToolbarAction::Scrim),
+        Keysym::b | Keysym::B if shift => Some(ToolbarAction::Scrim),
         Keysym::c | Keysym::C => Some(ToolbarAction::Boards),
         Keysym::f | Keysym::F => Some(ToolbarAction::Shared),
         _ => None,
@@ -488,6 +488,11 @@ impl KeyboardHandler for App {
             // The only key that removes content. It acts on the selection, so with nothing selected
             // it does nothing.
             self.delete_selection();
+        } else if let Some(action) = panel_action_for_keysym(event.keysym, self.shift) {
+            // A key acts on the output the compositor gave the keyboard to, the same output the canvas
+            // keys move and the rail's clicks land on. Panel keys are tested before the tool keys
+            // because `Shift+B` is the backdrop while plain `B` is the bucket.
+            self.apply_toolbar_action(self.keyboard_focus, action);
         } else if let Some(tool) = tool_for_keysym(event.keysym) {
             self.set_tool(tool);
         } else if let Some(idx) = color_for_keysym(event.keysym) {
@@ -495,10 +500,6 @@ impl KeyboardHandler for App {
             self.reveal_colors();
         } else if let Some(dir) = size_step_for_keysym(event.keysym) {
             self.nudge_size(dir);
-        } else if let Some(action) = panel_action_for_keysym(event.keysym) {
-            // A key acts on the output the compositor gave the keyboard to, the same output the canvas
-            // keys move and the rail's clicks land on.
-            self.apply_toolbar_action(self.keyboard_focus, action);
         } else if let Some(nav) = nav_action(event.keysym, self.shift) {
             self.nav_key(nav);
         }

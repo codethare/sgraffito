@@ -11,6 +11,8 @@ fn maps_letters_to_tools_both_cases() {
     assert_eq!(tool_for_keysym(Keysym::p), Some(Tool::Pen));
     assert_eq!(tool_for_keysym(Keysym::P), Some(Tool::Pen));
     assert_eq!(tool_for_keysym(Keysym::e), Some(Tool::Eraser));
+    assert_eq!(tool_for_keysym(Keysym::b), Some(Tool::Bucket));
+    assert_eq!(tool_for_keysym(Keysym::B), Some(Tool::Bucket));
     assert_eq!(tool_for_keysym(Keysym::t), Some(Tool::Text));
     assert_eq!(tool_for_keysym(Keysym::v), Some(Tool::Selection));
     assert_eq!(tool_for_keysym(Keysym::V), Some(Tool::Selection));
@@ -260,24 +262,26 @@ fn the_drawer_and_the_backdrop_have_their_own_keys() {
     use sgraffito::canvas::ToolbarAction;
     use sgraffito::input::panel_action_for_keysym;
     assert_eq!(
-        panel_action_for_keysym(Keysym::m),
+        panel_action_for_keysym(Keysym::m, false),
         Some(ToolbarAction::More)
     );
     assert_eq!(
-        panel_action_for_keysym(Keysym::M),
+        panel_action_for_keysym(Keysym::M, false),
         Some(ToolbarAction::More)
     );
+    // `B` is the bucket; the backdrop keeps the mnemonic on `Shift+B`.
     assert_eq!(
-        panel_action_for_keysym(Keysym::b),
+        panel_action_for_keysym(Keysym::b, true),
         Some(ToolbarAction::Scrim)
     );
     assert_eq!(
-        panel_action_for_keysym(Keysym::B),
+        panel_action_for_keysym(Keysym::B, true),
         Some(ToolbarAction::Scrim)
     );
-    // They collide with nothing: no tool, colour or size key is either of them.
+    assert_eq!(panel_action_for_keysym(Keysym::b, false), None);
+    assert_eq!(tool_for_keysym(Keysym::b), Some(Tool::Bucket));
+    // They collide with nothing else: no colour or size key is either of them.
     for keysym in [Keysym::m, Keysym::b] {
-        assert_eq!(tool_for_keysym(keysym), None);
         assert_eq!(color_for_keysym(keysym), None);
         assert_eq!(size_step_for_keysym(keysym), None);
     }
@@ -409,7 +413,7 @@ fn the_canvas_keys_collide_with_no_existing_shortcut() {
         assert_eq!(color_for_keysym(keysym), None, "{keysym:?}");
         assert_eq!(size_step_for_keysym(keysym), None, "{keysym:?}");
         assert_eq!(
-            sgraffito::input::panel_action_for_keysym(keysym),
+            sgraffito::input::panel_action_for_keysym(keysym, false),
             None,
             "{keysym:?}"
         );
@@ -449,7 +453,7 @@ fn the_boards_panel_and_the_shared_mode_have_their_own_keys() {
         (Keysym::f, ToolbarAction::Shared),
         (Keysym::F, ToolbarAction::Shared),
     ] {
-        assert_eq!(panel_action_for_keysym(keysym), Some(action));
+        assert_eq!(panel_action_for_keysym(keysym, false), Some(action));
         assert_eq!(tool_for_keysym(keysym), None);
         assert_eq!(color_for_keysym(keysym), None);
         assert_eq!(size_step_for_keysym(keysym), None);
