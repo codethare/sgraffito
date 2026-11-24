@@ -295,9 +295,12 @@ api_key = ""                   # fallback only; a key in the environment wins
 timeout_secs = 180             # clamped to 5..=600
 
 # A request runs `curl` inside `bwrap`: both are runtime prerequisites, and the panel
-# reports an error instead of quietly falling back to an unsandboxed request. Only the
-# chat transcript is memory-only; the diagram the panel commits is ordinary board
-# content, saved and undoable like anything drawn by hand.
+# reports an error instead of quietly falling back to an unsandboxed request. The
+# sandbox's environment is empty, and the whole request — endpoint, credential, session,
+# timeout and body — is curl's configuration on stdin (`-K -`), so no argv and no
+# environment of any process on the machine carries the key. Only the chat transcript is
+# memory-only; the diagram the panel commits is ordinary board content, saved and
+# undoable like anything drawn by hand.
 ```
 
 `base_url` is completed to the completions URL, never doubled: a base that already ends in

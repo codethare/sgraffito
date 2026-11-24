@@ -11,9 +11,10 @@
 //! call is not worth the port. The key never enters an argv: it is passed in the sandbox's own
 //! environment, and the script reads it from there.
 
+use std::ffi::OsString;
 use std::fmt;
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -55,23 +56,6 @@ pub const STREAM_FRAME: Duration = Duration::from_millis(33);
 
 const GO_BASE: &str = "https://opencode.ai/inference/go";
 const ZEN_BASE: &str = "https://opencode.ai/inference";
-
-/// The request's shell. Static: the endpoint, the key, the session and the timeout come from the
-/// environment, so nothing secret is ever an argv of `bwrap` or of `curl`.
-const CURL_SCRIPT: &str = "\
-set --
-if [ -n \"$SGRAFFITO_AI_KEY\" ]; then
-  set -- --header \"Authorization: Bearer $SGRAFFITO_AI_KEY\"
-fi
-exec curl --silent --show-error --no-buffer --fail-with-body \\
-  --connect-timeout 15 --max-time \"$SGRAFFITO_AI_TIMEOUT\" \\
-  --request POST \\
-  --header \"Content-Type: application/json\" \\
-  --header \"Accept: text/event-stream\" \\
-  --header \"x-opencode-session: $SGRAFFITO_AI_SESSION\" \\
-  \"$@\" --data-binary @- \\
-  --write-out '\\n__SGRAFFITO_HTTP__%{response_code}\\n' \\
-  --url \"$SGRAFFITO_AI_ENDPOINT\"";
 
 /// Everything one request needs, after the environment and the file have been folded together.
 /// `Debug` redacts the key: this value is logged and logged values end up in bug reports.
@@ -337,12 +321,19 @@ impl Chat {
                 "set"
             }
         ));
-        let mut command = sandbox(&settings, &self.session);
-        let mut child = command
+        let config = curl_config(&settings, &self.session, &body);
+        let mut child = Command::new("bwrap")
+            .args(sandbox_args())
+            .arg("--")
+            .arg(curl_path())
+            .args(CURL_ARGS)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
             .spawn()
             .map_err(|e| format!("could not start bwrap: {e}"))?;
         if let Some(mut stdin) = child.stdin.take()
-            && let Err(e) = stdin.write_all(body.as_bytes())
+            && let Err(e) = stdin.write_all(config.as_bytes())
         {
             let _ = child.kill();
             let _ = child.wait();
@@ -466,32 +457,46 @@ fn request_body(settings: &AiSettings, messages: &[Message], prompt: &str) -> Va
     })
 }
 
-/// The sandboxed request. Everything the child needs is in its own environment, so the key and the
-/// endpoint never appear in `bwrap`'s or `curl`'s argv where any process on the machine could read
-/// them. `env_clear` is what makes the sandbox's environment exactly this list: bwrap's own
-/// `--clearenv` would drop these too, since they are carried through bwrap.
-fn sandbox(settings: &AiSettings, session: &str) -> Command {
-    let mut command = Command::new("bwrap");
-    command.args([
+/// The arguments `curl` is given: unbuffered, and the whole configuration — URL, credential, body —
+/// read from stdin, so nothing about the request is in the process table.
+const CURL_ARGS: [&str; 3] = ["-N", "-K", "-"];
+
+/// The sandbox's own arguments, without `curl`'s.
+///
+/// The environment inside is empty. Everything the request needs — endpoint, credential, session,
+/// timeout and body — travels in curl's configuration on stdin, so it is in no argv and in no
+/// environment of any process on the machine.
+fn sandbox_args() -> Vec<OsString> {
+    let mut args: Vec<OsString> = [
+        "--clearenv",
         "--unshare-all",
         "--share-net",
         "--die-with-parent",
+        // No controlling terminal for the sandboxed process to inject keystrokes into.
+        "--new-session",
         "--ro-bind",
         "/usr",
         "/usr",
-    ]);
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect();
     // `/bin`, `/lib` and `/lib64` are symlinks into `/usr` on most current distributions and real
-    // directories on the rest. Binding the source of a symlink would put a directory where the shell
-    // expects the link, so the link is reproduced as a link and a real directory is bound.
+    // directories on the rest. Binding the source of a symlink would put a directory where the
+    // loader expects the link, so the link is reproduced as a link and a real directory is bound.
     for path in ["/bin", "/sbin", "/lib", "/lib64"] {
         match std::fs::symlink_metadata(path) {
             Ok(meta) if meta.file_type().is_symlink() => {
                 if let Ok(target) = std::fs::read_link(path) {
-                    command.args(["--symlink", &target.to_string_lossy(), path]);
+                    args.push("--symlink".into());
+                    args.push(target.into());
+                    args.push(path.into());
                 }
             }
             Ok(_) => {
-                command.args(["--ro-bind", path, path]);
+                args.push("--ro-bind".into());
+                args.push(path.into());
+                args.push(path.into());
             }
             Err(_) => {}
         }
@@ -507,44 +512,107 @@ fn sandbox(settings: &AiSettings, session: &str) -> Command {
         "/etc/nsswitch.conf",
     ] {
         if Path::new(path).exists() {
-            command.args(["--ro-bind", path, path]);
+            args.push("--ro-bind".into());
+            args.push(path.into());
+            args.push(path.into());
         }
     }
-    command.args([
-        "--proc",
-        "/proc",
-        "--dev",
-        "/dev",
-        "--tmpfs",
-        "/tmp",
-        "--chdir",
-        "/tmp",
-        "--",
-        "/bin/sh",
-        "-c",
-        CURL_SCRIPT,
-    ]);
-    command.env_clear();
-    command.env("PATH", "/usr/bin:/bin");
-    command.env("HOME", "/tmp");
-    command.env("SGRAFFITO_AI_ENDPOINT", &settings.endpoint);
-    command.env("SGRAFFITO_AI_KEY", &settings.key);
-    command.env("SGRAFFITO_AI_SESSION", session);
-    command.env(
-        "SGRAFFITO_AI_TIMEOUT",
-        settings.timeout.as_secs().max(1).to_string(),
+    args.push("--proc".into());
+    args.push("/proc".into());
+    args.push("--dev".into());
+    args.push("/dev".into());
+    args
+}
+
+/// `curl` by absolute path, and from a directory the sandbox binds: with an empty environment there
+/// is no `PATH` inside, so the path is resolved here.
+fn curl_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let candidate = dir.join("curl");
+            if candidate.starts_with("/usr") && candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    PathBuf::from("/usr/bin/curl")
+}
+
+/// Escape for a curl configuration value: a quoted value ends at a quote and continues on the same
+/// line, so the backslash, the quote and the whitespace that would end the line are escaped — the
+/// backslash first, because every later pass introduces one.
+fn escape_curl_config(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+}
+
+/// The proxy lines for a curl configuration, from what the caller found in the environment. One value
+/// per request: an https URL prefers `HTTPS_PROXY`, then `ALL_PROXY`, then `HTTP_PROXY`, which is
+/// curl's own order.
+fn proxy_config(
+    https_proxy: Option<&str>,
+    all_proxy: Option<&str>,
+    http_proxy: Option<&str>,
+    no_proxy: Option<&str>,
+) -> String {
+    let proxy = [https_proxy, all_proxy, http_proxy]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|value| !value.is_empty());
+    let mut lines = String::new();
+    if let Some(proxy) = proxy {
+        lines.push_str(&format!("proxy = \"{}\"\n", escape_curl_config(proxy)));
+    }
+    if let Some(no_proxy) = no_proxy.map(str::trim).filter(|value| !value.is_empty()) {
+        lines.push_str(&format!("noproxy = \"{}\"\n", escape_curl_config(no_proxy)));
+    }
+    lines
+}
+
+/// The whole request as curl's own configuration, which the child reads on stdin: where to go, how to
+/// authenticate, how long to wait, and the body. `-K -` is what keeps every one of them out of the
+/// process table, and curling the body in the same file is why the request needs no second stream.
+fn curl_config(settings: &AiSettings, session: &str, body: &str) -> String {
+    let authorization = if settings.key.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "header = \"Authorization: Bearer {}\"\n",
+            escape_curl_config(&settings.key)
+        )
+    };
+    let proxy = proxy_config(
+        std::env::var("HTTPS_PROXY").ok().as_deref(),
+        std::env::var("ALL_PROXY").ok().as_deref(),
+        std::env::var("HTTP_PROXY").ok().as_deref(),
+        std::env::var("NO_PROXY").ok().as_deref(),
     );
-    // A proxy is how a network behind one is reached, so it is passed through; nothing else is.
-    for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"] {
-        if let Ok(value) = std::env::var(name) {
-            command.env(name, value);
-        }
-    }
-    command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    command
+    format!(
+        "url = \"{url}\"\n\
+         request = \"POST\"\n\
+         {authorization}\
+         header = \"Content-Type: application/json\"\n\
+         header = \"Accept: text/event-stream\"\n\
+         header = \"x-opencode-session: {session}\"\n\
+         {proxy}\
+         no-buffer\n\
+         connect-timeout = 15\n\
+         max-time = {timeout}\n\
+         silent\n\
+         show-error\n\
+         fail-with-body\n\
+         data-binary = \"{body}\"\n\
+         write-out = \"\\n__SGRAFFITO_HTTP__%{{response_code}}\\n\"\n",
+        url = escape_curl_config(&settings.endpoint),
+        session = escape_curl_config(session),
+        timeout = settings.timeout.as_secs().max(1),
+        body = escape_curl_config(body),
+    )
 }
 
 /// Read the stream on its own thread: `data:` lines carry deltas, the write-out line carries the HTTP
@@ -1053,43 +1121,129 @@ fn unit(v: [f32; 2]) -> [f32; 2] {
 mod tests {
     use super::*;
 
-    /// The one property a sandboxed request has to keep: the key goes to the child's environment, never
-    /// to an argv of `bwrap` or `curl`, where any process on the machine could read it.
+    /// The one property a sandboxed request has to keep: the request is in curl's configuration on
+    /// stdin, so no argv and no environment of any process carries the credential.
     #[test]
-    fn the_key_is_an_environment_value_and_never_an_argument() {
+    fn the_credential_is_only_in_the_configuration_on_stdin() {
         let settings = AiSettings {
             endpoint: "https://example.test/openai/v1/chat/completions".into(),
             model: "m".into(),
             key: "sk-secret".into(),
             timeout: Duration::from_secs(60),
         };
-        let command = sandbox(&settings, "ses_test");
-        let args: Vec<String> = command
-            .get_args()
+        let args: Vec<String> = sandbox_args()
+            .into_iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
         assert!(
-            args.iter().all(|arg| !arg.contains("sk-secret")),
-            "{args:?}"
+            args.iter().any(|arg| arg == "--clearenv"),
+            "the sandbox inherits nothing: {args:?}"
         );
+        assert!(args.iter().all(|arg| !arg.contains("sk-secret")));
         assert!(args.iter().all(|arg| !arg.contains("example.test")));
-        assert!(args.iter().any(|arg| arg == CURL_SCRIPT));
-        let envs: Vec<(String, String)> = command
-            .get_envs()
-            .map(|(key, value)| {
-                (
-                    key.to_string_lossy().into_owned(),
-                    value.unwrap_or_default().to_string_lossy().into_owned(),
-                )
-            })
-            .collect();
-        assert!(envs.contains(&("SGRAFFITO_AI_KEY".into(), "sk-secret".into())));
-        assert!(envs.contains(&(
-            "SGRAFFITO_AI_ENDPOINT".into(),
-            "https://example.test/openai/v1/chat/completions".into()
-        )));
-        assert!(envs.contains(&("SGRAFFITO_AI_SESSION".into(), "ses_test".into())));
-        assert!(envs.contains(&("SGRAFFITO_AI_TIMEOUT".into(), "60".into())));
+
+        let config = curl_config(&settings, "ses_test", "{\"stream\":true}");
+        assert!(config.contains("url = \"https://example.test/openai/v1/chat/completions\""));
+        assert!(config.contains("Authorization: Bearer sk-secret"));
+        assert!(config.contains("x-opencode-session: ses_test"));
+        assert!(config.contains("data-binary = \"{\\\"stream\\\":true}\""));
+        assert!(config.contains("max-time = 60"));
+        assert!(
+            config.contains("__SGRAFFITO_HTTP__%{response_code}"),
+            "the status line the reader parses: {config}"
+        );
+        // And the trailing curl arguments say the configuration comes from stdin.
+        assert_eq!(CURL_ARGS, ["-N", "-K", "-"]);
+    }
+
+    /// The reader's own path, with no child process: a gateway that answers 401 for want of a key has
+    /// to come back as the sentence the user can act on, status line and all.
+    #[test]
+    fn a_401_becomes_an_error_that_names_the_missing_key() {
+        use std::io::Cursor;
+        let (tx, rx) = mpsc::channel();
+        let (ping, _source) = calloop::ping::make_ping().unwrap();
+        let body = "{\"errors\":[{\"type\":\"authentication_error\",\"message\":\"OpenCode Go requires an API key\"}]}\n\
+                    __SGRAFFITO_HTTP__401\n";
+        read_stream(Cursor::new(body), tx, ping.clone(), false);
+        let events: Vec<AiEvent> = rx.try_iter().collect();
+        assert_eq!(events.len(), 1, "{events:?}");
+        let AiEvent::Error(message) = &events[0] else {
+            panic!("expected an error, got {events:?}");
+        };
+        assert!(message.starts_with("HTTP 401: "), "{message}");
+        assert!(message.contains("requires an API key"), "{message}");
+        assert!(message.contains("no API key was sent"), "{message}");
+    }
+
+    #[test]
+    fn a_stream_of_deltas_ends_in_done() {
+        use std::io::Cursor;
+        let (tx, rx) = mpsc::channel();
+        let (ping, _source) = calloop::ping::make_ping().unwrap();
+        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
+                    data: [DONE]\n\
+                    __SGRAFFITO_HTTP__200\n";
+        read_stream(Cursor::new(body), tx, ping, true);
+        let events: Vec<AiEvent> = rx.try_iter().collect();
+        assert_eq!(
+            events,
+            vec![AiEvent::Delta("hi".into()), AiEvent::Done(200)]
+        );
+    }
+
+    #[test]
+    fn a_keyless_request_sends_no_authorization_header() {
+        let settings = AiSettings {
+            endpoint: "http://127.0.0.1:8765".into(),
+            model: "m".into(),
+            key: String::new(),
+            timeout: Duration::from_secs(5),
+        };
+        let config = curl_config(&settings, "ses_x", "{}");
+        assert!(!config.contains("Authorization"), "{config}");
+    }
+
+    #[test]
+    fn the_configuration_escapes_what_curls_parser_reads() {
+        let settings = AiSettings {
+            endpoint: "https://x/openai/v1/chat/completions".into(),
+            model: "m".into(),
+            key: "a\\b\"c".into(),
+            timeout: Duration::from_secs(5),
+        };
+        let config = curl_config(&settings, "ses_x", "line\nquote\"");
+        assert!(
+            config.contains("Authorization: Bearer a\\\\b\\\"c"),
+            "{config}"
+        );
+        assert!(
+            config.contains("data-binary = \"line\\nquote\\\"\""),
+            "{config}"
+        );
+    }
+
+    #[test]
+    fn a_proxy_is_taken_in_curls_own_order() {
+        assert_eq!(
+            proxy_config(
+                Some("http://https-proxy"),
+                Some("http://all"),
+                Some("http://http"),
+                None
+            ),
+            "proxy = \"http://https-proxy\"\n"
+        );
+        assert_eq!(
+            proxy_config(
+                None,
+                Some("http://all"),
+                Some("http://http"),
+                Some("localhost, 127.0.0.1")
+            ),
+            "proxy = \"http://all\"\nnoproxy = \"localhost, 127.0.0.1\"\n"
+        );
+        assert_eq!(proxy_config(Some("  "), None, None, None), "");
     }
 
     /// A request names the model and streams, and carries the prompt as the last user turn.
