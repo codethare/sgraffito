@@ -768,6 +768,7 @@ impl App {
     /// content and the caret are not localisable to a transient box.
     fn mark_edit_dirty(&mut self) {
         self.grow_note();
+        self.recenter_bound_edit();
         self.dirty = true;
         // A name lives in the rail's snapshot, not in an output's overlay, so nothing else would put
         // the typed text on screen.

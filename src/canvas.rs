@@ -1854,12 +1854,23 @@ impl Shape {
 
     /// The width a label wraps at inside a closed container. A line has no width to wrap at: its
     /// label is a single line like Excalidraw's linear text.
+    ///
+    /// The width is the largest rectangle that fits inside the outline, not the full bounding box:
+    /// a circle inscribes a square of side `width / sqrt(2)`, and a diamond inscribes a rectangle of
+    /// half its width. Without that reduction a label could wrap at the full width, put its top and
+    /// bottom lines outside the narrowing sides, and still look centred in the bounding box.
     pub fn label_wrap(&self) -> Option<f32> {
-        if !self.kind.is_closed() {
-            return None;
-        }
         let (_, half) = self.box_geometry();
-        Some((2.0 * half[0] - 2.0 * BOUND_TEXT_PADDING).max(16.0))
+        let inner_width = match self.kind {
+            ShapeKind::Rect => 2.0 * half[0],
+            ShapeKind::Circle => half[0] * std::f32::consts::SQRT_2,
+            ShapeKind::Diamond => half[0],
+            ShapeKind::Line | ShapeKind::Arrow => return None,
+        };
+        // A shape smaller than twice the padding has no room at all. Keep a tiny positive width so
+        // the text engine still wraps at the glyph rather than panicking, and let the unavoidable
+        // overflow be visible.
+        Some((inner_width - 2.0 * BOUND_TEXT_PADDING).max(1.0))
     }
 
     /// Length of the arrowhead, from the pen width with a floor so a hairline arrow still reads as

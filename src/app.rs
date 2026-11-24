@@ -3836,6 +3836,46 @@ impl App {
         }
     }
 
+    /// Keep the label being typed in centred on its container as the line count changes. Without
+    /// this the overlay's origin stays where the empty label was placed, so the first line grows
+    /// downwards out of the shape and only snaps back to the middle when the edit ends.
+    pub(crate) fn recenter_bound_edit(&mut self) {
+        let job = self.outputs.iter().find_map(|(key, out)| {
+            let edit = out.overlay.text.as_ref()?;
+            if edit.note.is_some() {
+                return None;
+            }
+            Some((
+                *key,
+                out.board().to_string(),
+                edit.item.clone(),
+                edit.buffer.text.clone(),
+            ))
+        });
+        let Some((key, board_name, mut item, text)) = job else {
+            return;
+        };
+        let Some(container) = item.container else {
+            return;
+        };
+        let Some(shape) = self.doc.boards.get(&board_name).and_then(|ann| {
+            let index = ann.shape_index_by_id(container)?;
+            ann.shapes.get(index).cloned()
+        }) else {
+            return;
+        };
+        item.text = text;
+        let placed = self.renderer.place_bound_text(&item, &shape);
+        if let Some(edit) = self
+            .outputs
+            .get_mut(&key)
+            .and_then(|out| out.overlay.text.as_mut())
+        {
+            edit.item.x = placed.x;
+            edit.item.y = placed.y;
+        }
+    }
+
     /// Create a note at a point and put the caret in it, or enter the note that is already there: a
     /// press on an existing note must not stack another one on top of it.
     pub(crate) fn begin_note(&mut self, key: &u32, x: f32, y: f32) {

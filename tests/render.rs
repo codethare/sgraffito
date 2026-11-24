@@ -4024,56 +4024,78 @@ fn a_link_draws_an_underline_and_the_action_card_is_bottom_centred() {
     }
 }
 
-/// A container label is measured with the container's wrap width and placed at its centre.
+/// A container label uses the largest rectangle that fits inside the outline, stays inside that
+/// outline, and is centred on the container.
 #[test]
-fn a_bound_label_wraps_and_centres_inside_its_container() {
-    let shape = Shape {
-        roundness: None,
-        kind: ShapeKind::Rect,
-        color: "#ffffff".into(),
-        width: 2.0,
-        from: [40.0, 40.0],
-        to: [260.0, 180.0],
-        points: Vec::new(),
-        rotate: 0.0,
-        id: 7,
-        attach: [None, None],
-        fill: None,
-    };
-    let item = TextItem {
-        x: 0.0,
-        y: 0.0,
-        color: "#ffffff".into(),
-        size: 18.0,
-        text: "a label long enough to wrap several times inside the container".into(),
-        link: None,
-        container: Some(7),
-    };
+fn a_bound_label_wraps_and_centres_inside_each_closed_container() {
     let mut renderer = Renderer::new();
-    let placed = renderer.place_bound_text(&item, &shape);
-    let wrap = shape.label_wrap().unwrap();
-    let measured = renderer.text_edit_bounds_wrapped(
-        &placed.text,
-        &placed,
-        Some(wrap),
-        Screen {
-            scale: 1.0,
-            view: View::default(),
-        },
-    );
-    assert!(
-        measured.w <= wrap + 12.0,
-        "the label did not wrap at the container width: {measured:?}"
-    );
-    let centre = shape.centre();
-    assert!(
-        ((measured.x + measured.w / 2.0) - centre[0]).abs() < 3.0,
-        "the label is not horizontally centred: {measured:?}"
-    );
-    assert!(
-        ((measured.y + measured.h / 2.0) - centre[1]).abs() < 3.0,
-        "the label is not vertically centred: {measured:?}"
-    );
+    for (kind, expected_wrap) in [
+        (ShapeKind::Rect, 220.0 - 16.0),
+        (ShapeKind::Circle, 110.0 * std::f32::consts::SQRT_2 - 16.0),
+        (ShapeKind::Diamond, 110.0 - 16.0),
+    ] {
+        let shape = Shape {
+            roundness: None,
+            kind,
+            color: "#ffffff".into(),
+            width: 2.0,
+            from: [40.0, 40.0],
+            to: [260.0, 260.0],
+            points: Vec::new(),
+            rotate: 0.0,
+            id: 7,
+            attach: [None, None],
+            fill: None,
+        };
+        let item = TextItem {
+            x: 0.0,
+            y: 0.0,
+            color: "#ffffff".into(),
+            size: 18.0,
+            text: "a label long enough to wrap".into(),
+            link: None,
+            container: Some(7),
+        };
+        let placed = renderer.place_bound_text(&item, &shape);
+        let wrap = shape.label_wrap().unwrap();
+        assert!(
+            (wrap - expected_wrap).abs() < 0.1,
+            "{kind:?} wrapped at {wrap}, not inside its outline"
+        );
+        let measured = renderer.text_edit_bounds_wrapped(
+            &placed.text,
+            &placed,
+            Some(wrap),
+            Screen {
+                scale: 1.0,
+                view: View::default(),
+            },
+        );
+        assert!(
+            measured.w <= wrap + 12.0,
+            "{kind:?} did not wrap at the container width: {measured:?}"
+        );
+        let centre = shape.centre();
+        assert!(
+            ((measured.x + measured.w / 2.0) - centre[0]).abs() < 3.0,
+            "{kind:?} is not horizontally centred: {measured:?}"
+        );
+        assert!(
+            ((measured.y + measured.h / 2.0) - centre[1]).abs() < 3.0,
+            "{kind:?} is not vertically centred: {measured:?}"
+        );
+        for corner in [
+            [measured.x, measured.y],
+            [measured.x + measured.w, measured.y],
+            [measured.x, measured.y + measured.h],
+            [measured.x + measured.w, measured.y + measured.h],
+        ] {
+            assert!(
+                shape.contains(corner),
+                "{kind:?} put a label corner outside the outline: {corner:?} in {measured:?}"
+            );
+        }
+    }
 }
 
 /// A selected line shows its endpoints and segment midpoints; edit mode promotes the interior bend
