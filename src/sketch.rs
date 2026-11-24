@@ -132,22 +132,61 @@ pub fn rounded_line(points: &[[f32; 2]], width: f32, seed: u64) -> Vec<Seg> {
         let steps = ((length / 12.0).ceil() as usize).clamp(4, 32);
         for step in 0..steps {
             let t = step as f32 / steps as f32;
-            let t2 = t * t;
-            let t3 = t2 * t;
-            let at = |a: f32, b: f32, c: f32, d: f32| {
-                0.5 * (2.0 * b
-                    + (-a + c) * t
-                    + (2.0 * a - 5.0 * b + 4.0 * c - d) * t2
-                    + (-a + 3.0 * b - 3.0 * c + d) * t3)
-            };
-            samples.push([
-                at(p0[0], p1[0], p2[0], p3[0]),
-                at(p0[1], p1[1], p2[1], p3[1]),
-            ]);
+            samples.push(catmull_rom(p0, p1, p2, p3, t));
         }
     }
     samples.push(points[points.len() - 1]);
     stroke(&samples, width, seed)
+}
+
+/// The smooth-curve point halfway along one vertex-to-vertex segment, by arc length. Excalidraw's
+/// `getSegmentMidPoint` uses `curvePointAtLength(segment, 0.5)` for a curved linear element; a
+/// chord midpoint would sit off the visible line and make a dragged insertion jump.
+pub fn curve_midpoint(points: &[[f32; 2]], segment: usize) -> Option<[f32; 2]> {
+    if points.len() < 2 || segment + 1 >= points.len() {
+        return None;
+    }
+    let p0 = points[segment.saturating_sub(1)];
+    let p1 = points[segment];
+    let p2 = points[segment + 1];
+    let p3 = points[(segment + 2).min(points.len() - 1)];
+    const STEPS: usize = 32;
+    let mut samples = Vec::with_capacity(STEPS + 1);
+    for step in 0..=STEPS {
+        samples.push(catmull_rom(p0, p1, p2, p3, step as f32 / STEPS as f32));
+    }
+    let total: f32 = samples
+        .windows(2)
+        .map(|pair| (pair[1][0] - pair[0][0]).hypot(pair[1][1] - pair[0][1]))
+        .sum();
+    let mut left = total / 2.0;
+    for pair in samples.windows(2) {
+        let length = (pair[1][0] - pair[0][0]).hypot(pair[1][1] - pair[0][1]);
+        if left <= length && length > f32::EPSILON {
+            let t = left / length;
+            return Some([
+                pair[0][0] + (pair[1][0] - pair[0][0]) * t,
+                pair[0][1] + (pair[1][1] - pair[0][1]) * t,
+            ]);
+        }
+        left -= length;
+    }
+    Some(samples[STEPS / 2])
+}
+
+fn catmull_rom(p0: [f32; 2], p1: [f32; 2], p2: [f32; 2], p3: [f32; 2], t: f32) -> [f32; 2] {
+    let t2 = t * t;
+    let t3 = t2 * t;
+    let at = |a: f32, b: f32, c: f32, d: f32| {
+        0.5 * (2.0 * b
+            + (-a + c) * t
+            + (2.0 * a - 5.0 * b + 4.0 * c - d) * t2
+            + (-a + 3.0 * b - 3.0 * c + d) * t3)
+    };
+    [
+        at(p0[0], p1[0], p2[0], p3[0]),
+        at(p0[1], p1[1], p2[1], p3[1]),
+    ]
 }
 
 /// The per-trace salts, so trace two sees a different stream from trace one under the same seed.
@@ -387,6 +426,15 @@ mod tests {
             segs.iter().any(|seg| matches!(seg, Seg::Quad(_, _))),
             "the rounded polyline has no corner bend"
         );
+    }
+
+    #[test]
+    fn a_curved_segment_midpoint_is_on_the_arc_not_the_chord() {
+        let points = [[0.0, 0.0], [100.0, 100.0], [200.0, 0.0]];
+        let midpoint = curve_midpoint(&points, 0).expect("no curved segment midpoint");
+        let chord = [50.0, 50.0];
+        let gap = (midpoint[0] - chord[0]).hypot(midpoint[1] - chord[1]);
+        assert!(gap > 2.0, "the handle stayed on the chord: {midpoint:?}");
     }
 
     #[test]

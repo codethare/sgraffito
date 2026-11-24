@@ -1772,6 +1772,13 @@ impl Shape {
     /// The midpoint of every segment, which is where a press adds a vertex.
     pub fn linear_midpoints(&self) -> Vec<[f32; 2]> {
         let vertices = self.linear_vertices();
+        if self.is_round() {
+            // A curved segment's midpoint is half its arc length, not the midpoint of its chord.
+            // The handle then sits on the visible line and inserts a vertex there.
+            return (0..vertices.len().saturating_sub(1))
+                .filter_map(|segment| crate::sketch::curve_midpoint(&vertices, segment))
+                .collect();
+        }
         vertices
             .windows(2)
             .map(|pair| {
