@@ -2559,18 +2559,17 @@ fn inked_box(buf: &[u8], w: u32, h: u32) -> Option<(u32, u32, u32, u32)> {
 }
 
 #[test]
-fn a_stroke_is_drawn_as_a_hand_drawn_mark() {
+fn a_pen_stroke_stays_inside_its_width() {
     let (w, h) = (200u32, 100u32);
     let doc = ann(vec![line(50.0, 20.0, 180.0)], vec![]);
     let mut buf = buffer(w, h);
     frame(&mut buf, w, h, &doc, &Overlay::default(), None);
     let (_, top, _, bottom) = inked_box(&buf, w, h).expect("the stroke painted something");
-    // The pen is four logical pixels wide, so the exact mark reaches two pixels either side of the
-    // stored line plus one of anti-aliasing. A hand-drawn trace wanders past that, and both traces
-    // cross, so the mark is wider than the pen.
+    // The pen is four logical pixels wide plus an anti-aliased edge. A single smoothed trace must not
+    // add the second jittered trace's wander, which used to make a straight stroke visibly fuzzy.
     assert!(
-        50.0 - top as f32 > 2.5 || bottom as f32 - 50.0 > 2.5,
-        "the mark was the pen's exact width: top {top} bottom {bottom}"
+        top >= 50 - 3 && bottom <= 50 + 3,
+        "the pen wandered outside its width: top {top} bottom {bottom}"
     );
 }
 

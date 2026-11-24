@@ -287,43 +287,32 @@ fn midpoint(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
     [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0]
 }
 
-/// A freehand stroke traced twice, along the same quad-through-midpoints construction the exact path
-/// uses, with every sample displaced. A stroke of fewer than two samples draws nothing here: a dot has
-/// no direction to wander, so `render` keeps drawing it as an exact disc of the pen's own width.
-pub fn stroke(points: &[[f32; 2]], width: f32, seed: u64) -> Vec<Seg> {
+/// A freehand stroke as one smooth trace through the quad-through-midpoints construction. A stroke
+/// of fewer than two samples draws nothing here: a dot has no direction to smooth, so `render` keeps
+/// drawing it as an exact disc of the pen's own width.
+pub fn stroke(points: &[[f32; 2]], _width: f32, _seed: u64) -> Vec<Seg> {
     if points.len() < 2 {
         return Vec::new();
     }
-    let offset = wander(width, polyline_length(points));
-    let mut segs = Vec::with_capacity(points.len() * 4);
-    for pass in 0..2u64 {
-        let amount = if pass == 0 {
-            offset
-        } else {
-            offset * SKETCH_SECOND_PASS
-        };
-        let mut rng = Rng::new(seed ^ PASS_SALT[pass as usize]);
-        let jittered: Vec<[f32; 2]> = points
-            .iter()
-            .map(|p| [p[0] + rng.bipolar(amount), p[1] + rng.bipolar(amount)])
-            .collect();
-        segs.push(Seg::Move(jittered[0]));
-        for index in 1..jittered.len() - 1 {
-            segs.push(Seg::Quad(
-                jittered[index],
-                midpoint(jittered[index], jittered[index + 1]),
-            ));
-        }
-        segs.push(Seg::Line(jittered[jittered.len() - 1]));
+    // A pen is a single smooth trace, not the double jittered trace used by shapes. A light
+    // three-point average damps pointer jitter, and the quad-through-midpoints construction is C1
+    // at every join, so high-rate samples no longer become visible saw teeth. The stored raw points
+    // stay untouched.
+    let mut smoothed = points.to_vec();
+    for index in 1..smoothed.len().saturating_sub(1) {
+        let (before, current, after) = (points[index - 1], points[index], points[index + 1]);
+        smoothed[index] = [
+            (before[0] + 2.0 * current[0] + after[0]) / 4.0,
+            (before[1] + 2.0 * current[1] + after[1]) / 4.0,
+        ];
     }
+    let mut segs = Vec::with_capacity(smoothed.len() * 2);
+    segs.push(Seg::Move(smoothed[0]));
+    for pair in smoothed.windows(2) {
+        segs.push(Seg::Quad(pair[0], midpoint(pair[0], pair[1])));
+    }
+    segs.push(Seg::Line(smoothed[smoothed.len() - 1]));
     segs
-}
-
-fn polyline_length(points: &[[f32; 2]]) -> f32 {
-    points
-        .windows(2)
-        .map(|w| ((w[1][0] - w[0][0]).powi(2) + (w[1][1] - w[0][1]).powi(2)).sqrt())
-        .sum()
 }
 
 /// How far a trace may wander from the geometry it is generated from: the style's offset, raised to a
@@ -702,11 +691,11 @@ mod tests {
     }
 
     #[test]
-    fn a_stroke_is_traced_twice() {
+    fn a_stroke_is_one_smooth_trace() {
         let points = sample_points();
         let segs = stroke(&points, WIDTH, seed_for(0, "#e01b24", WIDTH, points[0]));
         let traces = segs.iter().filter(|s| matches!(s, Seg::Move(_))).count();
-        assert_eq!(traces, 2);
+        assert_eq!(traces, 1, "the pen still paints two jittered traces");
     }
 
     #[test]
