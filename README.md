@@ -306,6 +306,13 @@ timeout_secs = 180             # clamped to 5..=600
 `https://opencode.ai/inference/go` — gets `/openai/v1/chat/completions`. So
 `base_url = "https://opencode.ai/zen/go/v1"` posts to `https://opencode.ai/zen/go/v1/chat/completions`.
 
+An empty `api_key` means the file supplies none, and the environment is then the only source: the
+daemon reads `OPENCODE_GO_API_KEY`, `OPENCODE_ZEN_API_KEY` and `OPENCODE_API_KEY` on every request, from
+its own environment — start it where the key is exported (`exec` from a shell, or `environment=` in the
+compositor's config), not from a launcher that does not inherit it. The request's `ai:` log line ends in
+`key set` or `key absent`, and a gateway that refuses the request for want of credentials is reported as
+`HTTP 401: … (no API key was sent: …)` rather than as a bare status.
+
 The file is read once when the daemon starts.
 
 ## Known limitations

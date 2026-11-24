@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use sgraffito::ai::{
     AiSettings, MAX_MINDMAP_NODES, MindNode, extract_mermaid, layout_mindmap, parse_mindmap,
-    resolve_with,
+    resolve_with, status_message,
 };
 use sgraffito::canvas::ShapeKind;
 use sgraffito::config::{AiConfig, Config, DEFAULT_AI_MODEL};
@@ -474,4 +474,49 @@ fn one_node_still_lays_out_as_a_box_with_its_label() {
     assert_eq!(board.shapes.len(), 1);
     assert_eq!(board.texts.len(), 1);
     assert_eq!(board.texts[0].container, Some(1));
+}
+
+// ---- what a failed request says ----------------------------------------------------------------
+
+#[test]
+fn a_401_with_no_key_names_the_ways_to_supply_one() {
+    let message = status_message(
+        401,
+        r#"{"errors":[{"type":"authentication_error","message":"OpenCode Go requires an API key"}]}"#,
+        false,
+    );
+    assert!(message.starts_with("HTTP 401:"), "{message}");
+    assert!(message.contains("requires an API key"), "{message}");
+    assert!(message.contains("no API key was sent"), "{message}");
+    for name in [
+        "OPENCODE_GO_API_KEY",
+        "OPENCODE_ZEN_API_KEY",
+        "OPENCODE_API_KEY",
+        "[ai].api_key",
+    ] {
+        assert!(message.contains(name), "{message}");
+    }
+}
+
+#[test]
+fn a_refused_key_is_not_reported_as_a_missing_one() {
+    let message = status_message(403, "forbidden", true);
+    assert_eq!(message, "HTTP 403: forbidden");
+    // The hint is only about the key being absent, so it cannot hide a key the gateway rejected.
+    assert!(!message.contains("no API key"));
+}
+
+#[test]
+fn other_statuses_read_plainly() {
+    assert_eq!(status_message(502, "", false), "HTTP 502");
+    assert_eq!(
+        status_message(502, "bad gateway\n", false),
+        "HTTP 502: bad gateway"
+    );
+    // An endpoint that reported its own sentence keeps it, with no invented status in front.
+    assert_eq!(
+        status_message(0, "the mind map is empty", false),
+        "the mind map is empty"
+    );
+    assert_eq!(status_message(200, "", true), "the AI request failed");
 }

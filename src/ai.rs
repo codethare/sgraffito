@@ -328,8 +328,14 @@ impl Chat {
         };
         let body = request_body(&settings, &self.messages, &prompt).to_string();
         crate::log::write(&format!(
-            "ai: {} model {}",
-            settings.endpoint, settings.model
+            "ai: {} model {}, key {}",
+            settings.endpoint,
+            settings.model,
+            if settings.key.is_empty() {
+                "absent"
+            } else {
+                "set"
+            }
         ));
         let mut command = sandbox(&settings, &self.session);
         let mut child = command
@@ -348,7 +354,8 @@ impl Chat {
             return Err("the sandbox has no output to read".into());
         };
         let (tx, rx) = mpsc::channel();
-        thread::spawn(move || read_stream(stdout, tx, ping));
+        let key_present = !settings.key.is_empty();
+        thread::spawn(move || read_stream(stdout, tx, ping, key_present));
         self.generation = Some(Generation { child });
         self.rx = Some(rx);
         Ok(())
@@ -542,12 +549,18 @@ fn sandbox(settings: &AiSettings, session: &str) -> Command {
 
 /// Read the stream on its own thread: `data:` lines carry deltas, the write-out line carries the HTTP
 /// status, and the end of the stream decides whether the request worked.
-fn read_stream(stdout: impl std::io::Read, tx: mpsc::Sender<AiEvent>, ping: Ping) {
+fn read_stream(
+    stdout: impl std::io::Read,
+    tx: mpsc::Sender<AiEvent>,
+    ping: Ping,
+    key_present: bool,
+) {
     let mut reader = BufReader::new(stdout);
     let mut line = String::new();
     let mut status: Option<u16> = None;
     let mut body = String::new();
     let mut content = false;
+    let mut reported = false;
     loop {
         line.clear();
         match reader.read_line(&mut line) {
@@ -572,8 +585,12 @@ fn read_stream(stdout: impl std::io::Read, tx: mpsc::Sender<AiEvent>, ping: Ping
                 .and_then(|error| error.get("message"))
                 .and_then(Value::as_str)
             {
-                report(&tx, &ping, AiEvent::Error(message.to_string()));
-                return;
+                // The endpoint's own sentence replaces the raw body, and reading goes on: the HTTP
+                // status arrives in the write-out after the body, and it is what decides whether this
+                // is a credentials problem the user can fix.
+                body = message.to_string();
+                reported = true;
+                continue;
             }
             if let Some(delta) = value
                 .get("choices")
@@ -599,16 +616,11 @@ fn read_stream(stdout: impl std::io::Read, tx: mpsc::Sender<AiEvent>, ping: Ping
         }
     }
     let code = status.unwrap_or(200);
-    if code >= 400 {
-        let body = body.trim();
+    if code >= 400 || reported {
         report(
             &tx,
             &ping,
-            AiEvent::Error(if body.is_empty() {
-                format!("HTTP {code}")
-            } else {
-                format!("HTTP {code}: {body}")
-            }),
+            AiEvent::Error(status_message(code, &body, key_present)),
         );
     } else if !content {
         report(
@@ -619,6 +631,32 @@ fn read_stream(stdout: impl std::io::Read, tx: mpsc::Sender<AiEvent>, ping: Ping
     } else {
         report(&tx, &ping, AiEvent::Done(code));
     }
+}
+
+/// How a failed request reads in the panel.
+///
+/// A gateway answering 401 or 403 with no key in the request is the one failure a user fixes in the
+/// configuration, so the message names the ways in. The key is never echoed; nothing here is secret.
+pub fn status_message(status: u16, body: &str, key_present: bool) -> String {
+    let body = body.trim();
+    let mut message = if status >= 400 {
+        if body.is_empty() {
+            format!("HTTP {status}")
+        } else {
+            format!("HTTP {status}: {body}")
+        }
+    } else if body.is_empty() {
+        "the AI request failed".to_string()
+    } else {
+        body.to_string()
+    };
+    if !key_present && matches!(status, 401 | 403) {
+        message.push_str(
+            " (no API key was sent: set OPENCODE_GO_API_KEY, OPENCODE_ZEN_API_KEY, \
+             OPENCODE_API_KEY, or [ai].api_key)",
+        );
+    }
+    message
 }
 
 fn report(tx: &mpsc::Sender<AiEvent>, ping: &Ping, event: AiEvent) {
