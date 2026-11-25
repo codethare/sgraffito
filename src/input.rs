@@ -444,7 +444,7 @@ impl KeyboardHandler for App {
                     self.close_ai();
                 } else {
                     // The input method owns `Esc` while it has a preedit; all it does here is drop it.
-                    self.ai.preedit.clear();
+                    self.ai.session_mut().preedit.clear();
                     self.refresh_ai();
                     self.sync_text_input();
                 }
@@ -851,7 +851,8 @@ impl App {
         // The AI panel's input line is a text target too: the same caret, preedit and paste machinery
         // serve it, so the input method needs no second path.
         if self.ai.open && self.ai.focus {
-            return Some((&mut self.ai.input, &mut self.ai.preedit));
+            let session = self.ai.session_mut();
+            return Some((&mut session.input, &mut session.preedit));
         }
         let out = self
             .outputs
@@ -865,7 +866,8 @@ impl App {
             return Some((&rename.text, &rename.preedit));
         }
         if self.ai.open && self.ai.focus {
-            return Some((&self.ai.input, &self.ai.preedit));
+            let session = self.ai.session();
+            return Some((&session.input, &session.preedit));
         }
         let out = self
             .outputs
@@ -1018,9 +1020,10 @@ impl App {
             if layout.panel.contains(at[0], at[1]) {
                 if layout.log.contains(at[0], at[1]) {
                     let max = self.ai_max_scroll(key);
-                    self.ai.scroll =
-                        (self.ai.scroll + vertical.absolute as f32 * 40.0).clamp(0.0, max);
-                    self.ai.follow = self.ai.scroll >= max;
+                    let session = self.ai.session_mut();
+                    session.scroll =
+                        (session.scroll + vertical.absolute as f32 * 40.0).clamp(0.0, max);
+                    session.follow = session.scroll >= max;
                     self.refresh_ai();
                 }
                 return;
@@ -1095,7 +1098,8 @@ impl App {
                 }
                 if layout.input.contains(x, y) {
                     self.ai.focus = true;
-                    self.ai.input.cursor = self.ai.input.text.chars().count();
+                    let session = self.ai.session_mut();
+                    session.input.cursor = session.input.text.chars().count();
                     self.sync_text_input();
                     self.refresh_ai();
                     return;

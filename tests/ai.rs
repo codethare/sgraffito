@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use sgraffito::ai::{
-    AiSettings, MAX_MINDMAP_NODES, MindNode, extract_mermaid, layout_mindmap, parse_mindmap,
-    resolve_with, status_message,
+    AiSettings, MAX_MINDMAP_NODES, MapKind, MindNode, extract_mermaid, fit_kind, inferred_kind,
+    layout_directive, layout_mindmap, parse_mindmap, resolve_with, status_message,
 };
 use sgraffito::canvas::ShapeKind;
 use sgraffito::config::{AiConfig, Config, DEFAULT_AI_MODEL};
@@ -382,7 +382,14 @@ fn the_layout_has_one_box_and_one_line_per_node() {
             leaf("Actuators"),
         ],
     );
-    let board = layout_mindmap(&map, [400.0, 300.0], "#e01b24", &mut measure_fn());
+    let board = layout_mindmap(
+        MapKind::Radial,
+        &map,
+        [400.0, 300.0],
+        400.0,
+        "#e01b24",
+        &mut measure_fn(),
+    );
     let boxes = board
         .shapes
         .iter()
@@ -403,7 +410,14 @@ fn the_layout_has_one_box_and_one_line_per_node() {
 #[test]
 fn every_label_names_a_box_and_every_line_attaches_to_two_of_them() {
     let map = tree("root", vec![leaf("a"), tree("b", vec![leaf("c")])]);
-    let board = layout_mindmap(&map, [0.0, 0.0], "#3584e4", &mut measure_fn());
+    let board = layout_mindmap(
+        MapKind::Radial,
+        &map,
+        [0.0, 0.0],
+        400.0,
+        "#3584e4",
+        &mut measure_fn(),
+    );
     let boxes: Vec<u64> = board
         .shapes
         .iter()
@@ -433,7 +447,14 @@ fn every_label_names_a_box_and_every_line_attaches_to_two_of_them() {
 #[test]
 fn the_ids_are_unique_and_every_coordinate_is_finite() {
     let map = tree("root", (0..8).map(|i| leaf(&format!("n{i}"))).collect());
-    let board = layout_mindmap(&map, [100.0, 50.0], "#f6d32d", &mut measure_fn());
+    let board = layout_mindmap(
+        MapKind::Radial,
+        &map,
+        [100.0, 50.0],
+        400.0,
+        "#f6d32d",
+        &mut measure_fn(),
+    );
     let mut ids: Vec<u64> = board.shapes.iter().map(|shape| shape.id).collect();
     ids.sort_unstable();
     ids.dedup();
@@ -451,7 +472,14 @@ fn the_ids_are_unique_and_every_coordinate_is_finite() {
 #[test]
 fn the_root_sits_at_the_anchor_and_children_ring_around_it() {
     let map = tree("root", vec![leaf("a"), leaf("b")]);
-    let board = layout_mindmap(&map, [250.0, 175.0], "#33d17a", &mut measure_fn());
+    let board = layout_mindmap(
+        MapKind::Radial,
+        &map,
+        [50.0, 175.0],
+        400.0,
+        "#33d17a",
+        &mut measure_fn(),
+    );
     let root = board
         .shapes
         .iter()
@@ -470,7 +498,14 @@ fn the_root_sits_at_the_anchor_and_children_ring_around_it() {
 
 #[test]
 fn one_node_still_lays_out_as_a_box_with_its_label() {
-    let board = layout_mindmap(&leaf("alone"), [0.0, 0.0], "#ffffff", &mut measure_fn());
+    let board = layout_mindmap(
+        MapKind::Radial,
+        &leaf("alone"),
+        [0.0, 0.0],
+        400.0,
+        "#ffffff",
+        &mut measure_fn(),
+    );
     assert_eq!(board.shapes.len(), 1);
     assert_eq!(board.texts.len(), 1);
     assert_eq!(board.texts[0].container, Some(1));
@@ -519,4 +554,309 @@ fn other_statuses_read_plainly() {
         "the mind map is empty"
     );
     assert_eq!(status_message(200, "", true), "the AI request failed");
+}
+
+// ---- one conversation per board ------------------------------------------------------------------
+
+fn chat_with(board: &str) -> sgraffito::ai::Chat {
+    let mut chat = sgraffito::ai::Chat::new();
+    chat.enter(board);
+    chat
+}
+
+#[test]
+fn every_board_keeps_its_own_transcript_and_draft() {
+    let mut chat = chat_with("office");
+    chat.session_mut()
+        .push(sgraffito::ai::Role::User, "robot".into(), false);
+    chat.session_mut().input = sgraffito::canvas::TextBuffer::new("half-typed");
+
+    assert!(chat.enter("home"));
+    assert!(
+        chat.session().messages.is_empty(),
+        "home inherited office's chat"
+    );
+    assert!(
+        chat.session().input.text.is_empty(),
+        "home inherited the draft"
+    );
+    chat.session_mut()
+        .push(sgraffito::ai::Role::User, "car".into(), false);
+
+    assert!(chat.enter("office"));
+    assert_eq!(chat.session().messages.len(), 1);
+    assert_eq!(chat.session().messages[0].text, "robot");
+    assert_eq!(chat.session().input.text, "half-typed");
+}
+
+#[test]
+fn a_failure_on_one_board_does_not_show_on_another() {
+    let mut chat = chat_with("office");
+    chat.fail("home", "HTTP 401");
+    assert!(chat.session().error.is_none(), "office shows home's error");
+    assert!(chat.enter("home"));
+    assert_eq!(chat.session().error.as_deref(), Some("HTTP 401"));
+}
+
+#[test]
+fn a_deleted_board_takes_its_conversation_with_it() {
+    let mut chat = chat_with("office");
+    chat.session_mut()
+        .push(sgraffito::ai::Role::User, "robot".into(), false);
+    chat.forget("office");
+    assert!(
+        chat.session().messages.is_empty(),
+        "the transcript outlived its board"
+    );
+}
+
+#[test]
+fn entering_the_same_board_does_not_reset_it() {
+    let mut chat = chat_with("office");
+    chat.session_mut()
+        .push(sgraffito::ai::Role::User, "robot".into(), false);
+    assert!(!chat.enter("office"));
+    assert_eq!(chat.session().messages.len(), 1);
+}
+
+// ---- the arrangement of a map --------------------------------------------------------------------
+
+fn levels(depth: usize) -> MindNode {
+    if depth == 0 {
+        return leaf("x");
+    }
+    tree("root", vec![levels(depth - 1)])
+}
+
+#[test]
+fn a_directive_names_the_arrangement_and_anything_else_is_ignored() {
+    assert_eq!(
+        layout_directive("mindmap\n  %% sgraffito layout: tree\n  root\n"),
+        Some(MapKind::Tree)
+    );
+    assert_eq!(
+        layout_directive("mindmap\n  %% sg\n  root"),
+        None,
+        "an unrelated comment is not a directive"
+    );
+    assert_eq!(
+        layout_directive("mindmap\n  %% sgraffito layout: Tree\n  root"),
+        Some(MapKind::Tree),
+        "the name is matched without case"
+    );
+    assert_eq!(
+        layout_directive("mindmap\n  %% sgraffito layout: spiral\n  root"),
+        None,
+        "an unknown arrangement is not silently accepted"
+    );
+    assert_eq!(layout_directive("mindmap\n  root"), None);
+    for kind in [
+        MapKind::Radial,
+        MapKind::Tree,
+        MapKind::Fishbone,
+        MapKind::Compare,
+    ] {
+        assert_eq!(MapKind::from_name(kind.name()), Some(kind));
+    }
+}
+
+#[test]
+fn a_shallow_map_is_a_ring_and_a_hierarchy_is_a_tree() {
+    assert_eq!(
+        inferred_kind(&tree("root", vec![leaf("a"), leaf("b")])),
+        MapKind::Radial
+    );
+    assert_eq!(
+        inferred_kind(&tree("root", vec![tree("a", vec![leaf("a1")])])),
+        MapKind::Tree,
+        "three levels is a decomposition"
+    );
+    assert_eq!(inferred_kind(&levels(4)), MapKind::Tree);
+}
+
+#[test]
+fn an_arrangement_that_cannot_be_drawn_falls_back_to_the_ring() {
+    let one_child = tree("root", vec![leaf("only")]);
+    assert_eq!(fit_kind(MapKind::Compare, &one_child), MapKind::Radial);
+    let three_children = tree("root", vec![leaf("a"), leaf("b"), leaf("c")]);
+    assert_eq!(fit_kind(MapKind::Compare, &three_children), MapKind::Radial);
+    let two_children = tree("root", vec![leaf("a"), leaf("b")]);
+    assert_eq!(fit_kind(MapKind::Compare, &two_children), MapKind::Compare);
+    assert_eq!(
+        fit_kind(MapKind::Fishbone, &leaf("root")),
+        MapKind::Radial,
+        "a fishbone needs a cause to hang on its spine"
+    );
+    assert_eq!(
+        fit_kind(MapKind::Fishbone, &two_children),
+        MapKind::Fishbone
+    );
+}
+
+#[test]
+fn a_tree_reads_left_to_right_with_one_column_per_level() {
+    let map = tree(
+        "root",
+        vec![
+            tree("parts", vec![leaf("a"), leaf("b")]),
+            tree("assembly", vec![leaf("c")]),
+        ],
+    );
+    let board = layout_mindmap(
+        MapKind::Tree,
+        &map,
+        [100.0, 300.0],
+        400.0,
+        "#e01b24",
+        &mut measure_fn(),
+    );
+    let boxes: Vec<&sgraffito::canvas::Shape> = board
+        .shapes
+        .iter()
+        .filter(|shape| shape.kind == ShapeKind::Rect)
+        .collect();
+    assert_eq!(boxes.len(), 6);
+    let root = boxes.iter().find(|shape| shape.id == 1).unwrap();
+    // Every link goes rightward: no arrangement in this map may point back at the root.
+    for line in board
+        .shapes
+        .iter()
+        .filter(|shape| shape.kind == ShapeKind::Line)
+    {
+        assert!(
+            line.to[0] > line.from[0],
+            "a tree edge runs leftwards: {:?}",
+            (line.from, line.to)
+        );
+    }
+    // Children of one level share a column, and columns are ordered by depth.
+    let mut columns: Vec<f32> = boxes.iter().map(|shape| shape.from[0]).collect();
+    columns.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    columns.dedup_by(|a, b| (*a - *b).abs() < 1.0);
+    assert_eq!(columns.len(), 3, "one column per level: {columns:?}");
+    assert!(root.from[0] < columns[1], "the root is the leftmost column");
+    // The room's left edge is where a rightward map starts, not its middle: `[100, 300]` is the left
+    // edge of a 400-wide room, so the root's box begins just inside it.
+    assert!(
+        (root.from[0] - 124.0).abs() < 0.5,
+        "the tree did not start at the left edge of its room: {}",
+        root.from[0]
+    );
+}
+
+#[test]
+fn a_fishbone_hangs_causes_on_both_sides_of_one_spine() {
+    let map = tree(
+        "effect",
+        vec![
+            tree("people", vec![leaf("training")]),
+            leaf("process"),
+            tree("tools", vec![leaf("licences")]),
+        ],
+    );
+    let board = layout_mindmap(
+        MapKind::Fishbone,
+        &map,
+        [80.0, 300.0],
+        400.0,
+        "#33d17a",
+        &mut measure_fn(),
+    );
+    let lines: Vec<&sgraffito::canvas::Shape> = board
+        .shapes
+        .iter()
+        .filter(|shape| shape.kind == ShapeKind::Line)
+        .collect();
+    // The spine, one bone per cause, and one line per grandchild.
+    assert_eq!(lines.len(), 1 + 3 + 2, "{lines:?}");
+    let spine = lines
+        .iter()
+        .find(|line| line.attach[1].is_none())
+        .expect("a spine has one free end");
+    assert!((spine.from[1] - 300.0).abs() < 0.5 && (spine.to[1] - 300.0).abs() < 0.5);
+    let causes: Vec<&sgraffito::canvas::Shape> = board
+        .shapes
+        .iter()
+        .filter(|shape| shape.kind == ShapeKind::Rect)
+        .collect();
+    let above = causes
+        .iter()
+        .filter(|shape| shape.centre()[1] < 300.0)
+        .count();
+    let below = causes
+        .iter()
+        .filter(|shape| shape.centre()[1] > 300.0)
+        .count();
+    assert!(
+        above >= 1 && below >= 1,
+        "every cause is on one side of the spine: {above}/{below}"
+    );
+    // Every label is horizontal: a box's text is centred and no shape is turned.
+    for shape in &board.shapes {
+        assert_eq!(shape.rotate, 0.0, "a label or box was turned");
+    }
+}
+
+#[test]
+fn a_comparison_puts_what_two_subjects_share_between_them() {
+    let map = tree(
+        "Robot vs car",
+        vec![
+            tree("Robot", vec![leaf("Camera"), leaf("Wheels")]),
+            tree("Car", vec![leaf("Engine"), leaf("Wheels")]),
+        ],
+    );
+    let board = layout_mindmap(
+        MapKind::Compare,
+        &map,
+        [400.0, 300.0],
+        400.0,
+        "#3584e4",
+        &mut measure_fn(),
+    );
+    let box_of = |text: &str| -> (f32, f32) {
+        let label = board
+            .texts
+            .iter()
+            .find(|item| item.text == text)
+            .unwrap_or_else(|| panic!("no label {text}"));
+        let shape = board
+            .shapes
+            .iter()
+            .find(|shape| Some(shape.id) == label.container)
+            .unwrap();
+        let centre = shape.centre();
+        (centre[0], centre[1])
+    };
+    let (left, _) = box_of("Robot");
+    let (right, _) = box_of("Car");
+    let (shared, _) = box_of("Wheels");
+    assert!(left < shared && shared < right, "{left} {shared} {right}");
+    // What only one subject has stays in that subject's column; only the shared attribute is between.
+    assert!(
+        (box_of("Camera").0 - left).abs() < 1.0,
+        "Camera left its subject's column"
+    );
+    assert!(
+        (box_of("Engine").0 - right).abs() < 1.0,
+        "Engine left its subject's column"
+    );
+    // The shared attribute hangs from both subjects, so it is drawn twice.
+    let shared_id = board
+        .texts
+        .iter()
+        .find(|item| item.text == "Wheels")
+        .and_then(|item| item.container)
+        .unwrap();
+    let into_shared = board
+        .shapes
+        .iter()
+        .filter(|shape| {
+            shape.kind == ShapeKind::Line && shape.attach[1].is_some_and(|a| a.shape == shared_id)
+        })
+        .count();
+    assert_eq!(
+        into_shared, 2,
+        "the shared node is not joined to both subjects"
+    );
 }

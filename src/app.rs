@@ -1392,16 +1392,19 @@ impl App {
             (false, Some(key)) => vec![key],
             _ => self.outputs.keys().copied().collect(),
         };
-        // The panel belongs to the board it was opened on. A screen that moves to another board hides it
-        // rather than leaving a preview over a board nobody will commit to.
-        if self.ai.output.is_some_and(|key| {
-            keys.contains(&key)
-                && self
-                    .outputs
-                    .get(&key)
-                    .is_some_and(|out| out.board() != name)
-        }) {
-            self.close_ai();
+        // The panel shows the board its screen is on, so a switch changes which conversation is on
+        // screen — never what that conversation may write. A request that belonged to the board being
+        // left stops before the board changes: its answer is not content anywhere.
+        if self.ai.open
+            && self.ai.output.is_some_and(|key| {
+                keys.contains(&key)
+                    && self
+                        .outputs
+                        .get(&key)
+                        .is_some_and(|out| out.board() != name)
+            })
+        {
+            self.follow_board(name);
         }
         // A gesture in flight is not in the document, and the duplicate an `Alt` drag made names indices on
         // the board being left: kept, the next `Esc` would remove an element of the board switched to.
@@ -1676,12 +1679,12 @@ impl App {
         true
     }
 
-    // The AI panel. Its whole visible state is memory: opening it changes no document, and closing it
-    // keeps the transcript so reopening in the same session continues the conversation. The diagram it
-    // produces is committed as ordinary board content and is undoable, selectable and editable there.
+    // The AI panel. Its whole visible state is memory, and it is kept per board: one window, and one
+    // conversation for each board it is used on. Opening it changes no document; the diagram a
+    // conversation produces is ordinary board content and is undoable, selectable and editable there.
 
-    /// Open the panel on `acting`'s screen — else the focused one, else the first — and give it the
-    /// keyboard. The document is not touched.
+    /// Open the panel on `acting`'s screen — else the focused one, else the first — and show that
+    /// screen's board's own conversation. The document is not touched.
     pub(crate) fn open_ai(&mut self, acting: Option<u32>) -> bool {
         if self.mode != Mode::Edit {
             self.set_mode(Mode::Edit);
@@ -1695,26 +1698,46 @@ impl App {
         self.end_text_edit();
         self.commit_rename();
         self.close_panels();
+        if self.ai.streaming() {
+            self.ai.abort();
+        }
+        let board = self
+            .outputs
+            .get(&key)
+            .map(|out| out.board().to_string())
+            .unwrap_or_default();
+        self.ai.enter(&board);
         self.ai.open = true;
         self.ai.output = Some(key);
         self.ai.focus = true;
-        self.ai.preedit.clear();
         self.sync_text_input();
         self.refresh_ai();
         self.dirty = true;
         true
     }
 
-    /// Hide the panel and stop the request. The transcript and the ids of the diagram this chat placed
-    /// stay, so a later prompt in the same session replaces the same diagram.
+    /// The board on screen changed: switch the panel to that board's conversation, and stop an answer
+    /// that belonged to the board being left. Every board keeps its own transcript, draft and diagram
+    /// ids, so nothing crosses between them.
+    pub(crate) fn follow_board(&mut self, board: &str) {
+        if self.ai.streaming() {
+            self.ai.abort();
+        }
+        self.ai.enter(board);
+        self.sync_text_input();
+        self.refresh_ai();
+        self.dirty = true;
+    }
+
+    /// Hide the panel and stop the request. Every board's conversation and diagram ids stay, so a later
+    /// prompt in the same session continues where it left off.
     pub(crate) fn close_ai(&mut self) {
         if !self.ai.open {
             return;
         }
         self.ai.abort();
-        self.ai.preview = None;
+        self.ai.clear_preview();
         self.ai.focus = false;
-        self.ai.preedit.clear();
         self.ai.pointer_captured = false;
         self.ai.output = None;
         self.ai.open = false;
@@ -1726,11 +1749,11 @@ impl App {
     /// Take the keyboard out of the panel's input line and leave the panel open: a press on the canvas
     /// goes on to draw, but the conversation stays readable.
     pub(crate) fn blur_ai(&mut self) {
-        if !self.ai.focus && self.ai.preedit.is_empty() {
+        if !self.ai.focus && self.ai.session().preedit.is_empty() {
             return;
         }
         self.ai.focus = false;
-        self.ai.preedit.clear();
+        self.ai.session_mut().preedit.clear();
         self.sync_text_input();
         self.refresh_ai();
         self.dirty = true;
@@ -1751,8 +1774,8 @@ impl App {
         (self.renderer.ai_log_height(&view, layout.log.w) - layout.log.h).max(0.0)
     }
 
-    /// Draw the chat's current state on the screen that owns the panel, and clear it everywhere else.
-    /// One panel, on one output: the others must not keep a stale copy of it.
+    /// Draw the shown conversation on the screen that owns the panel, and clear the panel everywhere
+    /// else. One panel, on one output: the others must not keep a stale copy of it.
     pub(crate) fn refresh_ai(&mut self) {
         let Some(key) = self.ai.output else {
             for out in self.outputs.values_mut() {
@@ -1776,13 +1799,16 @@ impl App {
         let mut view = self.ai.view();
         let content = self.renderer.ai_log_height(&view, layout.log.w);
         let max = (content - layout.log.h).max(0.0);
-        self.ai.scroll = if self.ai.follow {
-            max
-        } else {
-            self.ai.scroll.clamp(0.0, max)
-        };
-        view.scroll = self.ai.scroll;
-        let preview = self.ai.preview.clone();
+        {
+            let session = self.ai.session_mut();
+            session.scroll = if session.follow {
+                max
+            } else {
+                session.scroll.clamp(0.0, max)
+            };
+            view.scroll = session.scroll;
+        }
+        let preview = self.ai.session().preview.clone();
         for (output_key, out) in self.outputs.iter_mut() {
             let had_panel = out.overlay.ai.is_some();
             let had_preview = out.overlay.ai_preview.is_some();
@@ -1802,25 +1828,25 @@ impl App {
         self.dirty = true;
     }
 
-    /// Send the typed prompt. Every refusal leaves the prompt in the input so it can be edited rather
-    /// than retyped.
+    /// Send the typed prompt against the board on screen. Every refusal leaves the prompt in the input
+    /// so it can be edited rather than retyped.
     pub(crate) fn send_ai(&mut self) {
         if self.ai.streaming() {
             return;
         }
-        let prompt = self.ai.input.text.trim().to_string();
+        let prompt = self.ai.session().input.text.trim().to_string();
         if prompt.is_empty() {
             return;
         }
         if prompt.len() > crate::ai::MAX_PROMPT_BYTES {
-            self.ai.error = Some("prompt is too long".into());
+            self.ai.session_mut().error = Some("prompt is too long".into());
             self.refresh_ai();
             return;
         }
         let settings = match crate::ai::resolve(crate::config::current()) {
             Ok(settings) => settings,
             Err(e) => {
-                self.ai.error = Some(e);
+                self.ai.session_mut().error = Some(e);
                 self.refresh_ai();
                 return;
             }
@@ -1844,38 +1870,40 @@ impl App {
             self.cancel_ai("the AI panel's board is gone");
             return;
         }
-        // The diagram goes where the panel is not: the left half of what the panel leaves, at the
-        // middle of the output's height, in canvas coordinates.
+        if self.ai.board() != board {
+            // The screen moved to another board without the panel being told: never answer onto a board
+            // this conversation does not belong to.
+            self.follow_board(&board);
+        }
+        // The diagram goes where the panel is not: the strip the panel leaves, at the middle of the
+        // output's height, in canvas coordinates. Its arrangement decides where in that room it grows.
         let layout = crate::render::ai_panel_layout(size, toolbar.as_ref());
-        let at = [(layout.panel.x * 0.5).max(120.0), size.1 * 0.5];
-        self.ai.anchor = view.to_canvas(at);
-        self.ai.target_board = board;
+        let strip = [(layout.panel.x - 24.0).max(48.0), size.1 * 0.5];
+        let anchor = view.to_canvas([48.0, strip[1]]);
+        let room = (strip[0] - 48.0).max(0.0) / view.zoom;
         let colors = &crate::config::current().colors;
-        self.ai.color = colors
+        let color = colors
             .get(self.color_idx)
             .cloned()
             .unwrap_or_else(|| colors[0].clone());
-        self.ai.preview = None;
-        self.ai.error = None;
-        self.ai.follow = true;
-        self.ai.messages.push(crate::ai::Message {
-            role: crate::ai::Role::User,
-            text: prompt,
-            streaming: false,
-        });
-        self.ai.messages.push(crate::ai::Message {
-            role: crate::ai::Role::Assistant,
-            text: String::new(),
-            streaming: true,
-        });
-        self.ai.input = TextBuffer::new("");
-        self.ai.preedit.clear();
+        {
+            let session = self.ai.session_mut();
+            session.anchor = anchor;
+            session.room = room;
+            session.color = color;
+            session.preview = None;
+            session.error = None;
+            session.follow = true;
+            session.push(crate::ai::Role::User, prompt, false);
+            session.push(crate::ai::Role::Assistant, String::new(), true);
+            session.input = TextBuffer::new("");
+            session.preedit.clear();
+        }
         self.refresh_ai();
         if let Err(e) = self.ai.start(settings, self.ping.clone()) {
-            if let Some(last) = self.ai.messages.last_mut() {
-                last.streaming = false;
-            }
-            self.ai.error = Some(e);
+            let session = self.ai.session_mut();
+            session.stop_streaming();
+            session.error = Some(e);
             self.refresh_ai();
         }
     }
@@ -1886,11 +1914,16 @@ impl App {
     }
 
     /// Give up on the request in flight for `reason` and say so. The document is untouched: a partial
-    /// answer was never content.
+    /// answer was never content, and it belongs to the board that asked for it.
     pub(crate) fn cancel_ai(&mut self, reason: &str) {
+        let board = self
+            .ai
+            .streaming_board()
+            .map(str::to_string)
+            .unwrap_or_else(|| self.ai.board().to_string());
         self.ai.abort();
-        self.ai.preview = None;
-        self.ai.error = Some(reason.to_string());
+        // The failure belongs to the board that asked, which is not always the one on screen.
+        self.ai.fail(&board, reason);
         self.refresh_ai();
         self.dirty = true;
     }
@@ -1904,9 +1937,10 @@ impl App {
         }
         let streaming = self.ai.streaming();
         if streaming
-            && self.ai.last_preview.elapsed() >= crate::ai::PREVIEW_INTERVAL
+            && self.ai.session().last_preview.elapsed() >= crate::ai::PREVIEW_INTERVAL
             && self
                 .ai
+                .session()
                 .messages
                 .last()
                 .is_some_and(|message| !message.text.is_empty())
@@ -1914,17 +1948,17 @@ impl App {
             self.refresh_ai_preview();
         }
         if was && !streaming {
-            if self.ai.error.is_some() {
+            if self.ai.session().error.is_some() {
                 // A failed or stopped request leaves nothing on the board, not even the part that parsed.
-                self.ai.preview = None;
+                self.ai.clear_preview();
                 self.refresh_ai();
             } else {
                 self.refresh_ai_preview();
-                if self.ai.error.is_none() {
+                if self.ai.session().error.is_none() {
                     self.commit_ai_preview();
                 }
             }
-            self.ai.follow = true;
+            self.ai.session_mut().follow = true;
             self.refresh_ai();
         }
     }
@@ -1932,7 +1966,7 @@ impl App {
     /// Re-parse the answer so far and lay it out. A half-received answer that does not parse yet keeps
     /// the previous preview; a complete one that does not parse is an error and changes no document.
     fn refresh_ai_preview(&mut self) {
-        let Some(last) = self.ai.messages.last() else {
+        let Some(last) = self.ai.session().messages.last() else {
             return;
         };
         if last.role != crate::ai::Role::Assistant {
@@ -1940,52 +1974,74 @@ impl App {
         }
         let text = last.text.clone();
         let streaming = last.streaming;
-        let made = crate::ai::extract_mermaid(&text)
-            .ok_or_else(|| "AI did not return a valid Mermaid mindmap".to_string())
-            .and_then(|mermaid| crate::ai::parse_mindmap(&mermaid));
-        let tree = match made {
+        let failure = "AI did not return a valid Mermaid mindmap".to_string();
+        let mermaid = crate::ai::extract_mermaid(&text);
+        let parsed = mermaid
+            .as_deref()
+            .map(crate::ai::parse_mindmap)
+            .unwrap_or_else(|| Err(failure.clone()));
+        let tree = match parsed {
             Ok(tree) => tree,
             Err(reason) => {
-                if !streaming && self.ai.error.is_none() {
-                    self.ai.error = Some(reason);
-                    self.ai.preview = None;
+                if !streaming && self.ai.session().error.is_none() {
+                    self.ai.session_mut().error = Some(if reason.starts_with("the mind map") {
+                        reason
+                    } else {
+                        failure
+                    });
+                    self.ai.clear_preview();
                     self.refresh_ai();
                     self.dirty = true;
                 }
                 return;
             }
         };
-        let anchor = self.ai.anchor;
-        let color = self.ai.color.clone();
+        // The answer may name its arrangement in a `%%` line; otherwise the shape of the tree decides.
+        let kind = mermaid
+            .as_deref()
+            .and_then(crate::ai::layout_directive)
+            .unwrap_or_else(|| crate::ai::inferred_kind(&tree));
+        let (anchor, room, color) = {
+            let session = self.ai.session();
+            (session.anchor, session.room, session.color.clone())
+        };
         let renderer = &mut self.renderer;
-        let board = crate::ai::layout_mindmap(&tree, anchor, &color, &mut |text, size, wrap| {
-            renderer.measure_text(text, size, wrap)
-        });
-        self.ai.preview = Some(board);
-        self.ai.last_preview = Instant::now();
+        let board = crate::ai::layout_mindmap(
+            kind,
+            &tree,
+            anchor,
+            room,
+            &color,
+            &mut |text, size, wrap| renderer.measure_text(text, size, wrap),
+        );
+        let session = self.ai.session_mut();
+        session.preview = Some(board);
+        session.last_preview = Instant::now();
         self.refresh_ai();
     }
 
-    /// Write the preview into its board as one change: the diagram this chat placed last time is
-    /// removed, the new one appended, and the whole replacement is one undo step.
+    /// Write the preview into its board as one change: the diagram this conversation placed last time
+    /// is removed, the new one appended, and the whole replacement is one undo step. The board is the
+    /// one the conversation was started on, never the one that happens to be on screen now.
     fn commit_ai_preview(&mut self) {
-        let Some(preview) = self.ai.preview.take() else {
+        let Some(preview) = self.ai.session_mut().preview.take() else {
             return;
         };
+        let board_name = self.ai.board().to_string();
         let before = self.doc.clone();
-        let target = self.ai.target_board.clone();
-        let Some(board) = self.doc.boards.get_mut(&target) else {
-            self.ai.error = Some(format!("the AI diagram's board '{target}' is gone"));
+        let Some(board) = self.doc.boards.get_mut(&board_name) else {
+            self.ai.session_mut().error =
+                Some(format!("the AI diagram's board '{board_name}' is gone"));
             self.refresh_ai();
             return;
         };
-        let mut removed_items = Vec::new();
-        for id in &self.ai.placed_shapes {
-            if let Some(index) = board.shape_index_by_id(*id) {
-                removed_items.push(ItemId::Shape(index));
+        let mut shapes_to_remove = Vec::new();
+        for id in self.ai.session().placed_shapes.clone() {
+            if let Some(index) = board.shape_index_by_id(id) {
+                shapes_to_remove.push(ItemId::Shape(index));
             }
         }
-        let removed = board.remove(&removed_items);
+        let removed = board.remove(&shapes_to_remove);
         let (appended, added) = board.append(&preview);
         let synced = board.sync_connectors();
         // The commit centres every label on its node with the renderer's own measurement, so the
@@ -2017,14 +2073,15 @@ impl App {
                 *text = placed;
             }
         }
-        self.ai.placed_shapes = appended
+        let placed_shapes: Vec<u64> = appended
             .iter()
             .filter_map(|id| match id {
                 ItemId::Shape(index) => board.shapes.get(*index).map(|shape| shape.id),
                 _ => None,
             })
             .collect();
-        let count = self.ai.placed_shapes.len();
+        let count = placed_shapes.len();
+        self.ai.session_mut().placed_shapes = placed_shapes;
         let mut box_: Option<Rect> = None;
         for part in [removed, added, synced].into_iter().flatten() {
             box_ = Some(box_.map_or(part, |box_| box_.union(part)));
@@ -2036,10 +2093,12 @@ impl App {
             }
             _ => self.doc_changed(),
         }
-        self.ai.preview = None;
-        self.ai.follow = true;
+        self.ai.clear_preview();
+        self.ai.session_mut().follow = true;
         self.refresh_ai();
-        log(&format!("AI diagram committed: {count} shapes"));
+        log(&format!(
+            "AI diagram committed on {board_name}: {count} shapes"
+        ));
     }
 
     /// Delete a board by name, from the panel's row that owns it. Everything the board holds goes with
@@ -2075,6 +2134,8 @@ impl App {
         // `switch_board` never schedules a write — a switch is a decision about this sitting — but a
         // deleted board has to leave the file or it is back the next time the daemon starts.
         self.store.mark_dirty(Instant::now());
+        // The conversation went with the board, like everything else it held.
+        self.ai.forget(name);
         log(&format!("board deleted: {name}"));
     }
 

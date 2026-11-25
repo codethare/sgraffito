@@ -309,6 +309,14 @@ timeout_secs = 180             # clamped to 5..=600
 `https://opencode.ai/inference/go` — gets `/openai/v1/chat/completions`. So
 `base_url = "https://opencode.ai/zen/go/v1"` posts to `https://opencode.ai/zen/go/v1/chat/completions`.
 
+Each board has its own conversation: the transcript, the draft in the input line, the error and the
+diagram are per board, and switching boards switches all of them. A prompt therefore never continues
+another board's conversation, and a follow-up replaces only the diagram its own board's conversation
+placed. The answer names the arrangement it wants in a Mermaid comment —
+`%% sgraffito layout: radial | tree | fishbone | compare` — for a brainstorm, a decomposition, the
+causes of one effect, or a comparison of exactly two things; a map that names none is drawn as a ring,
+or as a tree once it is three levels deep.
+
 An empty `api_key` means the file supplies none, and the environment is then the only source: the
 daemon reads `OPENCODE_GO_API_KEY`, `OPENCODE_ZEN_API_KEY` and `OPENCODE_API_KEY` on every request, from
 its own environment — start it where the key is exported (`exec` from a shell, or `environment=` in the
