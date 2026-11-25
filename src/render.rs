@@ -3608,6 +3608,7 @@ impl Renderer {
             (layout.edit, "edit", can_edit, editing),
             (layout.duplicate, "duplicate", can_duplicate, false),
             (layout.move_, "move to board", true, false),
+            (layout.ai, "ai", true, false),
         ] {
             if active {
                 let button = Rect {
@@ -5695,6 +5696,8 @@ pub fn toolbar_bounds_at(
 /// Widths of the controls inside the selection action card, in logical pixels.
 const ACTION_EDIT_W: f32 = 58.0;
 const ACTION_DUPLICATE_W: f32 = 92.0;
+/// The selection card's `ai` control: two letters, so a short plate.
+const ACTION_AI_W: f32 = 46.0;
 
 /// One card at the bottom centre of the canvas, present only while a selection is held.
 #[derive(Clone, Copy)]
@@ -5703,10 +5706,12 @@ struct ActionCardLayout {
     edit: Rect,
     duplicate: Rect,
     move_: Rect,
+    ai: Rect,
 }
 
 fn action_card_layout(size: (f32, f32)) -> ActionCardLayout {
-    let total = ACTION_EDIT_W + ACTION_DUPLICATE_W + MOVE_BUTTON_W + 2.0 * TOOLBAR_GAP;
+    let total =
+        ACTION_EDIT_W + ACTION_DUPLICATE_W + MOVE_BUTTON_W + ACTION_AI_W + 3.0 * TOOLBAR_GAP;
     let x = ((size.0 - total) / 2.0).max(TOOLBAR_MARGIN);
     let y = (size.1 - TOOLBAR_MARGIN - MOVE_BUTTON_H).max(0.0);
     let duplicate_x = x + ACTION_EDIT_W + TOOLBAR_GAP;
@@ -5735,6 +5740,12 @@ fn action_card_layout(size: (f32, f32)) -> ActionCardLayout {
             w: MOVE_BUTTON_W,
             h: MOVE_BUTTON_H,
         },
+        ai: Rect {
+            x: duplicate_x + ACTION_DUPLICATE_W + TOOLBAR_GAP * 2.0 + MOVE_BUTTON_W,
+            y,
+            w: ACTION_AI_W,
+            h: MOVE_BUTTON_H,
+        },
     }
 }
 
@@ -5756,6 +5767,12 @@ pub fn action_card_duplicate_bounds(size: (f32, f32)) -> Rect {
 /// The `move to board` control of the selection action card, in logical pixels.
 pub fn action_card_move_bounds(size: (f32, f32)) -> Rect {
     action_card_layout(size).move_
+}
+
+/// The `ai` control of the selection action card, in logical pixels: the conversation about what the
+/// selection holds.
+pub fn action_card_ai_bounds(size: (f32, f32)) -> Rect {
+    action_card_layout(size).ai
 }
 
 /// Where the caret and the preedit sit in a shaped line, in logical pixels relative to the

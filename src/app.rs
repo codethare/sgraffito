@@ -1707,6 +1707,16 @@ impl App {
     /// Open the panel on `acting`'s screen — else the focused one, else the first — and show that
     /// screen's board's own conversation. The document is not touched.
     pub(crate) fn open_ai(&mut self, acting: Option<u32>) -> bool {
+        self.open_ai_scope(acting, crate::ai::Scope::Board)
+    }
+
+    /// Open the conversation the selection's own card owns: its subject is what is selected, and it
+    /// shares nothing with the board's conversation. Falls back to the board's when nothing is held.
+    pub(crate) fn open_ai_selection(&mut self, acting: Option<u32>) -> bool {
+        self.open_ai_scope(acting, crate::ai::Scope::Selection)
+    }
+
+    fn open_ai_scope(&mut self, acting: Option<u32>, scope: crate::ai::Scope) -> bool {
         if self.mode != Mode::Edit {
             self.set_mode(Mode::Edit);
         }
@@ -1727,7 +1737,22 @@ impl App {
             .get(&key)
             .map(|out| out.board().to_string())
             .unwrap_or_default();
-        self.ai.enter(&board);
+        // A selection's conversation always has something to expand; with nothing held there is no
+        // subject for it, so the board's own conversation is what opens.
+        let seed = self
+            .ai_seed(key, &board)
+            .filter(|_| scope == crate::ai::Scope::Selection);
+        let scope = if seed.is_some() || scope == crate::ai::Scope::Board {
+            scope
+        } else {
+            crate::ai::Scope::Board
+        };
+        self.ai.enter_scope(&board, scope);
+        if scope == crate::ai::Scope::Selection {
+            // The panel keeps its subject even as the selection changes under it: what the card opened
+            // is what the request expands.
+            self.ai.session_mut().seed = seed;
+        }
         if !self.ai.open {
             // The card slides into place over the rail's own transition. Opening again while it is
             // still arriving keeps the clock it has, so the slide is not restarted mid-flight.
@@ -1902,11 +1927,11 @@ impl App {
         self.dirty = true;
     }
 
-    /// What the panel's board holds under the selection tool, as a request to expand it. Only the
-    /// panel's own board counts: a selection on another screen is not what this conversation is about.
-    fn ai_seed(&self, key: u32) -> Option<crate::canvas::Seed> {
+    /// What `board` holds under the selection tool, as a request to expand it. Only the board the
+    /// request is for counts: a selection on another screen is not what the conversation is about.
+    fn ai_seed(&self, key: u32, board: &str) -> Option<crate::canvas::Seed> {
         let out = self.outputs.get(&key)?;
-        if out.board() != self.ai.board() {
+        if out.board() != board {
             return None;
         }
         let selection = out.overlay.selection.as_ref()?;
@@ -1926,7 +1951,11 @@ impl App {
         if self.ai.streaming() {
             return;
         }
-        let seed = self.ai.output.and_then(|key| self.ai_seed(key));
+        let seed = self
+            .ai
+            .output
+            .and_then(|key| self.ai_seed(key, self.ai.board()))
+            .or_else(|| self.ai.session().seed.clone());
         let typed = self.ai.session().input.text.trim().to_string();
         let prompt = if typed.is_empty() {
             if seed.is_none() {
@@ -2015,14 +2044,9 @@ impl App {
     /// Give up on the request in flight for `reason` and say so. The document is untouched: a partial
     /// answer was never content, and it belongs to the board that asked for it.
     pub(crate) fn cancel_ai(&mut self, reason: &str) {
-        let board = self
-            .ai
-            .streaming_board()
-            .map(str::to_string)
-            .unwrap_or_else(|| self.ai.board().to_string());
+        // The failure belongs to the conversation that asked, which is not always the one on screen.
+        self.ai.fail_asking(reason);
         self.ai.abort();
-        // The failure belongs to the board that asked, which is not always the one on screen.
-        self.ai.fail(&board, reason);
         self.refresh_ai();
         self.dirty = true;
     }

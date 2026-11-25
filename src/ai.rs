@@ -460,20 +460,36 @@ pub struct Moved {
     pub view: bool,
 }
 
-/// The AI panel: one window, showing the conversation of the board on screen.
+/// Which of a board's conversations the panel shows. The board has one of its own, opened by `I`; the
+/// card under a selection opens a second, whose subject is what is selected. They share the panel and
+/// nothing else: no transcript, no draft, no diagram and no error crosses between them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Scope {
+    /// The board's own conversation.
+    Board,
+    /// The selection's conversation, which the action card's `ai` opens and which expands in place.
+    Selection,
+}
+
+/// The AI panel: one window, showing one conversation at a time.
 ///
-/// The window is one and its conversations are many. The transcript, the draft, the error, the scroll
-/// and the diagram belong to a board, so switching boards switches which conversation is shown and
-/// nothing else: no board can read another's context or replace another's diagram.
+/// The window is one and its conversations are many: one per board, plus one per board for the
+/// selection. The transcript, the draft, the error, the scroll and the diagram belong to a
+/// conversation, so switching boards or scopes switches which one is shown and nothing else: no
+/// conversation can read another's context or replace another's diagram.
 pub struct Chat {
     pub open: bool,
     /// The output the panel is drawn on. One panel, on one screen.
     pub output: Option<u32>,
     /// Whether the input line owns the keyboard.
     pub focus: bool,
-    /// The board whose conversation is shown, and the one a prompt is sent against.
+    /// The board the shown conversation belongs to, and the one an answer is placed on.
     board: String,
-    sessions: std::collections::BTreeMap<String, Session>,
+    /// Which of that board's conversations is shown.
+    scope: Scope,
+    /// `(board, scope)` as one key, so the map is read without allocating a string per frame.
+    key: (String, Scope),
+    sessions: std::collections::BTreeMap<(String, Scope), Session>,
     /// The session header the Go endpoint wants. One id per process, so a follow-up continues it.
     pub api_session: String,
     /// A press that went down inside the panel owns the pointer until it is released.
@@ -481,9 +497,9 @@ pub struct Chat {
     /// When the panel last opened: its card slides into place over the rail's own transition, and this
     /// is the clock that drives it. `None` until it has opened once.
     pub open_since: Option<Instant>,
-    /// The board whose answer is still arriving. A delta lands in that board's conversation, never in
-    /// whichever board happens to be on screen when it arrives.
-    streaming_board: Option<String>,
+    /// The conversation an answer is still arriving for. A delta lands there, never in whichever
+    /// conversation happens to be on screen when it arrives.
+    streaming: Option<(String, Scope)>,
     generation: Option<Generation>,
     rx: Option<mpsc::Receiver<AiEvent>>,
 }
@@ -497,61 +513,78 @@ impl Default for Chat {
 impl Chat {
     pub fn new() -> Self {
         let mut sessions = std::collections::BTreeMap::new();
-        sessions.insert(String::new(), Session::new());
+        sessions.insert((String::new(), Scope::Board), Session::new());
         Self {
             open: false,
             output: None,
             focus: false,
             board: String::new(),
+            scope: Scope::Board,
+            key: (String::new(), Scope::Board),
             sessions,
             api_session: session_id(),
             pointer_captured: false,
             open_since: None,
-            streaming_board: None,
+            streaming: None,
             generation: None,
             rx: None,
         }
     }
 
-    /// The board whose conversation is shown.
+    /// The board the shown conversation belongs to, which is where its answer is placed.
     pub fn board(&self) -> &str {
         &self.board
     }
 
-    /// The conversation shown. A board that has never been asked anything has an empty one, created on
+    /// Which of the board's conversations is shown.
+    pub fn scope(&self) -> Scope {
+        self.scope
+    }
+
+    /// The conversation shown. A scope that has never been asked anything has an empty one, created on
     /// first sight so the panel can always draw something.
     pub fn session(&self) -> &Session {
         self.sessions
-            .get(&self.board)
-            .expect("a shown board always has a conversation")
+            .get(&self.key)
+            .expect("a shown conversation always exists")
     }
 
     pub fn session_mut(&mut self) -> &mut Session {
-        self.sessions.entry(self.board.clone()).or_default()
+        self.sessions.entry(self.key.clone()).or_default()
     }
 
-    /// Show `board`'s own conversation. Returns whether the shown board changed, so the caller can
-    /// stop a request that belonged to the board being left.
+    /// Show `board`'s own conversation. Returns whether what is shown changed, so the caller can stop a
+    /// request that belonged to the conversation being left.
     pub fn enter(&mut self, board: &str) -> bool {
-        if self.board == board {
-            self.sessions.entry(self.board.clone()).or_default();
+        self.enter_scope(board, Scope::Board)
+    }
+
+    /// Show one of `board`'s conversations.
+    pub fn enter_scope(&mut self, board: &str, scope: Scope) -> bool {
+        if self.board == board && self.scope == scope {
+            self.sessions.entry(self.key.clone()).or_default();
             return false;
         }
-        // A preedit is a composition in flight, not content: it belongs to the board it was begun on.
-        if let Some(previous) = self.sessions.get_mut(&self.board) {
+        // A preedit is a composition in flight, not content: it belongs to the conversation it was
+        // begun in.
+        if let Some(previous) = self.sessions.get_mut(&self.key) {
             previous.preedit.clear();
         }
         self.board = board.to_string();
-        self.sessions.entry(self.board.clone()).or_default();
+        self.scope = scope;
+        self.key = (self.board.clone(), scope);
+        self.sessions.entry(self.key.clone()).or_default();
         true
     }
 
-    /// Forget a board's conversation: the board itself is gone. A panel still showing that board keeps
+    /// Forget a board's conversations: the board itself is gone. A panel still showing that board keeps
     /// an empty conversation rather than a hole, so the window can always be drawn.
     pub fn forget(&mut self, board: &str) {
-        self.sessions.remove(board);
+        for scope in [Scope::Board, Scope::Selection] {
+            self.sessions.remove(&(board.to_string(), scope));
+        }
         if self.board == board {
-            self.sessions.insert(self.board.clone(), Session::new());
+            self.sessions.insert(self.key.clone(), Session::new());
         }
     }
 
@@ -564,16 +597,28 @@ impl Chat {
         session.seed = None;
     }
 
-    /// Record a failure against `board`'s conversation, whether or not that board is on screen.
+    /// Record a failure against `board`'s own conversation, whether or not that board is on screen.
     pub fn fail(&mut self, board: &str, reason: &str) {
-        let session = self.sessions.entry(board.to_string()).or_default();
+        let session = self
+            .sessions
+            .entry((board.to_string(), Scope::Board))
+            .or_default();
+        session.preview = None;
+        session.error = Some(reason.to_string());
+    }
+
+    /// Record a failure against the conversation that asked for the answer, which is not always the one
+    /// on screen.
+    pub fn fail_asking(&mut self, reason: &str) {
+        let key = self.streaming.clone().unwrap_or_else(|| self.key.clone());
+        let session = self.sessions.entry(key).or_default();
         session.preview = None;
         session.error = Some(reason.to_string());
     }
 
     /// The board an answer is arriving for, if one is.
     pub fn streaming_board(&self) -> Option<&str> {
-        self.streaming_board.as_deref()
+        self.streaming.as_ref().map(|(board, _)| board.as_str())
     }
 
     /// Whether a request is still arriving.
@@ -596,10 +641,7 @@ impl Chat {
                 .collect(),
             input: session.input.clone(),
             preedit: session.preedit.clone(),
-            streaming: self
-                .streaming_board
-                .as_deref()
-                .is_some_and(|board| board == self.board),
+            streaming: self.streaming.as_ref().is_some_and(|key| *key == self.key),
             error: session.error.clone(),
             scroll: session.scroll,
             burst: session.burst_drawn,
@@ -699,7 +741,7 @@ impl Chat {
         thread::spawn(move || read_stream(stdout, tx, ping, key_present));
         self.generation = Some(Generation { child });
         self.rx = Some(rx);
-        self.streaming_board = Some(self.board.clone());
+        self.streaming = Some(self.key.clone());
         Ok(())
     }
 
@@ -715,9 +757,9 @@ impl Chat {
         if events.is_empty() {
             return false;
         }
-        // The answer belongs to the board it was asked on, even if another board is on screen now.
-        let board = self.streaming_board.clone().unwrap_or_default();
-        let session = self.sessions.entry(board).or_default();
+        // The answer belongs to the conversation it was asked in, even if another is on screen now.
+        let key = self.streaming.clone().unwrap_or_else(|| self.key.clone());
+        let session = self.sessions.entry(key).or_default();
         let mut changed = false;
         let mut finished = false;
         let mut oversized = false;
@@ -754,7 +796,7 @@ impl Chat {
             // generation kills and reaps the child.
             self.rx = None;
             self.generation = None;
-            self.streaming_board = None;
+            self.streaming = None;
             session.stop_streaming();
         }
         changed
@@ -765,11 +807,8 @@ impl Chat {
     pub fn abort(&mut self) {
         self.rx = None;
         self.generation = None;
-        let board = self
-            .streaming_board
-            .take()
-            .unwrap_or_else(|| self.board.clone());
-        if let Some(session) = self.sessions.get_mut(&board) {
+        let key = self.streaming.take().unwrap_or_else(|| self.key.clone());
+        if let Some(session) = self.sessions.get_mut(&key) {
             for message in &mut session.messages {
                 message.streaming = false;
             }

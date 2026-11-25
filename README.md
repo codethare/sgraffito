@@ -82,6 +82,7 @@ Every mark on the canvas is drawn as a **hand-drawn** one: a pen stroke is one s
 | `d` / `r` / `n` while the boards panel is open | delete / rename the board this screen shows / create `Board N`; these are the list's own keys, not the diamond, rectangle or note tools |
 | `F` | switch between one board on every screen and one board per screen — the drawer's own row |
 | `I` | open the AI mind-map panel: describe a map, and the Mermaid `mindmap` the model streams back is drawn on the board as it arrives and committed as ordinary shapes and text when it is complete (`Enter` sends, `Shift`+`Enter` adds a line, `Esc` closes it). With something selected under `V`, an empty `Enter` expands that selection instead: the words are named to the model, the answer is laid out where they stood and replaces them in the same undo step, and the answer is what the selection holds afterwards |
+| `Shift`+`I` | open the conversation the selection owns, the one the card's `ai` control opens: the same panel, with its own transcript and its own diagram, so a map grown from a selection never mixes with the board's own conversation. With nothing selected it opens the board's conversation, which is what `I` does |
 | `1`–`5` | pick a colour |
 | `[` / `]` | shrink / grow the active tool's size — pen width, or text size while the text tool is armed — and, with a selection held, the width of its strokes and shapes and the size of its text boxes |
 | `Esc` | close the AI panel, else the open drawer, else cancel the drag in progress, else finish the text edit, else clear the selection, else return to the locked mode |
@@ -172,6 +173,8 @@ The pointer follows the armed tool through `wp_cursor_shape_v1`: a crosshair for
 - Elements are duplicated directly, never through the compositor clipboard: `Ctrl+D` or the action card's `duplicate` control clones the held elements with a small offset and selects the copies, and `Alt`-dragging still clones and drags in one gesture. A container's bound label is included in the clone.
 - `Ctrl+V` always asks Wayland for the current plain-text selection. In a text box or bound label it inserts at the caret; outside one it creates a selected text box near the top of the view. There is no in-app element clipboard to outrank that selection, so text copied in another application reaches a sgraffito text box directly.
 - Sgraffito does not write the compositor clipboard. Text cut from one of its boxes is not implemented because the buffer has a caret but no selected text range.
+
+The card under a selection carries, beside `edit`, `duplicate` and `move to board`, an **`ai`** control that opens the panel on that selection's own conversation — the same `Shift`+`I` opens. A selection's conversation and the board's are two windows' worth of state in one panel: each has its own transcript, draft, error, scroll and diagram, so a follow-up in one can never read the other's context or replace its diagram, and `I` after an expansion shows the board's conversation untouched. The panel's scope stays where it was opened: the card's conversation keeps its subject when the selection moves under it, and switching boards puts the panel back on the board's own conversation.
 
 ## Drawer and backdrop
 

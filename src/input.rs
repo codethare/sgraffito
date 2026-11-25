@@ -37,8 +37,9 @@ use crate::canvas::{
     ZOOM_STEP, constrained_drag, grab_at, selected_linear, selection_frame_with,
 };
 use crate::render::{
-    action_card_bounds, action_card_duplicate_bounds, action_card_edit_bounds,
-    action_card_move_bounds, closes_panel_on_pick, panel_stays_open, press_dismisses_panel,
+    action_card_ai_bounds, action_card_bounds, action_card_duplicate_bounds,
+    action_card_edit_bounds, action_card_move_bounds, closes_panel_on_pick, panel_stays_open,
+    press_dismisses_panel,
 };
 
 /// The input method's own log, off unless `SGRAFFITO_IM_TRACE` is set: a commit that does not appear is a
@@ -266,6 +267,20 @@ pub fn panel_action_for_keysym(keysym: Keysym, shift: bool) -> Option<ToolbarAct
         Keysym::c | Keysym::C => Some(ToolbarAction::Boards),
         Keysym::f | Keysym::F => Some(ToolbarAction::Shared),
         Keysym::i | Keysym::I => Some(ToolbarAction::Ai),
+        _ => None,
+    }
+}
+
+/// `I` opens the board's own conversation; `Shift+I` opens the one about what is selected, which is
+/// the same conversation the card under a selection opens with its `ai` control.
+pub fn ai_scope_for_keysym(keysym: Keysym, shift: bool) -> Option<crate::ai::Scope> {
+    match keysym {
+        Keysym::i => Some(crate::ai::Scope::Board),
+        Keysym::I => Some(if shift {
+            crate::ai::Scope::Selection
+        } else {
+            crate::ai::Scope::Board
+        }),
         _ => None,
     }
 }
@@ -542,6 +557,10 @@ impl KeyboardHandler for App {
         } else if self.ctrl && matches!(event.keysym, Keysym::v | Keysym::V) {
             // `Ctrl+V` is the compositor's text selection everywhere, including a text box.
             self.paste();
+        } else if ai_scope_for_keysym(event.keysym, self.shift) == Some(crate::ai::Scope::Selection)
+        {
+            // `Shift+I`: the conversation about what is selected, which the card's `ai` also opens.
+            self.open_ai_selection(self.keyboard_focus);
         } else if deletes_selection(event.keysym) {
             // The only key that removes content. It acts on the selection, so with nothing selected
             // it does nothing.
@@ -1204,6 +1223,8 @@ impl App {
                 self.duplicate_on(*key);
             } else if action_card_move_bounds(size).contains(x, y) {
                 self.open_target(Some(*key), Target::Move);
+            } else if action_card_ai_bounds(size).contains(x, y) {
+                self.open_ai_selection(Some(*key));
             }
             return;
         }

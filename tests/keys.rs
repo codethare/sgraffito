@@ -1,10 +1,11 @@
+use sgraffito::ai::Scope;
 use sgraffito::app::{MAX_PASTE_BYTES, Tool, read_selection, text_mime};
 use sgraffito::canvas::Caret;
 use sgraffito::canvas::ToolbarAction;
 use sgraffito::input::{
-    BoardListKey, EditAction, RenameKey, batch_changes, board_list_key, bytes_to_delete,
-    color_for_keysym, edit_action, panel_action_for_keysym, rename_key, size_step_for_keysym,
-    tool_for_keysym, wants_sampling,
+    BoardListKey, EditAction, RenameKey, ai_scope_for_keysym, batch_changes, board_list_key,
+    bytes_to_delete, color_for_keysym, edit_action, panel_action_for_keysym, rename_key,
+    size_step_for_keysym, tool_for_keysym, wants_sampling,
 };
 use smithay_client_toolkit::seat::keyboard::Keysym;
 
@@ -520,4 +521,15 @@ fn an_input_method_batch_that_carries_nothing_changes_nothing() {
     assert!(batch_changes("ni", "nihao", "", None));
     assert!(batch_changes("", "", "你", None));
     assert!(batch_changes("ni", "ni", "", Some((2, 0))));
+}
+
+#[test]
+fn i_and_shift_i_open_isolated_conversations() {
+    // The board's own conversation and the selection's are told apart by the modifier alone, which is
+    // the split `Shift+B` already uses for the backdrop.
+    assert_eq!(ai_scope_for_keysym(Keysym::i, false), Some(Scope::Board));
+    assert_eq!(ai_scope_for_keysym(Keysym::I, true), Some(Scope::Selection));
+    // Caps lock sends `I` with no shift held: that is the board's panel, not a surprise second window.
+    assert_eq!(ai_scope_for_keysym(Keysym::I, false), Some(Scope::Board));
+    assert_eq!(ai_scope_for_keysym(Keysym::p, true), None);
 }
