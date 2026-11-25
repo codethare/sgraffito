@@ -1,6 +1,6 @@
 use sgraffito::canvas::{
-    Board, ERASER_THRESHOLD, ItemId, LinearHandle, PALETTE, Rect, Shape, ShapeKind, Stroke,
-    TextItem, View, linear_handle_at, selected_linear, selection_with_contents,
+    Board, ERASER_THRESHOLD, ItemId, LinearHandle, PALETTE, Rect, SEED_MAX_CHARS, Shape, ShapeKind,
+    Stroke, TextItem, View, linear_handle_at, seed_of, selected_linear, selection_with_contents,
 };
 use sgraffito::sketch::SKETCH_SLACK;
 
@@ -2910,4 +2910,42 @@ fn selection_exposes_endpoints_while_edit_exposes_every_vertex() {
         selected_linear(&board, &[ItemId::Shape(0), ItemId::Shape(1)]),
         None
     );
+}
+
+#[test]
+fn a_seed_names_the_words_it_holds_and_how_to_remove_them() {
+    // A note with its own text and a labelled shape: the seed carries the words, the place, and the
+    // handles that take both away again. A label is named with its shape, never as a text of its own.
+    let shape = Shape {
+        id: 7,
+        ..shape(ShapeKind::Rect, [200.0, 200.0], [300.0, 260.0])
+    };
+    let mut a = ann(
+        vec![],
+        vec![
+            text(10.0, 10.0, "Robot"),
+            TextItem {
+                container: Some(7),
+                ..text(210.0, 220.0, "Sensors")
+            },
+        ],
+    );
+    a.shapes.push(shape);
+    let seed = seed_of(&a, &[ItemId::Text(0), ItemId::Shape(0)]).unwrap();
+    assert_eq!(seed.text, "Robot / Sensors");
+    assert_eq!(seed.shapes, vec![7]);
+    assert_eq!(seed.texts, vec![(0, "Robot".to_string())]);
+    assert!(seed.frame.w > 0.0 && seed.frame.h > 0.0, "{:?}", seed.frame);
+    // Nothing held, nothing to expand.
+    assert!(seed_of(&a, &[]).is_none());
+}
+
+#[test]
+fn a_seed_stops_naming_words_it_cannot_carry() {
+    // A long selection reaches the prompt as much of itself as fits, never as a truncated word.
+    let long = "x".repeat(SEED_MAX_CHARS - 1);
+    let a = ann(vec![], vec![text(0.0, 0.0, &long), text(0.0, 40.0, "tail")]);
+    let seed = seed_of(&a, &[ItemId::Text(0), ItemId::Text(1)]).unwrap();
+    assert!(seed.text.len() <= SEED_MAX_CHARS, "{}", seed.text.len());
+    assert!(!seed.text.contains("tail") || seed.text.len() <= SEED_MAX_CHARS);
 }

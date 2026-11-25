@@ -1756,6 +1756,7 @@ impl App {
         self.ai.pointer_captured = false;
         self.ai.output = None;
         self.ai.open = false;
+        log("AI panel closed");
         self.sync_text_input();
         self.refresh_ai();
         self.dirty = true;
@@ -1890,16 +1891,40 @@ impl App {
         self.dirty = true;
     }
 
+    /// What the panel's board holds under the selection tool, as a request to expand it. Only the
+    /// panel's own board counts: a selection on another screen is not what this conversation is about.
+    fn ai_seed(&self, key: u32) -> Option<crate::canvas::Seed> {
+        let out = self.outputs.get(&key)?;
+        if out.board() != self.ai.board() {
+            return None;
+        }
+        let selection = out.overlay.selection.as_ref()?;
+        if selection.items.is_empty() {
+            return None;
+        }
+        let board = self.doc.boards.get(out.board())?;
+        crate::canvas::seed_of(board, &selection.items)
+    }
+
     /// Send the typed prompt against the board on screen. Every refusal leaves the prompt in the input
     /// so it can be edited rather than retyped.
+    ///
+    /// An empty input with a selection is a request of its own: the selection is the subject, and the
+    /// answer takes its place.
     pub(crate) fn send_ai(&mut self) {
         if self.ai.streaming() {
             return;
         }
-        let prompt = self.ai.session().input.text.trim().to_string();
-        if prompt.is_empty() {
-            return;
-        }
+        let seed = self.ai.output.and_then(|key| self.ai_seed(key));
+        let typed = self.ai.session().input.text.trim().to_string();
+        let prompt = if typed.is_empty() {
+            if seed.is_none() {
+                return;
+            }
+            crate::ai::EXPAND_PROMPT.to_string()
+        } else {
+            typed
+        };
         if prompt.len() > crate::ai::MAX_PROMPT_BYTES {
             self.ai.session_mut().error = Some("prompt is too long".into());
             self.refresh_ai();
@@ -1953,6 +1978,7 @@ impl App {
             session.anchor = anchor;
             session.room = room;
             session.color = color;
+            session.seed = seed;
             session.preview = None;
             session.error = None;
             session.follow = true;
@@ -2013,17 +2039,21 @@ impl App {
         if self.ai.poll() {
             self.refresh_ai();
         }
+        // Rebuild only when the answer has grown since the last build. A stream that never sends its
+        // end marker stays open, and a timer that re-parsed the same text would spend the machine on
+        // nothing: an answer that is already on screen must not be laid out again.
         let streaming = self.ai.streaming();
-        if streaming
-            && self.ai.session().last_preview.elapsed() >= crate::ai::PREVIEW_INTERVAL
-            && self
+        if streaming && self.ai.session().last_preview.elapsed() >= crate::ai::PREVIEW_INTERVAL {
+            let answer_len = self
                 .ai
                 .session()
                 .messages
                 .last()
-                .is_some_and(|message| !message.text.is_empty())
-        {
-            self.refresh_ai_preview();
+                .filter(|message| !message.text.is_empty())
+                .map_or(0, |message| message.text.len());
+            if answer_len != self.ai.session().preview_len {
+                self.refresh_ai_preview();
+            }
         }
         if was && !streaming {
             if self.ai.session().error.is_some() {
@@ -2079,9 +2109,14 @@ impl App {
             .as_deref()
             .and_then(crate::ai::layout_directive)
             .unwrap_or_else(|| crate::ai::inferred_kind(&tree));
-        let (anchor, room, color) = {
+        let (anchor, room, color, seed) = {
             let session = self.ai.session();
-            (session.anchor, session.room, session.color.clone())
+            (
+                session.anchor,
+                session.room,
+                session.color.clone(),
+                session.seed.as_ref().map(|seed| seed.frame),
+            )
         };
         let renderer = &mut self.renderer;
         let board = crate::ai::layout_mindmap(
@@ -2092,9 +2127,17 @@ impl App {
             &color,
             &mut |text, size, wrap| renderer.measure_text(text, size, wrap),
         );
+        // A request asked to expand a selection is laid out at that selection, not in the strip the
+        // panel leaves: the answer takes the place of the words that asked for it.
+        let board = match seed {
+            Some(frame) => crate::ai::place_at(board, &tree, kind, frame, anchor[0] + room),
+            None => board,
+        };
+        let answer_len = text.len();
         let session = self.ai.session_mut();
         session.preview = Some(board);
         session.last_preview = Instant::now();
+        session.preview_len = answer_len;
         self.refresh_ai();
     }
 
@@ -2117,6 +2160,26 @@ impl App {
         for id in self.ai.session().placed_shapes.clone() {
             if let Some(index) = board.shape_index_by_id(id) {
                 shapes_to_remove.push(ItemId::Shape(index));
+            }
+        }
+        // The words this request was asked to expand give up their place to the answer. A text is
+        // removed only while it still says what was selected, so an edit made while the answer was
+        // arriving is never cut into.
+        let seed = self.ai.session().seed.clone();
+        if let Some(seed) = &seed {
+            for id in &seed.shapes {
+                if let Some(index) = board.shape_index_by_id(*id) {
+                    shapes_to_remove.push(ItemId::Shape(index));
+                }
+            }
+            for (index, text) in &seed.texts {
+                if board
+                    .texts
+                    .get(*index)
+                    .is_some_and(|held| &held.text == text)
+                {
+                    shapes_to_remove.push(ItemId::Text(*index));
+                }
             }
         }
         let removed = board.remove(&shapes_to_remove);
@@ -2160,6 +2223,27 @@ impl App {
             .collect();
         let count = placed_shapes.len();
         self.ai.session_mut().placed_shapes = placed_shapes;
+        // The answer is what the user wants next: it is selected on every screen showing its board, so a
+        // move, a colour or a delete acts on what the request just made.
+        let selected = crate::canvas::selection_with_contents(board, &appended);
+        let shown: Vec<u32> = self
+            .outputs
+            .iter()
+            .filter(|(_, out)| out.board() == board_name)
+            .map(|(key, _)| *key)
+            .collect();
+        if !shown.is_empty() && self.tool != Tool::Selection {
+            self.set_tool(Tool::Selection);
+        }
+        for key in shown {
+            if let Some(out) = self.outputs.get_mut(&key) {
+                out.overlay.selection = Some(Selection {
+                    items: selected.clone(),
+                    transform: None,
+                });
+                out.transient_dirty = true;
+            }
+        }
         let mut box_: Option<Rect> = None;
         for part in [removed, added, synced].into_iter().flatten() {
             box_ = Some(box_.map_or(part, |box_| box_.union(part)));
@@ -4799,9 +4883,6 @@ impl App {
     fn next_wait(&self) -> Duration {
         if self.animating() {
             FRAME_WAIT
-        } else if self.ai.streaming() {
-            // An answer arrives as tokens on another thread; the loop has to come back for them.
-            crate::ai::STREAM_FRAME
         } else if let Some(left) = self.ai.burst_hold_left(Instant::now()) {
             // The strip's number has to leave on its own clock, not on the next event.
             left.min(IDLE_WAIT)

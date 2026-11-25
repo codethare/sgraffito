@@ -24,7 +24,7 @@ use calloop::ping::Ping;
 use serde_json::{Value, json};
 
 use crate::canvas::{
-    AiMessageView, AiView, Attachment, Board, Shape, ShapeKind, TextBuffer, TextItem,
+    AiMessageView, AiView, Attachment, Board, Rect, Seed, Shape, ShapeKind, TextBuffer, TextItem,
 };
 use crate::config::{Config, DEFAULT_AI_MODEL};
 
@@ -68,8 +68,10 @@ pub const MAX_MINDMAP_NODES: usize = 80;
 /// How often a streaming answer is re-parsed for the live preview. The model arrives in tokens; a
 /// preview per token would re-lay out the whole diagram for no visible gain.
 pub const PREVIEW_INTERVAL: Duration = Duration::from_millis(120);
-/// The wait between frames while an answer streams.
-pub const STREAM_FRAME: Duration = Duration::from_millis(33);
+
+/// What `Return` sends when the input is empty and the board has a selection: the selection is the
+/// request, so naming the act is enough.
+pub const EXPAND_PROMPT: &str = "Expand the selected content into a mind map.";
 
 /// How far one wheel notch moves the transcript, in logical pixels, before a burst multiplies it.
 pub const SCROLL_PIXELS: f32 = 48.0;
@@ -348,6 +350,13 @@ pub struct Session {
     pub placed_shapes: Vec<u64>,
     /// When the preview was last rebuilt.
     pub last_preview: Instant,
+    /// How long the answer was when the preview was last laid out. A stream that has gone quiet must
+    /// not be re-parsed: the parse and the layout cost real work, and an endpoint that never closes
+    /// its stream would pay it several times a second forever.
+    pub preview_len: usize,
+    /// What this request was asked to expand, when it was sent with a selection: the answer is laid out
+    /// where that selection stood and takes its place.
+    pub seed: Option<Seed>,
 }
 
 impl Default for Session {
@@ -374,6 +383,8 @@ impl Session {
             preview: None,
             placed_shapes: Vec::new(),
             last_preview: Instant::now(),
+            preview_len: 0,
+            seed: None,
         }
     }
 
@@ -546,7 +557,11 @@ impl Chat {
 
     /// Clear the shown conversation's live preview: the answer it belonged to is not coming.
     pub fn clear_preview(&mut self) {
-        self.session_mut().preview = None;
+        let session = self.session_mut();
+        session.preview = None;
+        // The place the answer was to take is part of the preview, not of the conversation: a request
+        // that failed or was committed leaves no instruction behind for the next one.
+        session.seed = None;
     }
 
     /// Record a failure against `board`'s conversation, whether or not that board is on screen.
@@ -643,7 +658,8 @@ impl Chat {
         else {
             return Err("there is no prompt to send".into());
         };
-        let body = request_body(&settings, &session.messages, &prompt).to_string();
+        let seed = session.seed.as_ref().map(|seed| seed.text.as_str());
+        let body = request_body(&settings, &session.messages, &prompt, seed).to_string();
         crate::log::write(&format!(
             "ai: board {}, {} model {}, key {}",
             self.board,
@@ -771,7 +787,23 @@ fn session_id() -> String {
 }
 
 /// The OpenAI-compatible request body: one system turn, the history that has landed, and the prompt.
-fn request_body(settings: &AiSettings, messages: &[Message], prompt: &str) -> Value {
+/// The system turn: the mind-map rules, and the words of the selection the answer is to expand.
+fn system_prompt(seed: Option<&str>) -> String {
+    match seed.map(str::trim).filter(|text| !text.is_empty()) {
+        Some(text) => format!(
+            "{SYSTEM_PROMPT}\n\nThe user selected this content on the board and wants it expanded in \
+             place; the map's root is its subject:\n{text}"
+        ),
+        None => SYSTEM_PROMPT.to_string(),
+    }
+}
+
+fn request_body(
+    settings: &AiSettings,
+    messages: &[Message],
+    prompt: &str,
+    seed: Option<&str>,
+) -> Value {
     let landed: Vec<&Message> = messages
         .iter()
         .take(messages.len().saturating_sub(2))
@@ -788,7 +820,7 @@ fn request_body(settings: &AiSettings, messages: &[Message], prompt: &str) -> Va
         })
         .collect();
     let mut turns = Vec::with_capacity(history.len() + 2);
-    turns.push(json!({ "role": "system", "content": SYSTEM_PROMPT }));
+    turns.push(json!({ "role": "system", "content": system_prompt(seed) }));
     turns.extend(history);
     turns.push(json!({ "role": "user", "content": prompt }));
     json!({
@@ -1407,6 +1439,51 @@ pub fn layout_mindmap(
             .unwrap_or_else(|| radial_place(tree, anchor, measure)),
     };
     assemble(&placed, color, measure)
+}
+
+/// Move a laid-out map so it takes the place its selection held: a ring is centred on the selection, and
+/// a decomposition or a cause-and-effect map starts at the selection's left edge, growing leftward
+/// instead when the panel would cover it. `panel_left` is the canvas x the panel's card begins at.
+pub fn place_at(
+    board: Board,
+    tree: &MindNode,
+    kind: MapKind,
+    frame: Rect,
+    panel_left: f32,
+) -> Board {
+    let Some(bounds) = board_box(&board) else {
+        return board;
+    };
+    let (dx, dy) = match fit_kind(kind, tree) {
+        MapKind::Radial | MapKind::Compare => (
+            frame.centre()[0] - bounds.centre()[0],
+            frame.centre()[1] - bounds.centre()[1],
+        ),
+        MapKind::Tree | MapKind::Fishbone => {
+            // The words are gone by the time the map is drawn, so the map starts where they stood. A map
+            // too wide to run to the right of them grows leftward instead of off the screen, and one that
+            // fits nowhere stays at the place and is panned to.
+            let start = if frame.x + bounds.w <= panel_left {
+                frame.x
+            } else if frame.x - bounds.w >= 24.0 {
+                frame.x - bounds.w
+            } else {
+                frame.x
+            };
+            (start - bounds.x, frame.centre()[1] - bounds.centre()[1])
+        }
+    };
+    board.shifted(dx, dy)
+}
+
+/// The box a board's content covers, which is what a map has to be moved by.
+fn board_box(board: &Board) -> Option<Rect> {
+    board
+        .shapes
+        .iter()
+        .map(Shape::bounds)
+        .chain(board.texts.iter().map(TextItem::paint_bounds))
+        .reduce(Rect::union)
 }
 
 /// Where a diagram starts inside the room the panel leaves: a ring grows from the middle of the room,
@@ -2112,7 +2189,7 @@ mod tests {
                 streaming: true,
             },
         ];
-        let body = request_body(&settings, &messages, "second");
+        let body = request_body(&settings, &messages, "second", None);
         assert_eq!(body["stream"], serde_json::json!(true));
         assert_eq!(body["model"], serde_json::json!("test-model"));
         let turns = body["messages"].as_array().unwrap();
@@ -2127,6 +2204,89 @@ mod tests {
                 .iter()
                 .any(|turn| turn["role"] == serde_json::json!("assistant")
                     && turn["content"] == serde_json::json!(""))
+        );
+    }
+
+    #[test]
+    fn a_request_to_expand_a_selection_names_it() {
+        // The system turn is the only place the model hears what was selected, and it stays the plain
+        // rules when nothing was.
+        assert_eq!(system_prompt(None), SYSTEM_PROMPT);
+        assert_eq!(system_prompt(Some("   ")), SYSTEM_PROMPT);
+        let named = system_prompt(Some("Robot / Sensors"));
+        assert!(named.starts_with(SYSTEM_PROMPT), "{named}");
+        assert!(named.contains("Robot / Sensors"), "{named}");
+    }
+
+    #[test]
+    fn a_map_takes_the_place_of_the_selection_it_expands() {
+        // Two levels stay a ring, three become a decomposition, which is the rule the layout applies.
+        let ring_tree =
+            parse_mindmap("mindmap\n  root((Robot))\n    Sensors\n    Actuators\n").unwrap();
+        let tree = parse_mindmap("mindmap\n  root((Robot))\n    Sensors\n      Camera\n").unwrap();
+        let mut measure = |_: &str, size: f32, _: Option<f32>| (size, size);
+        let frame = Rect {
+            x: 400.0,
+            y: 300.0,
+            w: 120.0,
+            h: 80.0,
+        };
+        // A ring is centred on the selection it expands.
+        let ring = layout_mindmap(
+            MapKind::Radial,
+            &ring_tree,
+            [0.0, 0.0],
+            600.0,
+            "#ffffff",
+            &mut measure,
+        );
+        let placed = place_at(ring, &ring_tree, MapKind::Radial, frame, 800.0);
+        let box_ = board_box(&placed).unwrap();
+        assert!(
+            (box_.centre()[0] - frame.centre()[0]).abs() < 0.5,
+            "{box_:?}"
+        );
+        assert!(
+            (box_.centre()[1] - frame.centre()[1]).abs() < 0.5,
+            "{box_:?}"
+        );
+        // A tree starts where the words stood: they are gone by the time it is drawn.
+        let tree_map = layout_mindmap(
+            MapKind::Tree,
+            &tree,
+            [0.0, 0.0],
+            600.0,
+            "#ffffff",
+            &mut measure,
+        );
+        let placed = place_at(tree_map, &tree, MapKind::Tree, frame, 1200.0);
+        let box_ = board_box(&placed).unwrap();
+        assert!((box_.x - frame.x).abs() < 0.5, "{box_:?}");
+        assert!(
+            (box_.centre()[1] - frame.centre()[1]).abs() < 0.5,
+            "{box_:?}"
+        );
+        // A tree too wide to run to the right of them grows leftward, ending where they stood, rather
+        // than under the panel.
+        let tree_map = layout_mindmap(
+            MapKind::Tree,
+            &tree,
+            [0.0, 0.0],
+            600.0,
+            "#ffffff",
+            &mut measure,
+        );
+        let right_frame = Rect {
+            x: 600.0,
+            y: 300.0,
+            w: 120.0,
+            h: 80.0,
+        };
+        let placed = place_at(tree_map, &tree, MapKind::Tree, right_frame, 700.0);
+        let box_ = board_box(&placed).unwrap();
+        assert!(
+            (box_.x + box_.w - right_frame.x).abs() < 0.5,
+            "the map runs under the panel: {box_:?}"
         );
     }
 }

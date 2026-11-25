@@ -2974,6 +2974,82 @@ impl Transform {
     }
 }
 
+/// What a selection holds, in the terms a request to expand it needs: its words, the place it stands,
+/// and the items themselves so the answer can take their place.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Seed {
+    /// The selected words, joined as one line. Empty when nothing held carries any.
+    pub text: String,
+    /// Where the selection stood, in canvas coordinates.
+    pub frame: Rect,
+    /// The shapes to remove, by id.
+    pub shapes: Vec<u64>,
+    /// The texts to remove, by index, with the words they held: a text is removed only while it still
+    /// says what was selected, so a board edited during the request is not cut into.
+    pub texts: Vec<(usize, String)>,
+}
+
+/// The most words a seed carries into the prompt. A selection can be a whole note; the model needs the
+/// subject, not a transcription.
+pub const SEED_MAX_CHARS: usize = 800;
+
+/// The selection as a request to expand it, or `None` when it holds nothing that has a box.
+///
+/// A label is named with the shape it sits in: the words are read off the label, and the shape's id is
+/// what removes both, because [`Board::remove`] takes a container's text with it.
+pub fn seed_of(ann: &Board, items: &[ItemId]) -> Option<Seed> {
+    let mut words: Vec<&str> = Vec::new();
+    let mut shapes = Vec::new();
+    let mut texts = Vec::new();
+    for item in items {
+        match *item {
+            ItemId::Shape(index) => {
+                let Some(shape) = ann.shapes.get(index) else {
+                    continue;
+                };
+                if shape.id != 0 {
+                    shapes.push(shape.id);
+                }
+                for text in &ann.texts {
+                    if text.container == Some(shape.id) && !text.text.trim().is_empty() {
+                        words.push(text.text.trim());
+                    }
+                }
+            }
+            ItemId::Text(index) => {
+                let Some(text) = ann.texts.get(index) else {
+                    continue;
+                };
+                if text.container.is_some() {
+                    continue;
+                }
+                if !text.text.trim().is_empty() {
+                    words.push(text.text.trim());
+                }
+                texts.push((index, text.text.clone()));
+            }
+            _ => {}
+        }
+    }
+    let frame = selection_frame(ann, items, None)?;
+    let mut text = String::new();
+    for word in words {
+        if !text.is_empty() && text.len() + 3 + word.len() > SEED_MAX_CHARS {
+            break;
+        }
+        if !text.is_empty() {
+            text.push_str(" / ");
+        }
+        text.push_str(word);
+    }
+    Some(Seed {
+        text,
+        frame,
+        shapes,
+        texts,
+    })
+}
+
 /// What the selection tool holds, and the live gesture acting on it. Transient: never part of the
 /// document, never persisted, and dropped when the tool changes or the surfaces are recreated.
 #[derive(Debug, Clone, Default, PartialEq)]
