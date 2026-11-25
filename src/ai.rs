@@ -440,6 +440,15 @@ impl Session {
     }
 }
 
+/// What one frame of the panel's motion changed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Moved {
+    /// The transcript's offset moved: nothing outside the log's window changed.
+    pub scroll: bool,
+    /// Something the whole card shows changed, such as the strip's multiplier.
+    pub view: bool,
+}
+
 /// The AI panel: one window, showing the conversation of the board on screen.
 ///
 /// The window is one and its conversations are many. The transcript, the draft, the error, the scroll
@@ -603,16 +612,19 @@ impl Chat {
     }
 
     /// One frame of the panel's own motion: the transcript easing toward the wheel's offset, and the
-    /// burst's number leaving the strip when its window passes. `true` when the screen has to change.
-    pub fn step(&mut self, now: Instant, dt: f32) -> bool {
+    /// burst's number leaving the strip when its window passes.
+    pub fn step(&mut self, now: Instant, dt: f32) -> Moved {
         let session = self.session_mut();
-        let mut changed = session.ease_scroll(dt);
+        let scrolled = session.ease_scroll(dt);
         let factor = session.burst.label(now);
-        if session.burst_drawn != factor {
+        let relabelled = session.burst_drawn != factor;
+        if relabelled {
             session.burst_drawn = factor;
-            changed = true;
         }
-        changed
+        Moved {
+            scroll: scrolled,
+            view: relabelled,
+        }
     }
 
     /// Send the prompt. The caller has already appended the user's message and an empty assistant one,

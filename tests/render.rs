@@ -5038,3 +5038,104 @@ fn a_scroll_burst_puts_its_multiplier_on_the_strip() {
         "no multiplier was drawn on the strip: {changed}"
     );
 }
+
+#[test]
+fn a_bubble_scrolled_out_of_the_log_stops_at_the_window() {
+    let (w, h) = (900u32, 600u32);
+    let toolbar = ai_toolbar();
+    let layout = ai_panel_layout((w as f32, h as f32), Some(&toolbar));
+    let mut long = ai_view();
+    long.messages = (0..20)
+        .map(|i| AiMessageView {
+            user: i % 2 == 0,
+            text: format!("message {i}"),
+            streaming: false,
+        })
+        .collect();
+    // Half a bubble above the window's top edge and another one below its bottom.
+    long.scroll = 12.0;
+    // The same panel with an empty transcript: everything outside the log has to match it.
+    let empty = AiView {
+        messages: Vec::new(),
+        ..Default::default()
+    };
+    let mut scrolled = buffer(w, h);
+    let mut only_card = buffer(w, h);
+    let mut renderer = Renderer::new();
+    for (buf, view) in [(&mut scrolled, long), (&mut only_card, empty)] {
+        let overlay = Overlay {
+            toolbar: Some(toolbar.clone()),
+            ai: Some(view),
+            ..Default::default()
+        };
+        renderer.render(
+            buf,
+            w,
+            h,
+            1.0,
+            View::default(),
+            &Board::default(),
+            &overlay,
+            None,
+        );
+    }
+    let mut leaked = Vec::new();
+    for y in 0..h {
+        let inside_log = (y as f32) >= layout.log.y && (y as f32) <= layout.log.y + layout.log.h;
+        if inside_log {
+            continue;
+        }
+        for x in layout.panel.x as u32..(layout.panel.x + layout.panel.w) as u32 {
+            let i = ((y * w + x) * 4) as usize;
+            if scrolled[i..i + 4] != only_card[i..i + 4] {
+                leaked.push((x, y));
+            }
+        }
+    }
+    assert!(
+        leaked.is_empty(),
+        "the transcript painted outside its window: {:?}",
+        &leaked[..leaked.len().min(6)]
+    );
+}
+
+#[test]
+fn the_card_has_no_dark_rim() {
+    let (w, h) = (900u32, 600u32);
+    let mut buf = buffer(w, h);
+    let toolbar = ai_toolbar();
+    let overlay = Overlay {
+        toolbar: Some(toolbar.clone()),
+        ai: Some(ai_view()),
+        ..Default::default()
+    };
+    Renderer::new().render(
+        &mut buf,
+        w,
+        h,
+        1.0,
+        View::default(),
+        &Board::default(),
+        &overlay,
+        None,
+    );
+    let layout = ai_panel_layout((w as f32, h as f32), Some(&toolbar));
+    let centre = (
+        (layout.panel.x + layout.panel.w / 2.0) as u32,
+        (layout.panel.y + layout.panel.h / 2.0) as u32,
+    );
+    let rim = (
+        (layout.panel.x + layout.panel.w / 2.0) as u32,
+        (layout.panel.y + 3.0) as u32,
+    );
+    let at = |x: u32, y: u32| {
+        let i = ((y * w + x) * 4) as usize;
+        buf[i]
+    };
+    assert!(
+        at(rim.0, rim.1) + 4 >= at(centre.0, centre.1),
+        "the card's edge is darker than its middle: {} vs {}",
+        at(rim.0, rim.1),
+        at(centre.0, centre.1)
+    );
+}

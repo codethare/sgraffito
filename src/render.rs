@@ -1178,6 +1178,7 @@ pub struct Renderer {
     font_system: FontSystem,
     cache: SwashCache,
     toolbar_cache: Vec<CachedToolbar>,
+    ai_measure: AiMeasureCache,
 }
 
 /// Clear `pixmap` and paint the chosen backdrop. `scale` is the output's device scale and `view`
@@ -1225,6 +1226,120 @@ fn paint_backdrop(pixmap: &mut PixmapMut, mode: Backdrop, scale: f32, view: View
                     x += spacing;
                 }
                 y += spacing;
+            }
+        }
+    }
+}
+
+/// What one transcript line measured, kept across frames. The panel scrolls and streams; re-shaping every
+/// message on every frame made scrolling cost a core, because `ai_log_height` alone laid the whole
+/// transcript out twice per message and the drawing measured it again.
+#[derive(Clone, Copy, PartialEq)]
+struct AiMeasure {
+    hash: u64,
+    wrap: f32,
+    natural: f32,
+    height: f32,
+}
+
+/// One message's shaped line, at the wrap and the output scale it was shaped for. Drawing a bubble asks
+/// for this on every frame it is visible, and shaping the same text again was the panel's largest cost.
+struct AiLayout {
+    hash: u64,
+    wrap: f32,
+    scale: f32,
+    prepared: Option<PreparedText>,
+}
+
+/// One entry per message index, for the measurements and for the shaped lines. A message that changed
+/// text, or a panel that changed width or scale, misses and is laid out again; everything else is
+/// arithmetic.
+#[derive(Default)]
+struct AiMeasureCache {
+    measures: Vec<Option<AiMeasure>>,
+    layouts: Vec<Option<AiLayout>>,
+}
+
+const AI_CACHE_LIMIT: usize = 256;
+
+impl AiMeasureCache {
+    fn get(&mut self, index: usize, hash: u64, wrap: f32) -> Option<(f32, f32)> {
+        let entry = self.measures.get(index)?.as_ref()?;
+        (entry.hash == hash && entry.wrap.to_bits() == wrap.to_bits())
+            .then_some((entry.natural, entry.height))
+    }
+
+    fn put(&mut self, index: usize, measured: AiMeasure) {
+        if index >= AI_CACHE_LIMIT {
+            // A transcript that shrank keeps its stale tail, but the cache must not hold every board's
+            // conversation for the life of the process.
+            self.measures.clear();
+            self.layouts.clear();
+        }
+        if self.measures.len() <= index {
+            self.measures.resize(index + 1, None);
+        }
+        self.measures[index] = Some(measured);
+    }
+
+    /// Take this message's shaped line, shaping it when the key does not match; the caller puts it back.
+    fn take_layout(
+        &mut self,
+        index: usize,
+        hash: u64,
+        wrap: f32,
+        scale: f32,
+    ) -> Option<(Option<PreparedText>, bool)> {
+        if index >= AI_CACHE_LIMIT {
+            self.layouts.clear();
+        }
+        if self.layouts.len() <= index {
+            self.layouts.resize_with(index + 1, || None);
+        }
+        let fresh = self.layouts[index].as_ref().is_none_or(|entry| {
+            entry.hash != hash
+                || entry.wrap.to_bits() != wrap.to_bits()
+                || entry.scale.to_bits() != scale.to_bits()
+        });
+        if fresh {
+            self.layouts[index] = Some(AiLayout {
+                hash,
+                wrap,
+                scale,
+                prepared: None,
+            });
+            return Some((None, true));
+        }
+        let entry = self.layouts[index].as_mut()?;
+        Some((entry.prepared.take(), false))
+    }
+
+    fn put_layout(
+        &mut self,
+        index: usize,
+        hash: u64,
+        wrap: f32,
+        scale: f32,
+        prepared: PreparedText,
+    ) {
+        if self.layouts.len() <= index {
+            self.layouts.resize_with(index + 1, || None);
+        }
+        match self.layouts[index].as_mut() {
+            Some(entry)
+                if entry.hash == hash
+                    && entry.wrap.to_bits() == wrap.to_bits()
+                    && entry.scale.to_bits() == scale.to_bits() =>
+            {
+                entry.prepared = Some(prepared);
+            }
+            _ => {
+                self.layouts[index] = Some(AiLayout {
+                    hash,
+                    wrap,
+                    scale,
+                    prepared: Some(prepared),
+                });
             }
         }
     }
@@ -1651,6 +1766,7 @@ impl Renderer {
             font_system: FontSystem::new(),
             cache: SwashCache::new(),
             toolbar_cache: Vec::new(),
+            ai_measure: AiMeasureCache::default(),
         }
     }
 
@@ -2021,6 +2137,76 @@ impl Renderer {
         (bounds.w, bounds.h)
     }
 
+    /// What one transcript line measures at `wrap`: its natural width, and the height it takes wrapped
+    /// there. Cached per message, because the panel asks on every frame it scrolls.
+    fn ai_measure(&mut self, index: usize, text: &str, wrap: f32) -> (f32, f32) {
+        let mut hasher = DefaultHasher::new();
+        text.hash(&mut hasher);
+        let hash = hasher.finish();
+        if let Some(measured) = self.ai_measure.get(index, hash, wrap) {
+            return measured;
+        }
+        let natural = self.measure_text(text, AI_TEXT_SIZE, None).0;
+        let height = self.measure_text(text, AI_TEXT_SIZE, Some(wrap)).1;
+        self.ai_measure.put(
+            index,
+            AiMeasure {
+                hash,
+                wrap,
+                natural,
+                height,
+            },
+        );
+        (natural, height)
+    }
+
+    /// This message's shaped line at `wrap` and the output's `scale`, reused between frames: the
+    /// returned value is the caller's to paint with and hand back through [`Self::store_ai_layout`].
+    fn ai_layout(
+        &mut self,
+        index: usize,
+        text: &str,
+        wrap: f32,
+        scale: f32,
+    ) -> Option<PreparedText> {
+        let mut hasher = DefaultHasher::new();
+        text.hash(&mut hasher);
+        let hash = hasher.finish();
+        let (prepared, fresh) = self.ai_measure.take_layout(index, hash, wrap, scale)?;
+        if let Some(prepared) = prepared {
+            return Some(prepared);
+        }
+        debug_assert!(fresh || true);
+        let item = TextItem {
+            x: 0.0,
+            y: 0.0,
+            color: AI_TEXT.to_string(),
+            size: AI_TEXT_SIZE,
+            text: text.to_string(),
+            link: None,
+            container: None,
+        };
+        let screen = Screen {
+            scale,
+            view: View::default(),
+        };
+        Some(self.prepare_text(text, &item, screen, Some(wrap)))
+    }
+
+    fn store_ai_layout(
+        &mut self,
+        index: usize,
+        text: &str,
+        wrap: f32,
+        scale: f32,
+        prepared: PreparedText,
+    ) {
+        let mut hasher = DefaultHasher::new();
+        text.hash(&mut hasher);
+        self.ai_measure
+            .put_layout(index, hasher.finish(), wrap, scale, prepared);
+    }
+
     /// How tall the AI transcript is at `width`: every bubble, the gap between them, the error row and
     /// the inset above the first message. Zero when there is nothing to say, so the panel knows it has
     /// no scrollbar.
@@ -2030,12 +2216,12 @@ impl Renderer {
         }
         let wrap = ai_bubble_wrap(width);
         let mut height = AI_LOG_INSET;
-        for message in &view.messages {
-            let (_, text_h) = self.measure_text(&message.text, AI_TEXT_SIZE, Some(wrap));
+        for (index, message) in view.messages.iter().enumerate() {
+            let (_, text_h) = self.ai_measure(index, &message.text, wrap);
             height += text_h + 2.0 * AI_BUBBLE_PAD + AI_MESSAGE_GAP;
         }
         if let Some(error) = &view.error {
-            let (_, text_h) = self.measure_text(error, AI_TEXT_SIZE, Some(wrap));
+            let (_, text_h) = self.ai_measure(view.messages.len(), error, wrap);
             height += text_h + AI_MESSAGE_GAP;
         }
         height
@@ -2092,6 +2278,8 @@ impl Renderer {
             view: View::default(),
         };
         let panel = screen.ui_rect(layout.panel);
+        // The card is its fill and one hairline. An inner shadow here reads as a dark grey rim against
+        // the canvas, which is not what the rest of the interface's plates look like.
         round_rect(
             pixmap,
             panel,
@@ -2099,7 +2287,6 @@ impl Renderer {
             parse_hex(AI_PANEL_FILL),
             Some((parse_hex(TOOLBAR_BLOCK_EDGE), TOOLBAR_HAIRLINE * scale)),
         );
-        draw_card_shadow(pixmap, panel, AI_PANEL_RADIUS * scale, scale);
 
         // The header: what the panel is, what the request is doing, and the way out.
         let title = toolbar_text(
@@ -2137,19 +2324,16 @@ impl Renderer {
         // The transcript, clipped to its window: it scrolls under the header and the input line.
         let wrap = ai_bubble_wrap(layout.log.w);
         let mut y = layout.log.y + AI_LOG_INSET - view.scroll;
-        for message in &view.messages {
+        for (index, message) in view.messages.iter().enumerate() {
             let mut display = message.text.clone();
             if message.streaming {
                 // The cursor is display only: it is never part of the answer that is sent back or
                 // parsed for a diagram.
                 display.push('\u{258d}');
             }
-            let natural = self.measure_text(&display, AI_TEXT_SIZE, None).0;
-            let bubble_w = (natural + 2.0 * AI_BUBBLE_PAD).min(wrap).max(1.0);
-            let bubble_wrap = (bubble_w - 2.0 * AI_BUBBLE_PAD).max(1.0);
-            let text_h = self
-                .measure_text(&display, AI_TEXT_SIZE, Some(bubble_wrap))
-                .1;
+            // One measurement per message, shared with the height above and reused across frames.
+            let (natural, text_h) = self.ai_measure(index, &display, wrap);
+            let bubble_w = natural.min(wrap) + 2.0 * AI_BUBBLE_PAD;
             let bubble = Rect {
                 x: if message.user {
                     layout.log.x + layout.log.w - bubble_w
@@ -2164,10 +2348,13 @@ impl Renderer {
             if bubble.y + bubble.h < layout.log.y || bubble.y > layout.log.y + layout.log.h {
                 continue;
             }
+            // The plate is cut at the log's edges: a bubble scrolled half out of the window must not
+            // paint over the header above it or the input line below it.
+            let (plate, cut) = trim_to(bubble, layout.log);
             round_rect(
                 pixmap,
-                screen.ui_rect(bubble),
-                AI_BUBBLE_RADIUS * scale,
+                screen.ui_rect(plate),
+                if cut { 0.0 } else { AI_BUBBLE_RADIUS * scale },
                 parse_hex(if message.user {
                     AI_BUBBLE_USER
                 } else {
@@ -2180,18 +2367,25 @@ impl Renderer {
                 y: bubble.y + AI_BUBBLE_PAD,
                 color: AI_TEXT.to_string(),
                 size: AI_TEXT_SIZE,
-                text: display,
+                text: display.clone(),
                 link: None,
                 container: None,
             };
-            self.draw_text_clipped(
-                pixmap,
-                &item,
-                screen,
-                None,
-                Some(bubble_wrap),
-                Some(layout.log),
-            );
+            // The shaped line is reused: a scrolling transcript must not re-shape its own text on every
+            // frame, which is what made the panel cost more than the whole rail.
+            if let Some(mut prepared) = self.ai_layout(index, &display, wrap, scale) {
+                paint_prepared_text(
+                    pixmap,
+                    &mut self.font_system,
+                    &mut self.cache,
+                    &item,
+                    screen,
+                    &mut prepared,
+                    None,
+                    Some(layout.log),
+                );
+                self.store_ai_layout(index, &display, wrap, scale, prepared);
+            }
         }
         if let Some(error) = &view.error {
             let item = TextItem {
@@ -4302,67 +4496,76 @@ impl Renderer {
         reveal: Option<Reveal>,
         clip: Option<Rect>,
     ) {
-        let origin = screen.point([item.x, item.y]);
-        let (ox, oy) = (origin[0], origin[1]);
-        let c = parse_hex(&item.color);
-        let color = Color::rgba(c[0], c[1], c[2], c[3]);
-        let (clip_w, clip_h) = (pixmap.width(), pixmap.height());
-        let clip = clip.map(|clip| screen.ui_rect(clip));
-        let reveal = reveal.map(|reveal| match reveal {
-            Reveal::After(x) => Reveal::After(screen.point([x, 0.0])[0]),
-            Reveal::Before(x) => Reveal::Before(screen.point([x, 0.0])[0]),
-        });
-        prepared.buffer.draw(
+        paint_prepared_text(
+            pixmap,
             &mut self.font_system,
             &mut self.cache,
-            color,
-            |x, y, w, h, c| {
-                let (gx, gy) = (ox + x as f32, oy + y as f32);
-                let hidden = match reveal {
-                    Some(Reveal::After(reveal)) => gx > reveal,
-                    Some(Reveal::Before(reveal)) => gx + (w as f32) < reveal,
-                    None => false,
-                };
-                if hidden {
-                    return;
-                }
-                // Whole glyphs are skipped at the edge rather than cut: an edge that fell through a
-                // letter would leave a half-row of pixels that the next frame is not told about.
-                if clip.is_some_and(|clip| {
-                    gx < clip.x
-                        || gy < clip.y
-                        || gx + w as f32 > clip.x + clip.w
-                        || gy + h as f32 > clip.y + clip.h
-                }) {
-                    return;
-                }
-                blend(
-                    pixmap,
-                    clip_w,
-                    clip_h,
-                    ox as i32 + x,
-                    oy as i32 + y,
-                    w,
-                    h,
-                    c,
-                )
-            },
+            item,
+            screen,
+            prepared,
+            reveal,
+            clip,
         );
-        // A link is visible without hovering it: one accent hairline under the measured line.
-        if item.link.is_some() {
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn draw_text_clipped(
+        &mut self,
+        pixmap: &mut PixmapMut,
+        item: &TextItem,
+        screen: Screen,
+        edit: Option<&TextOverlay>,
+        wrap: Option<f32>,
+        clip: Option<Rect>,
+    ) {
+        let (committed, preedit, caret) = match edit {
+            Some(e) => (
+                e.buffer.text.as_str(),
+                e.preedit.as_str(),
+                Some(e.buffer.cursor_bytes()),
+            ),
+            None => (item.text.as_str(), "", None),
+        };
+        let display = match caret.filter(|_| !preedit.is_empty()) {
+            Some(at) => Cow::Owned(format!(
+                "{}{}{}",
+                &committed[..at],
+                preedit,
+                &committed[at..]
+            )),
+            None => Cow::Borrowed(committed),
+        };
+        if display.is_empty() {
+            return;
+        }
+        let mut prepared = self.prepare_text(display.as_ref(), item, screen, wrap);
+        let geometry = caret_geometry(&prepared, caret.unwrap_or(committed.len()), preedit.len());
+        self.draw_prepared_text_clipped(pixmap, item, screen, &mut prepared, None, clip);
+        if edit.is_some() {
             let size = screen.len(item.size);
-            let c = parse_hex(TOOLBAR_ACCENT);
+            let c = parse_hex(&item.color);
+            let color = Color::rgba(c[0], c[1], c[2], c[3]);
+            let origin = screen.point([item.x, item.y]);
+            let (ox, oy) = (origin[0], origin[1]);
+            if let Some((x0, x1)) = geometry.preedit {
+                fill(
+                    pixmap,
+                    ox + x0,
+                    oy + (geometry.baseline + size * 0.15),
+                    (x1 - x0).max(0.0),
+                    screen.ui(UNDERLINE_HEIGHT),
+                    color,
+                );
+            }
             fill(
                 pixmap,
-                ox,
-                oy + prepared.baseline + size * 0.15,
-                prepared.line_w,
-                screen.ui(UNDERLINE_HEIGHT),
-                Color::rgba(c[0], c[1], c[2], c[3]),
+                ox + geometry.x,
+                oy + geometry.top,
+                screen.ui(CURSOR_WIDTH),
+                geometry.height,
+                color,
             );
         }
     }
-
     #[allow(clippy::too_many_arguments)]
     fn draw_text(
         &mut self,
@@ -4442,66 +4645,76 @@ impl Renderer {
             );
         }
     }
+}
 
-    /// Text drawn into a panel: the same layout as [`Self::draw_text`], kept inside `clip`.
-    #[allow(clippy::too_many_arguments)]
-    fn draw_text_clipped(
-        &mut self,
-        pixmap: &mut PixmapMut,
-        item: &TextItem,
-        screen: Screen,
-        edit: Option<&TextOverlay>,
-        wrap: Option<f32>,
-        clip: Option<Rect>,
-    ) {
-        let (committed, preedit, caret) = match edit {
-            Some(e) => (
-                e.buffer.text.as_str(),
-                e.preedit.as_str(),
-                Some(e.buffer.cursor_bytes()),
-            ),
-            None => (item.text.as_str(), "", None),
-        };
-        let display = match caret.filter(|_| !preedit.is_empty()) {
-            Some(at) => Cow::Owned(format!(
-                "{}{}{}",
-                &committed[..at],
-                preedit,
-                &committed[at..]
-            )),
-            None => Cow::Borrowed(committed),
-        };
-        if display.is_empty() {
-            return;
-        }
-        let mut prepared = self.prepare_text(display.as_ref(), item, screen, wrap);
-        let geometry = caret_geometry(&prepared, caret.unwrap_or(committed.len()), preedit.len());
-        self.draw_prepared_text_clipped(pixmap, item, screen, &mut prepared, None, clip);
-        if edit.is_some() {
-            let size = screen.len(item.size);
-            let c = parse_hex(&item.color);
-            let color = Color::rgba(c[0], c[1], c[2], c[3]);
-            let origin = screen.point([item.x, item.y]);
-            let (ox, oy) = (origin[0], origin[1]);
-            if let Some((x0, x1)) = geometry.preedit {
-                fill(
-                    pixmap,
-                    ox + x0,
-                    oy + (geometry.baseline + size * 0.15),
-                    (x1 - x0).max(0.0),
-                    screen.ui(UNDERLINE_HEIGHT),
-                    color,
-                );
+/// Draw one laid-out line: glyphs by glyph, kept inside `clip` when there is one. Free rather than a
+/// method so a cached layout can be painted while the cache that holds it is borrowed.
+#[allow(clippy::too_many_arguments)]
+fn paint_prepared_text(
+    pixmap: &mut PixmapMut,
+    font_system: &mut FontSystem,
+    cache: &mut SwashCache,
+    item: &TextItem,
+    screen: Screen,
+    prepared: &mut PreparedText,
+    reveal: Option<Reveal>,
+    clip: Option<Rect>,
+) {
+    let origin = screen.point([item.x, item.y]);
+    let (ox, oy) = (origin[0], origin[1]);
+    let c = parse_hex(&item.color);
+    let color = Color::rgba(c[0], c[1], c[2], c[3]);
+    let (clip_w, clip_h) = (pixmap.width(), pixmap.height());
+    let clip = clip.map(|clip| screen.ui_rect(clip));
+    let reveal = reveal.map(|reveal| match reveal {
+        Reveal::After(x) => Reveal::After(screen.point([x, 0.0])[0]),
+        Reveal::Before(x) => Reveal::Before(screen.point([x, 0.0])[0]),
+    });
+    prepared
+        .buffer
+        .draw(font_system, cache, color, |x, y, w, h, c| {
+            let (gx, gy) = (ox + x as f32, oy + y as f32);
+            let hidden = match reveal {
+                Some(Reveal::After(reveal)) => gx > reveal,
+                Some(Reveal::Before(reveal)) => gx + (w as f32) < reveal,
+                None => false,
+            };
+            if hidden {
+                return;
             }
-            fill(
+            // Whole glyphs are skipped at the edge rather than cut: an edge that fell through a
+            // letter would leave a half-row of pixels that the next frame is not told about.
+            if clip.is_some_and(|clip| {
+                gx < clip.x
+                    || gy < clip.y
+                    || gx + w as f32 > clip.x + clip.w
+                    || gy + h as f32 > clip.y + clip.h
+            }) {
+                return;
+            }
+            blend(
                 pixmap,
-                ox + geometry.x,
-                oy + geometry.top,
-                screen.ui(CURSOR_WIDTH),
-                geometry.height,
-                color,
-            );
-        }
+                clip_w,
+                clip_h,
+                ox as i32 + x,
+                oy as i32 + y,
+                w,
+                h,
+                c,
+            )
+        });
+    // A link is visible without hovering it: one accent hairline under the measured line.
+    if item.link.is_some() {
+        let size = screen.len(item.size);
+        let c = parse_hex(TOOLBAR_ACCENT);
+        fill(
+            pixmap,
+            ox,
+            oy + prepared.baseline + size * 0.15,
+            prepared.line_w,
+            screen.ui(UNDERLINE_HEIGHT),
+            Color::rgba(c[0], c[1], c[2], c[3]),
+        );
     }
 }
 
@@ -5278,6 +5491,23 @@ fn shifted(layout: &AiPanelLayout, dx: f32) -> AiPanelLayout {
         send: shift(layout.send),
         scrollbar: shift(layout.scrollbar),
     }
+}
+
+/// `rect` clipped to `window`, and whether anything was cut: a cut plate is drawn square, because a
+/// rounded corner in the middle of the window would look like the bubble's own end.
+fn trim_to(rect: Rect, window: Rect) -> (Rect, bool) {
+    let x = rect.x.max(window.x);
+    let y = rect.y.max(window.y);
+    let right = (rect.x + rect.w).min(window.x + window.w);
+    let bottom = (rect.y + rect.h).min(window.y + window.h);
+    let trimmed = Rect {
+        x,
+        y,
+        w: (right - x).max(0.0),
+        h: (bottom - y).max(0.0),
+    };
+    let cut = (trimmed.w - rect.w).abs() > 0.01 || (trimmed.h - rect.h).abs() > 0.01;
+    (trimmed, cut)
 }
 
 /// The pieces of a scrollbar strip a label's box leaves free: the rows above it and below it, and no

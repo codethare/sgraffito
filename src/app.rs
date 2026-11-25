@@ -261,6 +261,10 @@ pub struct Output {
     /// A document change waiting to be repainted. Its box is what the next frame damages: the
     /// rest of the surface still holds the right pixels, which came from the document raster.
     pending: Option<Rect>,
+    /// What the AI panel changed this frame: its whole card when any of it changed, and only the
+    /// transcript's window when the wheel moved it. A scroll would otherwise re-upload a card that is
+    /// mostly unchanged, sixty times a second.
+    ai_damage: Option<Rect>,
     /// A committed text edit can be localized only after its previous layout was measured.
     pub(crate) text_dirty: bool,
     last_text_bounds: Option<Rect>,
@@ -846,6 +850,7 @@ impl App {
         self.outputs.insert(
             key_of(&output),
             Output {
+                ai_damage: None,
                 output,
                 name,
                 board,
@@ -1790,6 +1795,13 @@ impl App {
         let Some(key) = self.ai.output else {
             for out in self.outputs.values_mut() {
                 if out.overlay.ai.take().is_some() {
+                    // The card is gone from the overlay, so its pixels have to be painted over: the last
+                    // frame may only have damaged the transcript's window inside it.
+                    let layout = crate::render::ai_panel_layout(
+                        (out.width as f32, out.height as f32),
+                        out.overlay.toolbar.as_ref(),
+                    );
+                    out.ai_damage = Some(layout.panel.grown(crate::render::AI_PANEL_SLIDE));
                     out.transient_dirty = true;
                 }
                 out.overlay.ai_preview = None;
@@ -1837,8 +1849,44 @@ impl App {
         if let Some(out) = self.outputs.get_mut(&key) {
             out.overlay.ai = Some(view);
             out.overlay.ai_preview = preview;
+            out.ai_damage = Some(
+                crate::render::ai_panel_layout(
+                    (out.width as f32, out.height as f32),
+                    out.overlay.toolbar.as_ref(),
+                )
+                .panel
+                .grown(crate::render::AI_PANEL_SLIDE),
+            );
             out.transient_dirty = true;
         }
+        self.dirty = true;
+    }
+
+    /// The transcript moved and nothing else did: the view's offset and the strip's number are the only
+    /// things a frame has to carry, and only inside the log's own window.
+    pub(crate) fn refresh_ai_scroll(&mut self) {
+        let Some(key) = self.ai.output else {
+            return;
+        };
+        let session = self.ai.session();
+        let (scroll, burst) = (session.scroll, session.burst_drawn);
+        let Some(out) = self.outputs.get_mut(&key) else {
+            return;
+        };
+        let Some(view) = out.overlay.ai.as_mut() else {
+            return;
+        };
+        if view.scroll == scroll && view.burst == burst {
+            return;
+        }
+        view.scroll = scroll;
+        view.burst = burst;
+        let layout = crate::render::ai_panel_layout(
+            (out.width as f32, out.height as f32),
+            out.overlay.toolbar.as_ref(),
+        );
+        out.ai_damage = Some(layout.log.grown(1.0));
+        out.transient_dirty = true;
         self.dirty = true;
     }
 
@@ -1950,8 +1998,11 @@ impl App {
                 .ai
                 .open_since
                 .is_some_and(|started| now.saturating_duration_since(started) < TOOLBAR_ANIM);
-        if self.ai.step(now, dt) || sliding {
+        let moved = self.ai.step(now, dt);
+        if sliding || moved.view {
             self.refresh_ai();
+        } else if moved.scroll {
+            self.refresh_ai_scroll();
         }
     }
 
@@ -4955,14 +5006,9 @@ impl App {
         // The AI panel is screen-space interface: its box joins the transient damage so the frame that
         // closes it repaints every pixel it covered, and a frame that only changes the transcript
         // touches nothing else.
-        let transient = if out.overlay.ai.is_some() {
-            let panel =
-                crate::render::ai_panel_layout((w as f32, h as f32), out.overlay.toolbar.as_ref())
-                    .panel
-                    .grown(crate::render::TOOLBAR_SHADOW_REACH + crate::render::AI_PANEL_SLIDE);
-            Some(transient.map_or(panel, |box_| box_.union(panel)))
-        } else {
-            transient
+        let transient = match out.ai_damage {
+            Some(box_) => Some(transient.map_or(box_, |other| other.union(box_))),
+            None => transient,
         };
         let current_text_bounds = out.overlay.text.as_ref().and_then(|edit| {
             (edit.preedit.is_empty()).then(|| {
@@ -5102,6 +5148,7 @@ impl App {
         out.toolbar_dirty = false;
         out.text_dirty = false;
         out.pending = None;
+        out.ai_damage = None;
         out.last_transient = transient;
         out.last_text_bounds = current_text_bounds;
         out.last_buffer = Some(idx);
