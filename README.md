@@ -187,6 +187,8 @@ Errors and state changes go to stderr and to `$XDG_STATE_HOME/sgraffito/sgraffit
 - One file holds at most 1 MiB and three older files are kept, so the log never exceeds 4 MiB. 1 MiB × 3 rotations is the usual small-daemon bound; the size is checked as each line is written, and a file left over the cap is rotated when the daemon starts.
 - Each event is one line: an ISO date and UTC time, `[sgraffito]`, then the message. Newlines in a message are escaped and a single message is capped at 8 KiB, so one large error cannot fill a generation.
 - Panics are recorded with their location before the default panic output. If the file cannot be opened or written, the daemon keeps running and keeps logging to stderr.
+- A daemon that spends a core is a bug nobody sees until the fan runs, so it counts the frames nobody asked for — no gesture, no zoom, no answer arriving — over ten-second windows, and logs a line naming the count, the panel's state and the number of outputs when the average passes ten a second. Silence there means the daemon is not the hot process, whatever a system monitor says about the layer: check `pidstat -t -p $(pgrep -f 'sgraffito daemon') 1 5` for which thread it is.
+- `SGRAFFITO_IM_TRACE=1` logs every input-method event with what was applied, which is how a stuttering text field is told from a stuttering panel: an input method that keeps answering a commit with an empty batch used to redraw the panel for each round trip, and now costs nothing.
 
 ## Connectors
 

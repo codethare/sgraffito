@@ -2,9 +2,9 @@ use sgraffito::app::{MAX_PASTE_BYTES, Tool, read_selection, text_mime};
 use sgraffito::canvas::Caret;
 use sgraffito::canvas::ToolbarAction;
 use sgraffito::input::{
-    BoardListKey, EditAction, RenameKey, board_list_key, bytes_to_delete, color_for_keysym,
-    edit_action, panel_action_for_keysym, rename_key, size_step_for_keysym, tool_for_keysym,
-    wants_sampling,
+    BoardListKey, EditAction, RenameKey, batch_changes, board_list_key, bytes_to_delete,
+    color_for_keysym, edit_action, panel_action_for_keysym, rename_key, size_step_for_keysym,
+    tool_for_keysym, wants_sampling,
 };
 use smithay_client_toolkit::seat::keyboard::Keysym;
 
@@ -504,4 +504,20 @@ fn i_opens_the_ai_panel_from_the_drawer() {
         6,
         "one row per drawer control"
     );
+}
+
+#[test]
+fn an_input_method_batch_that_carries_nothing_changes_nothing() {
+    // An IME that answers every commit with an empty `done` must not cost a repaint or another commit:
+    // the panel keeps a text-input session enabled whenever it is open, so a batch that redraws and
+    // re-commits would answer itself forever.
+    assert!(!batch_changes("", "", "", None));
+    assert!(!batch_changes("", "", "", Some((0, 0))));
+    assert!(!batch_changes("nihao", "nihao", "", None));
+    // A preedit appearing, changing or clearing is a change, and so is text to insert or delete.
+    assert!(batch_changes("", "n", "", None));
+    assert!(batch_changes("nihao", "", "", None));
+    assert!(batch_changes("ni", "nihao", "", None));
+    assert!(batch_changes("", "", "你", None));
+    assert!(batch_changes("ni", "ni", "", Some((2, 0))));
 }

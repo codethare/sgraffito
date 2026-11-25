@@ -147,6 +147,11 @@ const FRAME_WAIT: Duration = Duration::from_millis(16);
 /// palette popovers use before they collapse again.
 const COLOR_POPUP_DWELL: Duration = Duration::from_millis(1500);
 pub const IDLE_WAIT: Duration = Duration::from_millis(200);
+/// How long the daemon counts its own frames before deciding whether it is drawing too much.
+const FRAME_WINDOW: Duration = Duration::from_secs(10);
+/// Above this many unasked frames a second, the log says so. Typing and hovering a rail block redraw
+/// a few times a second at most, so a window averaging more than this is a spin rather than a hand.
+const BUSY_FRAMES_PER_SEC: f32 = 10.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -489,6 +494,10 @@ pub struct App {
     pub(crate) axis_source: Option<wayland_client::protocol::wl_pointer::AxisSource>,
     /// When the previous tick ran, which is the `dt` a zoom in flight is stepped by.
     last_tick: Instant,
+    /// Frames drawn since `frame_window` opened, and when it did. A daemon that draws while nothing
+    /// asks it to is a defect nobody notices until the fan starts, so it says so in its log.
+    frames_drawn: u32,
+    frame_window: Instant,
 }
 
 /// A pinch in flight, as the protocol reports it.
@@ -755,6 +764,8 @@ impl App {
             pinch_state: None,
             axis_source: None,
             last_tick: Instant::now(),
+            frames_drawn: 0,
+            frame_window: Instant::now(),
         };
         app.bind_text_input_manager();
         app.bind_cursor_shape();
@@ -2016,14 +2027,28 @@ impl App {
         self.dirty = true;
     }
 
-    /// The panel's own motion: the transcript easing toward the wheel's offset, the card sliding into
-    /// place, and the burst's number leaving the strip. Nothing here touches the document.
-    fn animate_ai(&mut self, now: Instant, dt: f32) {
-        let sliding = self.ai.open
+    /// Whether the panel is still arriving. Its clock is the usual one, but a frame that takes longer
+    /// than the whole transition — a slow or debug build — would otherwise leave the card a hair off
+    /// its place forever, so a card that is not at its settled position keeps the loop running too.
+    fn ai_arriving(&self) -> bool {
+        let now = Instant::now();
+        (self.ai.open
             && self
                 .ai
                 .open_since
-                .is_some_and(|started| now.saturating_duration_since(started) < TOOLBAR_ANIM);
+                .is_some_and(|started| now.saturating_duration_since(started) < TOOLBAR_ANIM))
+            || self.outputs.values().any(|out| {
+                out.overlay
+                    .ai
+                    .as_ref()
+                    .is_some_and(|view| (view.grow - 1.0).abs() > 0.001)
+            })
+    }
+
+    /// The panel's own motion: the transcript easing toward the wheel's offset, the card sliding into
+    /// place, and the burst's number leaving the strip. Nothing here touches the document.
+    fn animate_ai(&mut self, now: Instant, dt: f32) {
+        let sliding = self.ai_arriving();
         let moved = self.ai.step(now, dt);
         if sliding || moved.view {
             self.refresh_ai();
@@ -2443,11 +2468,7 @@ impl App {
                 .is_some_and(|started| now.saturating_duration_since(started) < TOOLBAR_ANIM)
             || zoom_in_flight(self.outputs.values().map(|out| out.zoom))
             || self.outputs.values().any(|out| out.motion.quality() < 1.0)
-            || (self.ai.open
-                && self
-                    .ai
-                    .open_since
-                    .is_some_and(|started| now.saturating_duration_since(started) < TOOLBAR_ANIM))
+            || self.ai_arriving()
             || self.ai.scrolling()
     }
 
@@ -4844,12 +4865,35 @@ impl App {
         if self.rename.is_some() {
             self.refresh_toolbar();
         }
+        // Frames nobody asked for are the interesting ones: a gesture, a zoom or an answer arriving has
+        // a reason to draw, a still daemon has none.
+        let unasked = !self.animating() && !self.ai.streaming();
         if self.dirty {
             self.dirty = false;
             let keys: Vec<u32> = self.outputs.keys().copied().collect();
             for key in keys {
                 self.draw_output(&key);
+                if unasked {
+                    self.frames_drawn += 1;
+                }
             }
+        }
+        // Ten seconds of a daemon drawing ten times a second is a bug the user reads as a hot machine.
+        // Nothing else notices it, so it names itself in the log, with the panel's state, and goes quiet
+        // again until the next window closes just as busy.
+        let window = now.saturating_duration_since(self.frame_window);
+        if window >= FRAME_WINDOW {
+            if self.frames_drawn as f32 / window.as_secs_f32() > BUSY_FRAMES_PER_SEC {
+                log(&format!(
+                    "drew {} unasked frames in {:.1} s with the AI panel {} and {} output(s)",
+                    self.frames_drawn,
+                    window.as_secs_f32(),
+                    if self.ai.open { "open" } else { "closed" },
+                    self.outputs.len()
+                ));
+            }
+            self.frames_drawn = 0;
+            self.frame_window = now;
         }
         self.next_wait()
     }

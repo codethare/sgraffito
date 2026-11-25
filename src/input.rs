@@ -50,6 +50,14 @@ fn im_trace(message: &str) {
     }
 }
 
+/// Whether an input-method batch would change what is typed: a preedit that differs from the one drawn,
+/// something to commit, or text to delete. A batch that carries none of these carries nothing.
+pub fn batch_changes(drawn: &str, next: &str, commit: &str, delete: Option<(u32, u32)>) -> bool {
+    drawn != next
+        || !commit.is_empty()
+        || delete.is_some_and(|(before, after)| before > 0 || after > 0)
+}
+
 /// What a local key does while a text box is focused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditAction {
@@ -787,7 +795,16 @@ impl App {
         };
         // The preedit is double-buffered: a `done` batch that carried no `preedit_string` resets
         // it to empty, so the last pinyin does not stay rendered after its candidate was committed.
-        *preedit_slot = preedit.unwrap_or_default();
+        let next_preedit = preedit.unwrap_or_default();
+        if !batch_changes(preedit_slot, &next_preedit, &commit, delete) {
+            // Nothing in this batch changes what is typed. An input method that answers every commit
+            // with an empty `done` would otherwise keep the two sides answering each other, at one
+            // repaint and one round trip per turn, for as long as a text field has the keyboard — which
+            // the AI panel always does while it is open.
+            im_trace("batch carried nothing, no repaint");
+            return;
+        }
+        *preedit_slot = next_preedit;
         if let Some((before, _after)) = delete {
             // The cursor is always at the end, so there is never anything after it to delete.
             let bytes = bytes_to_delete(before, preedit_slot.len());
