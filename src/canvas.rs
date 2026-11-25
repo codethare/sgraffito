@@ -3886,14 +3886,37 @@ pub struct AiMessageView {
 
 /// The AI panel's whole visible state: the transcript, the input line and what the request is doing.
 /// A copy of the app's chat, so the renderer never reads live request state.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AiView {
     pub messages: Vec<AiMessageView>,
     pub input: TextBuffer,
     pub preedit: String,
     pub streaming: bool,
     pub error: Option<String>,
+    /// The drawn offset of the transcript, which eases toward the wheel's on its own frames.
     pub scroll: f32,
+    /// What a scroll burst multiplies a step by right now; one when nothing is accelerating. The strip
+    /// carries the number while it is above one.
+    pub burst: f32,
+    /// How far the panel has slid into place, 0 to 1. The rail's own transitions use the same curve
+    /// and the same 140 ms, so the panel arrives at the speed the rest of the interface moves.
+    pub grow: f32,
+}
+
+impl Default for AiView {
+    fn default() -> Self {
+        Self {
+            messages: Vec::new(),
+            input: TextBuffer::default(),
+            preedit: String::new(),
+            streaming: false,
+            error: None,
+            scroll: 0.0,
+            burst: 1.0,
+            // A panel that has no animation of its own is settled at its full size.
+            grow: 1.0,
+        }
+    }
 }
 
 /// One board as the rail's panel states it: its name, and whether this output is showing it.

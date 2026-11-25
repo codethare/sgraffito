@@ -860,3 +860,110 @@ fn a_comparison_puts_what_two_subjects_share_between_them() {
         "the shared node is not joined to both subjects"
     );
 }
+
+// ---- scrolling the transcript -------------------------------------------------------------------
+
+#[test]
+fn a_burst_accelerates_a_wheel_and_caps_out() {
+    use sgraffito::ai::{BURST_MAX, Burst, SCROLL_PIXELS};
+    use std::time::{Duration, Instant};
+    let start = Instant::now();
+    let mut burst = Burst::default();
+    // Notches 50 ms apart are one burst: one, then half again, then twice, and no further than four.
+    let mut factors = Vec::new();
+    for step in 0..8 {
+        let at = start + Duration::from_millis(50 * step);
+        factors.push(burst.take(at, true));
+    }
+    let expected = [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, BURST_MAX];
+    assert_eq!(factors, expected, "{factors:?}");
+    const { assert!(BURST_MAX <= 4.0) };
+    const { assert!(SCROLL_PIXELS > 0.0) };
+}
+
+#[test]
+fn a_pause_ends_the_burst_and_a_touchpad_counts_gestures() {
+    use sgraffito::ai::Burst;
+    use std::time::{Duration, Instant};
+    let start = Instant::now();
+    let mut burst = Burst::default();
+    assert_eq!(burst.take(start, true), 1.0);
+    // A deliberate notch 300 ms later is a new burst, not the second step of one.
+    assert_eq!(burst.take(start + Duration::from_millis(300), true), 1.0);
+    // Inside one gesture a touchpad's events are one step: they are already continuous.
+    assert_eq!(burst.take(start + Duration::from_millis(310), false), 1.0);
+    assert_eq!(burst.take(start + Duration::from_millis(320), false), 1.0);
+    // A second flick, separated by the gesture's break, is the next step.
+    assert_eq!(burst.take(start + Duration::from_millis(600), false), 1.5);
+    // The acceleration ends 400 ms after the last step; the number stays long enough to read it.
+    let last = start + Duration::from_millis(600);
+    assert_eq!(burst.factor(last + Duration::from_millis(300)), 1.5);
+    assert_eq!(burst.factor(last + Duration::from_millis(400)), 1.0);
+    assert_eq!(burst.label(last + Duration::from_millis(500)), 1.5);
+    assert_eq!(burst.label(last + Duration::from_millis(1000)), 1.0);
+    assert!(burst.hold_left(last + Duration::from_millis(500)).is_some());
+    assert!(
+        burst
+            .hold_left(last + Duration::from_millis(1000))
+            .is_none()
+    );
+}
+
+#[test]
+fn the_burst_label_reads_halves_and_whole_numbers() {
+    assert_eq!(sgraffito::ai::burst_label(1.0), "1x");
+    assert_eq!(sgraffito::ai::burst_label(1.5), "1.5x");
+    assert_eq!(sgraffito::ai::burst_label(2.0), "2x");
+    assert_eq!(sgraffito::ai::burst_label(4.0), "4x");
+}
+
+#[test]
+fn a_wheel_moves_the_target_and_the_drawing_eases_toward_it() {
+    use sgraffito::ai::Session;
+    use std::time::Instant;
+    let start = Instant::now();
+    let mut session = Session::new();
+    session.scroll_by(48.0, true, start, 1000.0);
+    assert_eq!(session.scroll_target, 48.0);
+    // The drawn offset is still at the top until the frames run, which is what makes it glide.
+    assert_eq!(session.scroll, 0.0);
+    assert!(session.scrolling());
+
+    let mut frames = 0;
+    while session.scrolling() && frames < 60 {
+        session.ease_scroll(1.0 / 60.0);
+        frames += 1;
+    }
+    assert!(frames < 30, "the scroll took {frames} frames");
+    assert_eq!(session.scroll, session.scroll_target);
+
+    // Past the end the wheel clamps, and following stops at the last step.
+    session.scroll_by(10_000.0, true, start, 1000.0);
+    assert_eq!(session.scroll_target, 1000.0);
+    assert!(session.follow);
+    session.clamp_scroll(1000.0);
+    assert_eq!(session.scroll_target, 1000.0);
+    session.follow = false;
+    session.scroll_target = 400.0;
+    session.clamp_scroll(300.0);
+    assert_eq!(session.scroll_target, 300.0);
+    assert_eq!(
+        session.scroll, 48.0,
+        "a clamped target does not jump the drawing"
+    );
+}
+
+#[test]
+fn a_burst_moves_further_than_the_notch_that_started_it() {
+    use sgraffito::ai::Session;
+    use std::time::{Duration, Instant};
+    let start = Instant::now();
+    let mut session = Session::new();
+    session.scroll_by(10.0, true, start, 1000.0);
+    assert_eq!(session.scroll_target, 10.0);
+    session.scroll_by(10.0, true, start + Duration::from_millis(40), 1000.0);
+    assert_eq!(
+        session.scroll_target, 25.0,
+        "the second notch is half again"
+    );
+}

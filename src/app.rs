@@ -479,6 +479,10 @@ pub struct App {
     /// What a pinch remembers from its `begin`: the output it is on, the screen point the fingers
     /// started at, the canvas point that was under it, and the scale the protocol last reported.
     pub(crate) pinch_state: Option<PinchState>,
+    /// The scroll source last announced: the protocol sends it as its own event before the
+    /// displacement, so a displacement that carries none belongs to this one. A wheel accelerates and
+    /// a touchpad does not, and the two are told apart nowhere else.
+    pub(crate) axis_source: Option<wayland_client::protocol::wl_pointer::AxisSource>,
     /// When the previous tick ran, which is the `dt` a zoom in flight is stepped by.
     last_tick: Instant,
 }
@@ -745,6 +749,7 @@ impl App {
             pinch: None,
             pointer_at: None,
             pinch_state: None,
+            axis_source: None,
             last_tick: Instant::now(),
         };
         app.bind_text_input_manager();
@@ -1707,6 +1712,11 @@ impl App {
             .map(|out| out.board().to_string())
             .unwrap_or_default();
         self.ai.enter(&board);
+        if !self.ai.open {
+            // The card slides into place over the rail's own transition. Opening again while it is
+            // still arriving keeps the clock it has, so the slide is not restarted mid-flight.
+            self.ai.open_since = Some(Instant::now());
+        }
         self.ai.open = true;
         self.ai.output = Some(key);
         self.ai.focus = true;
@@ -1800,14 +1810,18 @@ impl App {
         let content = self.renderer.ai_log_height(&view, layout.log.w);
         let max = (content - layout.log.h).max(0.0);
         {
+            let now = Instant::now();
             let session = self.ai.session_mut();
-            session.scroll = if session.follow {
-                max
-            } else {
-                session.scroll.clamp(0.0, max)
-            };
+            session.clamp_scroll(max);
+            // The burst is stamped here, at the moment the frame is built, not when the next tick runs:
+            // a wheel notch that arrives between two frames has to show its number on the frame the
+            // notch itself causes.
+            let burst = session.burst.label(now);
+            session.burst_drawn = burst;
             view.scroll = session.scroll;
+            view.burst = burst;
         }
+        view.grow = hover_grow(self.ai.open_since, Instant::now());
         let preview = self.ai.session().preview.clone();
         for (output_key, out) in self.outputs.iter_mut() {
             let had_panel = out.overlay.ai.is_some();
@@ -1926,6 +1940,19 @@ impl App {
         self.ai.fail(&board, reason);
         self.refresh_ai();
         self.dirty = true;
+    }
+
+    /// The panel's own motion: the transcript easing toward the wheel's offset, the card sliding into
+    /// place, and the burst's number leaving the strip. Nothing here touches the document.
+    fn animate_ai(&mut self, now: Instant, dt: f32) {
+        let sliding = self.ai.open
+            && self
+                .ai
+                .open_since
+                .is_some_and(|started| now.saturating_duration_since(started) < TOOLBAR_ANIM);
+        if self.ai.step(now, dt) || sliding {
+            self.refresh_ai();
+        }
     }
 
     /// The stream's own tick: drain the reader, rebuild the preview when it is due, and commit the
@@ -2281,6 +2308,12 @@ impl App {
                 .is_some_and(|started| now.saturating_duration_since(started) < TOOLBAR_ANIM)
             || zoom_in_flight(self.outputs.values().map(|out| out.zoom))
             || self.outputs.values().any(|out| out.motion.quality() < 1.0)
+            || (self.ai.open
+                && self
+                    .ai
+                    .open_since
+                    .is_some_and(|started| now.saturating_duration_since(started) < TOOLBAR_ANIM))
+            || self.ai.scrolling()
     }
 
     /// The toolbar control under a pointer position on an output, if any.
@@ -4659,6 +4692,7 @@ impl App {
         // The AI stream is drained before the store deadline: a delta that arrived while the loop was
         // idle is drawn on this tick, not on the next input event.
         self.pump_ai();
+        self.animate_ai(now, dt);
         if self.store.due(Instant::now())
             && let Err(e) = self.store.flush(&self.doc)
         {
@@ -4717,6 +4751,9 @@ impl App {
         } else if self.ai.streaming() {
             // An answer arrives as tokens on another thread; the loop has to come back for them.
             crate::ai::STREAM_FRAME
+        } else if let Some(left) = self.ai.burst_hold_left(Instant::now()) {
+            // The strip's number has to leave on its own clock, not on the next event.
+            left.min(IDLE_WAIT)
         } else if let Some(until) = self.colors_until {
             until
                 .saturating_duration_since(Instant::now())
@@ -4922,7 +4959,7 @@ impl App {
             let panel =
                 crate::render::ai_panel_layout((w as f32, h as f32), out.overlay.toolbar.as_ref())
                     .panel
-                    .grown(crate::render::TOOLBAR_SHADOW_REACH);
+                    .grown(crate::render::TOOLBAR_SHADOW_REACH + crate::render::AI_PANEL_SLIDE);
             Some(transient.map_or(panel, |box_| box_.union(panel)))
         } else {
             transient

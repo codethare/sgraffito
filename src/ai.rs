@@ -71,6 +71,25 @@ pub const PREVIEW_INTERVAL: Duration = Duration::from_millis(120);
 /// The wait between frames while an answer streams.
 pub const STREAM_FRAME: Duration = Duration::from_millis(33);
 
+/// How far one wheel notch moves the transcript, in logical pixels, before a burst multiplies it.
+pub const SCROLL_PIXELS: f32 = 48.0;
+/// Two scroll steps this close together are one burst; a burst lives this long after its last step.
+pub const BURST_GAP: Duration = Duration::from_millis(150);
+pub const BURST_WINDOW: Duration = Duration::from_millis(400);
+/// How long the strip keeps the multiplier after the last notch. The acceleration itself ends with the
+/// window above; the number is information, and 400 ms is not long enough to read it while the wheel is
+/// still spinning.
+pub const BURST_HOLD: Duration = Duration::from_millis(900);
+/// What each further step of a burst adds, and the most it can become. A wheel is a notch at a time
+/// and accelerates; a touchpad's events inside one gesture are one step, so it is repeated flicks that
+/// speed up — the rule the reference implementation uses, which is what makes the number on the strip
+/// mean the same thing in both.
+pub const BURST_GAIN: f32 = 0.5;
+pub const BURST_MAX: f32 = 4.0;
+/// How fast the drawn offset catches up with what the wheel asked for, in seconds. A time constant of
+/// 45 ms is about the rail's own 140 ms transition, so scrolling and the interface move at one speed.
+pub const SCROLL_TAU: f32 = 0.045;
+
 const GO_BASE: &str = "https://opencode.ai/inference/go";
 const ZEN_BASE: &str = "https://opencode.ai/inference";
 
@@ -222,6 +241,78 @@ impl Drop for Generation {
 /// Nothing here is serialized and nothing here reaches the document until [`Chat::view`]'s preview is
 /// committed by the app. A restart therefore begins with an empty panel, which is deliberate: a
 /// transcript is a conversation, not content.
+/// One scroll burst: how many steps it is on, and when its last one arrived.
+///
+/// A wheel spun quickly accelerates — the second notch moves half again as far as the first, up to
+/// four times — and stops doing so 150 ms after the last notch. A touchpad's events inside one gesture
+/// are a single step, because they are already continuous; it is repeated flicks, separated by the
+/// gesture's own break, that accelerate.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Burst {
+    steps: u32,
+    last: Option<Instant>,
+}
+
+impl Burst {
+    /// Take one scroll event and answer the factor it moves with.
+    pub fn take(&mut self, now: Instant, wheel: bool) -> f32 {
+        let since = self
+            .last
+            .map_or(Duration::MAX, |at| now.saturating_duration_since(at));
+        self.last = Some(now);
+        let inside = since < BURST_GAP;
+        self.steps = match (wheel, inside) {
+            // A notch after a notch is the next step; a notch after a pause starts over.
+            (true, true) => self.steps.saturating_add(1),
+            (true, false) => 1,
+            // Inside one gesture: the burst has not moved on.
+            (false, true) => self.steps.max(1),
+            // A fresh gesture inside the burst's window is the next step; later, it is a new burst.
+            (false, false) if since < BURST_WINDOW => self.steps.max(1).saturating_add(1),
+            (false, false) => 1,
+        };
+        self.factor(now)
+    }
+
+    /// What the burst multiplies a step by right now, or one once its window has passed.
+    pub fn factor(&self, now: Instant) -> f32 {
+        match self.last {
+            Some(at) if now.saturating_duration_since(at) < BURST_WINDOW => {
+                (1.0 + BURST_GAIN * self.steps.saturating_sub(1) as f32).min(BURST_MAX)
+            }
+            _ => 1.0,
+        }
+    }
+
+    /// What the strip says: the factor while the hold lasts, which is longer than the acceleration so
+    /// the number can be read.
+    pub fn label(&self, now: Instant) -> f32 {
+        match self.last {
+            Some(at) if now.saturating_duration_since(at) < BURST_HOLD => {
+                (1.0 + BURST_GAIN * self.steps.saturating_sub(1) as f32).min(BURST_MAX)
+            }
+            _ => 1.0,
+        }
+    }
+
+    /// How long the strip keeps saying it, so the loop can wake exactly when it has to go.
+    pub fn hold_left(&self, now: Instant) -> Option<Duration> {
+        let at = self.last?;
+        let since = now.saturating_duration_since(at);
+        (self.label(now) > 1.0).then(|| BURST_HOLD.saturating_sub(since))
+    }
+}
+
+/// The multiplier as the strip carries it: one decimal only when it is not whole, so the halves of the
+/// ramp read as `1.5x` and the whole ones as `4x`.
+pub fn burst_label(factor: f32) -> String {
+    if (factor - factor.round()).abs() < 0.05 {
+        format!("{}x", factor.round() as i32)
+    } else {
+        format!("{factor:.1}x")
+    }
+}
+
 /// One board's conversation: its transcript, its draft, where its diagram goes, and the diagram it
 /// placed last time.
 ///
@@ -233,10 +324,17 @@ pub struct Session {
     pub input: TextBuffer,
     pub preedit: String,
     pub error: Option<String>,
-    /// How far the log is scrolled, in logical pixels from its top.
+    /// How far the log is scrolled, in logical pixels from its top, as it is drawn.
     pub scroll: f32,
+    /// Where the wheel has asked the log to be. The drawn offset eases toward it, so a notch glides
+    /// instead of jumping.
+    pub scroll_target: f32,
     /// Whether the log follows the end of the stream. A user who scrolls up stops following.
     pub follow: bool,
+    /// The burst the wheel is in, and the factor that was last drawn, so the strip can be repainted
+    /// once when the number expires.
+    pub burst: Burst,
+    pub burst_drawn: f32,
     /// The left edge of the room the panel leaves, in canvas coordinates, and how wide it is. A ring
     /// grows from its middle; a tree starts at its left edge.
     pub anchor: [f32; 2],
@@ -266,7 +364,10 @@ impl Session {
             preedit: String::new(),
             error: None,
             scroll: 0.0,
+            scroll_target: 0.0,
             follow: true,
+            burst: Burst::default(),
+            burst_drawn: 1.0,
             anchor: [0.0, 0.0],
             room: 0.0,
             color: String::new(),
@@ -294,6 +395,49 @@ impl Session {
             last.streaming = false;
         }
     }
+
+    /// Move the view for one scroll event. `raw` is already in logical pixels; the burst decides what
+    /// it is multiplied by, and the drawn offset catches up over the next frames.
+    pub fn scroll_by(&mut self, raw: f32, wheel: bool, now: Instant, max: f32) {
+        if raw == 0.0 {
+            return;
+        }
+        let factor = self.burst.take(now, wheel);
+        self.scroll_target = (self.scroll_target + raw * factor).clamp(0.0, max);
+        self.follow = self.scroll_target >= max;
+    }
+
+    /// Ease the drawn offset toward the wheel's. Returns whether it moved, so a frame is only spent on
+    /// a scroll that is actually going somewhere.
+    pub fn ease_scroll(&mut self, dt: f32) -> bool {
+        let delta = self.scroll_target - self.scroll;
+        if delta.abs() < 0.05 {
+            let landed = self.scroll != self.scroll_target;
+            self.scroll = self.scroll_target;
+            return landed;
+        }
+        // Frame-rate independent: the fraction covered in `dt` does not depend on how many frames the
+        // loop managed, so a dropped frame slows nothing down.
+        let covered = 1.0 - (-dt / SCROLL_TAU).exp();
+        self.scroll += delta * covered.clamp(0.0, 1.0);
+        true
+    }
+
+    /// Whether the drawn offset is still on its way somewhere.
+    pub fn scrolling(&self) -> bool {
+        self.scroll != self.scroll_target
+    }
+
+    /// Keep both the wheel's target and the drawn offset inside the transcript, and follow the end
+    /// when the reader has not scrolled away from it.
+    pub fn clamp_scroll(&mut self, max: f32) {
+        self.scroll_target = if self.follow {
+            max
+        } else {
+            self.scroll_target.clamp(0.0, max)
+        };
+        self.scroll = self.scroll.clamp(0.0, max);
+    }
 }
 
 /// The AI panel: one window, showing the conversation of the board on screen.
@@ -314,6 +458,9 @@ pub struct Chat {
     pub api_session: String,
     /// A press that went down inside the panel owns the pointer until it is released.
     pub pointer_captured: bool,
+    /// When the panel last opened: its card slides into place over the rail's own transition, and this
+    /// is the clock that drives it. `None` until it has opened once.
+    pub open_since: Option<Instant>,
     /// The board whose answer is still arriving. A delta lands in that board's conversation, never in
     /// whichever board happens to be on screen when it arrives.
     streaming_board: Option<String>,
@@ -339,6 +486,7 @@ impl Chat {
             sessions,
             api_session: session_id(),
             pointer_captured: false,
+            open_since: None,
             streaming_board: None,
             generation: None,
             rx: None,
@@ -430,7 +578,41 @@ impl Chat {
                 .is_some_and(|board| board == self.board),
             error: session.error.clone(),
             scroll: session.scroll,
+            burst: session.burst_drawn,
+            grow: 1.0,
         }
+    }
+
+    /// Move the shown transcript for one scroll event, in logical pixels.
+    pub fn scroll_by(&mut self, raw: f32, wheel: bool, now: Instant, max: f32) {
+        self.session_mut().scroll_by(raw, wheel, now, max);
+    }
+
+    /// Whether the shown transcript is still catching up with the wheel.
+    pub fn scrolling(&self) -> bool {
+        self.session().scrolling()
+    }
+
+    /// What the strip carries right now, and how long until it has to be cleared.
+    pub fn burst_label(&self, now: Instant) -> f32 {
+        self.session().burst.label(now)
+    }
+
+    pub fn burst_hold_left(&self, now: Instant) -> Option<Duration> {
+        self.session().burst.hold_left(now)
+    }
+
+    /// One frame of the panel's own motion: the transcript easing toward the wheel's offset, and the
+    /// burst's number leaving the strip when its window passes. `true` when the screen has to change.
+    pub fn step(&mut self, now: Instant, dt: f32) -> bool {
+        let session = self.session_mut();
+        let mut changed = session.ease_scroll(dt);
+        let factor = session.burst.label(now);
+        if session.burst_drawn != factor {
+            session.burst_drawn = factor;
+            changed = true;
+        }
+        changed
     }
 
     /// Send the prompt. The caller has already appended the user's message and an empty assistant one,

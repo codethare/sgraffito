@@ -303,6 +303,14 @@ timeout_secs = 180             # clamped to 5..=600
 # undoable like anything drawn by hand.
 ```
 
+The panel arrives the way the rest of the interface does: its card slides the last few pixels into place
+over the same 140 ms spring as the rail's own transitions, and nothing else about the screen moves. The
+wheel eases the transcript rather than jumping it, and a burst of notches accelerates — the second notch
+moves half again as far as the first, up to four times — so a long answer is crossed in a few flicks
+instead of a dozen. While it accelerates, the strip carries the multiplier (`1.5x`, `4x`), which stays for
+900 ms after the last notch so it can be read. Turning the wheel is one direction of travel: a touchpad's
+continuous slide is a single step, and it is repeated flicks that speed up.
+
 `base_url` is completed to the completions URL, never doubled: a base that already ends in
 `/chat/completions` is used as it is, one that ends in `/v1` gets `/chat/completions`, one that ends in
 `/openai` gets `/v1/chat/completions`, and anything else — a bare host, or the built-in

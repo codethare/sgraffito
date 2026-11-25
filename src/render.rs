@@ -16,6 +16,7 @@ use tiny_skia::{
 };
 use wayland_client::protocol::wl_shm::Format;
 
+use crate::ai::burst_label;
 use crate::canvas::{
     AiView, Backdrop, Board, GRID_SPACING, Handle, ItemId, LINEAR_MIDPOINT, LiveConnector,
     NOTE_DATE_SIZE, NOTE_RADIUS, Note, Overlay, Rect, SELECT_HANDLE, SELECT_ROTATE_GAP, Shape,
@@ -2080,6 +2081,12 @@ impl Renderer {
         view: &AiView,
         scale: f32,
     ) {
+        if view.grow <= 0.0 {
+            return;
+        }
+        // The card slides the last few pixels into place; every rectangle, clip and label comes from
+        // the shifted layout, so the whole panel moves as one piece.
+        let layout = &shifted(layout, (view.grow - 1.0) * AI_PANEL_SLIDE);
         let screen = Screen {
             scale,
             view: View::default(),
@@ -2234,15 +2241,43 @@ impl Renderer {
                 w: layout.scrollbar.w,
                 h: thumb,
             };
-            let bar = screen.ui_rect(bar);
-            fill(
-                pixmap,
-                bar.x,
-                bar.y,
-                bar.w.max(1.0),
-                bar.h,
-                Color::rgba(10, 132, 255, 128),
-            );
+            // A burst that is accelerating says how far a step now goes, on the strip itself: the strip
+            // leaves the number's rows empty rather than being drawn through the digits.
+            let label = (view.burst > 1.0)
+                .then(|| burst_label(view.burst))
+                .map(|text| {
+                    let (w, h) = self.measure_text(&text, AI_BURST_SIZE, None);
+                    let x = (bar.x - 4.0 - w).max(layout.log.x);
+                    let y = (bar.y + bar.h / 2.0 - h / 2.0).clamp(
+                        layout.log.y,
+                        (layout.log.y + layout.log.h - h).max(layout.log.y),
+                    );
+                    (text, Rect { x, y, w, h })
+                });
+            let ink = Color::rgba(10, 132, 255, 128);
+            for segment in strip_segments(bar, label.as_ref().map(|(_, rect)| *rect)) {
+                let segment = screen.ui_rect(segment);
+                fill(
+                    pixmap,
+                    segment.x,
+                    segment.y,
+                    segment.w.max(1.0),
+                    segment.h,
+                    ink,
+                );
+            }
+            if let Some((text, rect)) = label {
+                let item = TextItem {
+                    x: rect.x,
+                    y: rect.y,
+                    color: AI_TEXT.to_string(),
+                    size: AI_BURST_SIZE,
+                    text,
+                    link: None,
+                    container: None,
+                };
+                self.draw_text_clipped(pixmap, &item, screen, None, None, Some(layout.log));
+            }
         }
 
         // The input line: the typed question, the input method's preedit where the caret is, and a
@@ -5189,6 +5224,11 @@ const AI_PANEL_MARGIN: f32 = 18.0;
 const AI_PANEL_WIDTH: f32 = 360.0;
 /// The gap between the panel and the rail it sits beside.
 const AI_RAIL_GAP: f32 = 12.0;
+/// How far the panel is displaced while it slides into place. It comes from the canvas side, so the
+/// rail is never covered, and the rail's own transition curve finishes the move in 140 ms.
+pub const AI_PANEL_SLIDE: f32 = 14.0;
+/// The face the burst's multiplier is set in on the strip.
+const AI_BURST_SIZE: f32 = 10.0;
 const AI_PANEL_RADIUS: f32 = 14.0;
 const AI_BUBBLE_RADIUS: f32 = 10.0;
 const AI_PANEL_PAD: f32 = 12.0;
@@ -5221,6 +5261,49 @@ const AI_MUTED: &str = "#ebebf59e";
 const AI_ERROR: &str = "#ff7b72";
 const AI_INPUT_FILL: &str = "#00000033";
 const AI_BUTTON_MUTED: &str = "#ffffff26";
+
+/// The panel's layout moved sideways by `dx`, which is how the whole card slides into place: one
+/// value shifts every rectangle, and the clips move with the text they clip.
+fn shifted(layout: &AiPanelLayout, dx: f32) -> AiPanelLayout {
+    let shift = |rect: Rect| Rect {
+        x: rect.x + dx,
+        ..rect
+    };
+    AiPanelLayout {
+        panel: shift(layout.panel),
+        header: shift(layout.header),
+        log: shift(layout.log),
+        input: shift(layout.input),
+        close: shift(layout.close),
+        send: shift(layout.send),
+        scrollbar: shift(layout.scrollbar),
+    }
+}
+
+/// The pieces of a scrollbar strip a label's box leaves free: the rows above it and below it, and no
+/// fragment shorter than two pixels, which reads as a speck rather than as a bar.
+fn strip_segments(bar: Rect, label: Option<Rect>) -> Vec<Rect> {
+    let Some(label) = label else {
+        return vec![bar];
+    };
+    let top = label.y.max(bar.y);
+    let bottom = (label.y + label.h).min(bar.y + bar.h);
+    let mut segments = Vec::new();
+    if top - bar.y >= 2.0 {
+        segments.push(Rect {
+            h: top - bar.y,
+            ..bar
+        });
+    }
+    if bar.y + bar.h - bottom >= 2.0 {
+        segments.push(Rect {
+            y: bottom,
+            h: bar.y + bar.h - bottom,
+            ..bar
+        });
+    }
+    segments
+}
 
 /// The width a bubble's text may wrap at inside a log of `width`.
 fn ai_bubble_wrap(width: f32) -> f32 {

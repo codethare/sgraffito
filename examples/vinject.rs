@@ -30,9 +30,13 @@
 //!   key Tab
 //!   key shift+Right
 //!   key ctrl+z
+//!   wheel -3
 //!   key Delete
 //! EOF
 //! ```
+//!
+//! `wheel <notches>` turns the wheel: positive scrolls down, negative up, one notch every 40 ms so a
+//! burst of them is one gesture to the client.
 //!
 //! A key is named as `xkeysym` names it without its `XK_` prefix — `Tab`, `Right`, `Delete`, `plus`, `0` —
 //! and `shift+` / `ctrl+` in front of it hold that modifier across the press (both may be given). The keycode is found by scanning the
@@ -50,7 +54,7 @@ use std::time::Duration;
 
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::wl_keyboard::KeyState;
-use wayland_client::protocol::wl_pointer::ButtonState;
+use wayland_client::protocol::wl_pointer::{Axis, AxisSource, ButtonState};
 use wayland_client::protocol::{wl_registry, wl_seat};
 use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
 use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{
@@ -112,6 +116,10 @@ enum Step {
         name: String,
         shift: bool,
         ctrl: bool,
+    },
+    /// One turn of the wheel: `notches` notches, positive scrolling down.
+    Wheel {
+        notches: i32,
     },
     /// A wait, so the daemon has time to act on what it was just sent before the next thing arrives.
     Sleep(Duration),
@@ -371,6 +379,14 @@ fn sequence() -> Result<Vec<Step>, String> {
                 plan.push(Step::Sleep(Duration::from_millis(ms.max(0.0) as u64)));
             }
             ("key", _, _) => plan.push(key_step(rest.first().map(String::as_str).unwrap_or(""))?),
+            ("wheel", _, _) => {
+                let notches: i32 = rest
+                    .first()
+                    .ok_or_else(|| "wheel wants a number of notches".to_string())?
+                    .parse()
+                    .map_err(|_| "wheel wants a number of notches".to_string())?;
+                plan.push(Step::Wheel { notches });
+            }
             _ => return Err(bad()),
         }
     }
@@ -480,6 +496,20 @@ fn inject(plan: &[Step], extent_w: u32, extent_h: u32) -> anyhow::Result<()> {
                 pointer.frame();
                 queue.roundtrip(&mut state)?;
                 time = time.wrapping_add(1);
+            }
+            Step::Wheel { notches } => {
+                let sign = if *notches < 0 { -1 } else { 1 };
+                pointer.axis_source(AxisSource::Wheel);
+                for _ in 0..notches.unsigned_abs() {
+                    // A real wheel sends the distance and the step count for one notch; a client that
+                    // only extends with `axis_discrete` is not a wheel any compositor forwards.
+                    pointer.axis(time, Axis::VerticalScroll, 15.0 * sign as f64);
+                    pointer.axis_discrete(time, Axis::VerticalScroll, 15.0 * sign as f64, sign);
+                    pointer.frame();
+                    queue.roundtrip(&mut state)?;
+                    time = time.wrapping_add(1);
+                    std::thread::sleep(Duration::from_millis(40));
+                }
             }
             Step::Key { name, shift, ctrl } => {
                 let (code, shifted) = key_named(&keymap, name)

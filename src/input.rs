@@ -1006,6 +1006,13 @@ impl App {
         vertical: AxisScroll,
         source: Option<AxisSource>,
     ) {
+        // The source arrives as its own event before the displacement it describes, so the last one
+        // seen is what a displacement without one belongs to. A wheel and a touchpad scroll very
+        // differently, and a device that cannot say which it is gets the touchpad's rule.
+        if source.is_some() {
+            self.axis_source = source;
+        }
+        let source = source.or(self.axis_source);
         // A wheel over the AI panel scrolls its transcript, and over the rest of the panel it does
         // nothing: zooming the canvas behind a panel the pointer is on is never what was meant.
         if self.ai.open
@@ -1020,11 +1027,24 @@ impl App {
             if layout.panel.contains(at[0], at[1]) {
                 if layout.log.contains(at[0], at[1]) {
                     let max = self.ai_max_scroll(key);
-                    let session = self.ai.session_mut();
-                    session.scroll =
-                        (session.scroll + vertical.absolute as f32 * 40.0).clamp(0.0, max);
-                    session.follow = session.scroll >= max;
+                    // Notches first, then the deprecated count, then the axis distance: a mouse wheel
+                    // reports notches and a touchpad reports a slide, and both have to move the log.
+                    let notches = if vertical.value120 != 0 {
+                        vertical.value120 as f32 / 120.0
+                    } else if vertical.discrete != 0 {
+                        vertical.discrete as f32
+                    } else {
+                        vertical.absolute as f32
+                    };
+                    let wheel = matches!(source, Some(AxisSource::Wheel));
+                    self.ai.scroll_by(
+                        notches * crate::ai::SCROLL_PIXELS,
+                        wheel,
+                        Instant::now(),
+                        max,
+                    );
                     self.refresh_ai();
+                    self.dirty = true;
                 }
                 return;
             }

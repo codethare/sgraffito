@@ -4909,3 +4909,132 @@ fn an_open_panel_damages_its_box_and_a_closed_one_is_painted_over() {
         "the closed panel left pixels behind at {probe:?}"
     );
 }
+
+#[test]
+fn the_panel_slides_into_place_and_a_settled_one_is_where_it_belongs() {
+    let (w, h) = (900u32, 600u32);
+    let mut settled = buffer(w, h);
+    let mut arriving = buffer(w, h);
+    let toolbar = ai_toolbar();
+    let done = Overlay {
+        toolbar: Some(toolbar.clone()),
+        ai: Some(AiView {
+            grow: 1.0,
+            ..ai_view()
+        }),
+        ..Default::default()
+    };
+    let moving = Overlay {
+        toolbar: Some(toolbar.clone()),
+        ai: Some(AiView {
+            grow: 0.25,
+            ..ai_view()
+        }),
+        ..Default::default()
+    };
+    let mut renderer = Renderer::new();
+    renderer.render(
+        &mut settled,
+        w,
+        h,
+        1.0,
+        View::default(),
+        &Board::default(),
+        &done,
+        None,
+    );
+    renderer.render(
+        &mut arriving,
+        w,
+        h,
+        1.0,
+        View::default(),
+        &Board::default(),
+        &moving,
+        None,
+    );
+    let layout = ai_panel_layout((w as f32, h as f32), Some(&toolbar));
+    // The card is drawn in both frames, a slide's width apart at the edge it leaves from.
+    let slide = sgraffito::render::AI_PANEL_SLIDE;
+    assert!(slide > 0.0);
+    let at = |buf: &[u8], x: u32, y: u32| alpha(buf, w, x, y);
+    let probe = (
+        (layout.panel.x + layout.panel.w / 2.0) as u32,
+        (layout.panel.y + layout.panel.h / 2.0) as u32,
+    );
+    assert!(at(&settled, probe.0, probe.1) > SCRIM);
+    assert!(
+        at(&arriving, probe.0, probe.1) > SCRIM,
+        "the moving card was not drawn"
+    );
+    // The card comes from the canvas side: a quarter of the way in, it still covers the strip of
+    // canvas just left of where it will settle, and the settled frame leaves that strip alone.
+    let left = (layout.panel.x - 6.0) as u32;
+    let row = (layout.panel.y + layout.panel.h / 2.0) as u32;
+    assert!(
+        at(&arriving, left, row) > SCRIM,
+        "the arriving card does not reach past its settled left edge"
+    );
+    assert!(
+        at(&settled, left, row) <= SCRIM,
+        "the settled card is drawn outside its own box"
+    );
+}
+
+#[test]
+fn a_scroll_burst_puts_its_multiplier_on_the_strip() {
+    let (w, h) = (900u32, 600u32);
+    let mut plain = buffer(w, h);
+    let mut bursting = buffer(w, h);
+    let toolbar = ai_toolbar();
+    // Enough messages to overflow the log, so the strip exists at all.
+    let mut view = ai_view();
+    view.messages = (0..24)
+        .map(|i| AiMessageView {
+            user: i % 2 == 0,
+            text: format!("message {i}"),
+            streaming: false,
+        })
+        .collect();
+    let calm = Overlay {
+        toolbar: Some(toolbar.clone()),
+        ai: Some(AiView {
+            burst: 1.0,
+            ..view.clone()
+        }),
+        ..Default::default()
+    };
+    let fast = Overlay {
+        toolbar: Some(toolbar.clone()),
+        ai: Some(AiView { burst: 2.5, ..view }),
+        ..Default::default()
+    };
+    let mut renderer = Renderer::new();
+    for (buf, overlay) in [(&mut plain, &calm), (&mut bursting, &fast)] {
+        renderer.render(
+            buf,
+            w,
+            h,
+            1.0,
+            View::default(),
+            &Board::default(),
+            overlay,
+            None,
+        );
+    }
+    let layout = ai_panel_layout((w as f32, h as f32), Some(&toolbar));
+    // The number sits just left of the strip, inside the log.
+    let mut changed = 0;
+    for y in layout.log.y as u32..(layout.log.y + layout.log.h) as u32 {
+        for x in (layout.scrollbar.x - 40.0) as u32..layout.scrollbar.x as u32 {
+            let i = ((y * w + x) * 4) as usize;
+            if plain[i..i + 4] != bursting[i..i + 4] {
+                changed += 1;
+            }
+        }
+    }
+    assert!(
+        changed > 20,
+        "no multiplier was drawn on the strip: {changed}"
+    );
+}
