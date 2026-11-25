@@ -18,7 +18,10 @@ cargo build --release
 ```
 
 The release build is optimised for drawing speed rather than for size (`opt-level = 3`, with LTO and
-one codegen unit), which is what keeps a pan or a zoom of a dense drawing interactive. The stripped
+one codegen unit), which is what keeps a pan or a zoom of a dense drawing interactive. Run that binary,
+not `target/debug`: an unoptimised frame of the AI panel with a transcript was measured at 126 ms against
+5 ms in release, which reads as a stutter and a busy core rather than as a slow build. The daemon says
+which one it is on its first line. The stripped
 binary is about 3.8 MB; the size-optimised profile that preceded it produced 3.0 MB and cost 2.8x on
 every whole-surface frame.
 
