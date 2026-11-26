@@ -1758,6 +1758,9 @@ pub enum MapKind {
     Fishbone,
     /// 对比: exactly two subjects and the attributes they share between them.
     Compare,
+    /// 表格: a level with more siblings than one column holds — the first-level branches as cells of a
+    /// table, each cell its own column of children under a centred title.
+    Grid,
 }
 
 impl MapKind {
@@ -1768,6 +1771,7 @@ impl MapKind {
             MapKind::Tree(Dir::Down) => "tree-down",
             MapKind::Fishbone => "fishbone",
             MapKind::Compare => "compare",
+            MapKind::Grid => "grid",
         }
     }
 
@@ -1778,6 +1782,7 @@ impl MapKind {
             "down" | "tree-down" | "org" | "flow" => Some(MapKind::Tree(Dir::Down)),
             "fishbone" | "cause" => Some(MapKind::Fishbone),
             "compare" | "comparison" | "bubble" => Some(MapKind::Compare),
+            "grid" | "table" => Some(MapKind::Grid),
             _ => None,
         }
     }
@@ -1814,6 +1819,10 @@ pub fn is_chain(tree: &MindNode) -> bool {
     tree.children.len() <= 1 && tree.children.iter().all(is_chain)
 }
 
+/// A level with this many siblings is a table's worth: a ring of them is a sun, a column of them runs off
+/// the screen, and cells wrap.
+const WIDE_LEVEL: usize = 6;
+
 /// Whether the map is a comparison: exactly two first-level subjects that share at least one attribute,
 /// which is what `compare_place` draws side by side with the shared one between them.
 pub fn is_comparison(tree: &MindNode) -> bool {
@@ -1837,6 +1846,10 @@ pub fn rule_kinds(tree: &MindNode, hint: Option<MapKind>) -> Vec<MapKind> {
     }
     if is_comparison(tree) {
         return vec![MapKind::Compare];
+    }
+    // A first level this wide is a table whatever hangs under it: cells wrap, a column does not.
+    if tree.children.len() >= WIDE_LEVEL {
+        return vec![MapKind::Grid];
     }
     // A chain is the same list whichever way it is read, so both directions are costed.
     if is_chain(tree) && levels(tree) >= 3 {
@@ -1973,9 +1986,11 @@ pub fn layout_mindmap(
     let kind = fit_kind(kind, tree);
     let anchor = origin(kind, anchor, room);
     let arrangement = match kind {
+        MapKind::Grid => grid_place(tree, anchor, measure),
         MapKind::Radial => Arrangement {
             nodes: radial_place(tree, anchor, measure),
             groups: Vec::new(),
+            table: None,
         },
         MapKind::Tree(dir) => tree_place(tree, anchor, measure, dir),
         MapKind::Fishbone => return fishbone_board(tree, anchor, color, measure),
@@ -1983,10 +1998,18 @@ pub fn layout_mindmap(
             compare_place(tree, anchor, room, measure).unwrap_or_else(|| Arrangement {
                 nodes: radial_place(tree, anchor, measure),
                 groups: Vec::new(),
+                table: None,
             })
         }
     };
     match kind {
+        MapKind::Grid => {
+            let route = arrangement
+                .table
+                .clone()
+                .map_or(Route::Branches(Dir::Down), Route::Table);
+            assemble_routed(&arrangement, color, measure, route)
+        }
         MapKind::Tree(dir) => assemble_routed(&arrangement, color, measure, Route::Branches(dir)),
         MapKind::Compare => assemble_routed(&arrangement, color, measure, Route::ByAxis),
         _ => assemble_routed(&arrangement, color, measure, Route::Direct),
@@ -2000,6 +2023,56 @@ struct Arrangement {
     /// edge as the title, and its descendants fill the rest. Nothing is stored about a group beyond the
     /// box: the title is a node like any other, so it moves, labels and attaches like one.
     groups: Vec<Rect>,
+    /// The channels a table's edges run in, when this arrangement is a table.
+    table: Option<TableRoute>,
+}
+
+/// The room a table keeps for its channels: the bus under the root, the lane above each row, and the
+/// column beside the cells that a lower row's edge comes down.
+const TABLE_BUS: f32 = 22.0;
+const TABLE_LANE: f32 = 34.0;
+const TABLE_CHANNEL: f32 = 26.0;
+
+/// A column of children, joined the way a table joins its cells: out of the parent, down a channel beside
+/// the column, and in at the child's own height. Without it the edge to the second child is drawn through
+/// the first.
+const LADDER_STEP: f32 = 11.0;
+const LADDER_INSET: f32 = 12.0;
+
+fn ladder_bends(parent: &Placed, child: &Placed) -> Vec<[f32; 2]> {
+    let channel = parent.centre[0].min(child.centre[0])
+        - parent.size[0].max(child.size[0]) / 2.0
+        - LADDER_INSET;
+    let drop = [parent.centre[0], parent.centre[1] + parent.size[1] / 2.0];
+    let end = [child.centre[0] - child.size[0] / 2.0, child.centre[1]];
+    channel_path(&[
+        drop,
+        [drop[0], drop[1] + LADDER_STEP],
+        [channel, drop[1] + LADDER_STEP],
+        [channel, end[1]],
+        end,
+    ])
+}
+
+/// How far apart the samples of an orthogonal route are. The renderer draws a curve through every point,
+/// so a route is walked at this pitch: dense enough that the curve follows the route, and sparse enough
+/// that its corners are rounded rather than sharp.
+const CHANNEL_STEP: f32 = 9.0;
+
+/// A walk along an orthogonal route: every corner kept, and a sample every [`CHANNEL_STEP`] between them.
+fn channel_path(corners: &[[f32; 2]]) -> Vec<[f32; 2]> {
+    let mut out = Vec::new();
+    for pair in corners.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        let span = (b[0] - a[0]).abs() + (b[1] - a[1]).abs();
+        let steps = (span / CHANNEL_STEP).ceil().max(1.0) as usize;
+        for step in 1..steps {
+            let t = step as f32 / steps as f32;
+            out.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
+        }
+        out.push(b);
+    }
+    out
 }
 
 /// The middle of the free corridor between two nodes, measured from their edges rather than their
@@ -2014,7 +2087,7 @@ fn gap_mid(a_centre: f32, a_size: f32, b_centre: f32, b_size: f32) -> f32 {
 
 /// How the edge between two nodes gets from one to the other. Every edge is drawn with curved roundness;
 /// a route only decides where its bend points are.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Debug)]
 enum Route {
     /// Straight from one node to the other: a ring's spokes and a fishbone's ribs are already paths.
     Direct,
@@ -2024,11 +2097,36 @@ enum Route {
     Branches(Dir),
     /// Along whichever axis the two nodes are furthest apart on: a comparison stacks vertically.
     ByAxis,
+    /// A table: the root's edges leave downwards, run down a channel beside the cells and turn in at the
+    /// lane above the row they belong to, so no edge crosses a row to reach the one beneath it.
+    Table(TableRoute),
+}
+
+/// Where a table's channels run: the column beside the cells, the bus under the root, and one lane above
+/// each row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableRoute {
+    /// The x of the channel every lower row's edge comes down.
+    pub channel: f32,
+    /// The y of the run under the root, which the first row's cells hang from.
+    pub bus: f32,
+    /// The y of the lane above each row, top to bottom.
+    pub lanes: Vec<f32>,
+}
+
+impl TableRoute {
+    /// The row a cell belongs to, from the lanes: the lowest lane above it.
+    fn row_of(&self, top: f32) -> usize {
+        self.lanes
+            .iter()
+            .rposition(|lane| *lane < top - 0.5)
+            .unwrap_or(0)
+    }
 }
 
 impl Route {
     /// The bend points between two node centres, in canvas coordinates.
-    fn bends(self, parent: &Placed, child: &Placed) -> Vec<[f32; 2]> {
+    fn bends(&self, parent: &Placed, child: &Placed) -> Vec<[f32; 2]> {
         let (from, to) = (parent.centre, child.centre);
         // A bend that lands on an end is no bend at all: two nodes in one column are joined straight.
         let real = |point: [f32; 2]| {
@@ -2039,6 +2137,30 @@ impl Route {
         let down = gap_mid(from[1], parent.size[1], to[1], child.size[1]);
         let bends = match self {
             Route::Direct => Vec::new(),
+            Route::Table(table) => {
+                if !parent.parents.is_empty() {
+                    // Inside a cell the children hang from their title, one under the other.
+                    return Route::Branches(Dir::Down).bends(parent, child);
+                }
+                let top = child.centre[1] - child.size[1] / 2.0;
+                let row = table.row_of(top);
+                let drop = [parent.centre[0], parent.centre[1] + parent.size[1] / 2.0];
+                let lane = if row == 0 {
+                    table.bus
+                } else {
+                    table.lanes.get(row).copied().unwrap_or(table.bus)
+                };
+                // Down under the root first, then beside the cells, then in at the row's own height:
+                // a cell in a row below is never reached by drawing over the row above it.
+                let mut corners = vec![drop, [drop[0], table.bus]];
+                if row > 0 {
+                    corners.push([table.channel, table.bus]);
+                    corners.push([table.channel, lane]);
+                }
+                corners.push([child.centre[0], lane]);
+                corners.push([child.centre[0], top]);
+                return channel_path(&corners);
+            }
             Route::Branches(dir) => {
                 // The S a mind map draws: it leaves the parent's edge and lands on the child's edge along
                 // the depth axis, one curve per edge. Siblings fan out of the same point instead of
@@ -2092,7 +2214,7 @@ pub fn place_at(
         return board;
     };
     let (dx, dy) = match fit_kind(kind, tree) {
-        MapKind::Radial | MapKind::Compare => (
+        MapKind::Radial | MapKind::Compare | MapKind::Grid => (
             frame.centre()[0] - bounds.centre()[0],
             frame.centre()[1] - bounds.centre()[1],
         ),
@@ -2377,7 +2499,7 @@ fn board_box(board: &Board) -> Option<Rect> {
 /// run on under the panel, because a wide tree cannot be made to fit a strip and the canvas pans.
 fn origin(kind: MapKind, anchor: [f32; 2], room: f32) -> [f32; 2] {
     match kind {
-        MapKind::Radial | MapKind::Compare | MapKind::Tree(Dir::Down) => {
+        MapKind::Radial | MapKind::Compare | MapKind::Grid | MapKind::Tree(Dir::Down) => {
             [anchor[0] + room / 2.0, anchor[1]]
         }
         MapKind::Tree(Dir::Right) | MapKind::Fishbone => [anchor[0] + 24.0, anchor[1]],
@@ -2405,7 +2527,17 @@ fn assemble_routed(
             let Some(parent) = placed.iter().find(|other| other.id == *parent_id) else {
                 continue;
             };
-            let bends = route.bends(parent, node);
+            // A column of siblings needs a channel of its own: only the first can be reached by a
+            // straight drop, and the rest would be drawn over it.
+            let siblings = placed
+                .iter()
+                .filter(|other| other.parents.contains(parent_id))
+                .count();
+            let bends = match (&route, siblings) {
+                (Route::Branches(Dir::Down), 2..) => ladder_bends(parent, node),
+                (Route::Table(_), 2..) if !parent.parents.is_empty() => ladder_bends(parent, node),
+                _ => route.bends(parent, node),
+            };
             let mut points = Vec::with_capacity(bends.len() + 2);
             points.push(parent.centre);
             points.extend(bends);
@@ -2524,6 +2656,142 @@ fn push_node(board: &mut Board, node: &Placed, color: &str, measure: &mut TextMe
         link: None,
         container: Some(node.id),
     });
+}
+
+/// 表格: a level with more siblings than one column holds, drawn as a table. The root sits over the grid,
+/// each first-level branch is a cell headed by its own title, and the branch's children stand in one
+/// column under it. The cells are wrapped, which is why the edges cannot simply drop: the root's edge
+/// leaves downwards, runs down the channel beside the cells, and turns in at the lane above the row it
+/// belongs to — a cell in the second row is reached without crossing the first.
+fn grid_place(tree: &MindNode, anchor: [f32; 2], measure: &mut TextMeasure<'_>) -> Arrangement {
+    let root_size = node_size(&tree.text, measure);
+    struct Cell {
+        title: [f32; 2],
+        children: Vec<([f32; 2], String)>,
+        w: f32,
+        h: f32,
+    }
+    let cells: Vec<Cell> = tree
+        .children
+        .iter()
+        .map(|branch| {
+            let title = node_size(&branch.text, measure);
+            let children: Vec<([f32; 2], String)> = branch
+                .children
+                .iter()
+                .map(|child| (node_size(&child.text, measure), child.text.clone()))
+                .collect();
+            let stack: f32 = children.iter().map(|(size, _)| size[1]).sum::<f32>()
+                + TREE_ROW_GAP * children.len().saturating_sub(1) as f32;
+            let w = children
+                .iter()
+                .map(|(size, _)| size[0])
+                .fold(title[0], f32::max)
+                + 2.0 * GROUP_PADDING;
+            let h = title[1] + 2.0 * GROUP_TITLE_GAP + GROUP_PADDING + stack + GROUP_PADDING;
+            Cell {
+                title,
+                children,
+                w,
+                h,
+            }
+        })
+        .collect();
+    if cells.is_empty() {
+        return Arrangement {
+            nodes: vec![Placed {
+                id: 1,
+                parents: Vec::new(),
+                centre: anchor,
+                size: root_size,
+                text: tree.text.clone(),
+            }],
+            groups: Vec::new(),
+            table: None,
+        };
+    }
+    let count = cells.len();
+    let cols = (count as f32).sqrt().ceil() as usize;
+    let rows = count.div_ceil(cols);
+    let mut column_widths = vec![0.0f32; cols];
+    let mut row_heights = vec![0.0f32; rows];
+    for (index, cell) in cells.iter().enumerate() {
+        let (col, row) = (index % cols, index / cols);
+        column_widths[col] = column_widths[col].max(cell.w);
+        row_heights[row] = row_heights[row].max(cell.h);
+    }
+    let grid_w: f32 =
+        column_widths.iter().sum::<f32>() + TREE_COLUMN_GAP * cols.saturating_sub(1) as f32;
+    // The channels: the bus under the root, the lane above every row, and the column beside the cells.
+    let bus = anchor[1] + root_size[1] / 2.0 + TABLE_BUS;
+    let mut lanes = vec![bus; rows];
+    let mut row_tops = Vec::with_capacity(rows);
+    let mut top = bus + TABLE_LANE;
+    for (row, height) in row_heights.iter().enumerate() {
+        lanes[row] = top - TABLE_LANE / 2.0;
+        row_tops.push(top);
+        top += height + TABLE_LANE;
+    }
+    let left = anchor[0] - grid_w / 2.0;
+    let channel = left - TABLE_CHANNEL;
+    let mut placed = Vec::new();
+    let mut groups = Vec::new();
+    let mut next = 2u64;
+    placed.push(Placed {
+        id: 1,
+        parents: Vec::new(),
+        centre: [left + grid_w / 2.0, anchor[1]],
+        size: root_size,
+        text: tree.text.clone(),
+    });
+    for (index, cell) in cells.iter().enumerate() {
+        let (col, row) = (index % cols, index / cols);
+        let cell_left =
+            left + column_widths[..col].iter().sum::<f32>() + TREE_COLUMN_GAP * col as f32;
+        let centre_x = cell_left + column_widths[col] / 2.0;
+        let row_top = row_tops[row];
+        let Some(branch) = tree.children.get(index) else {
+            continue;
+        };
+        let title_id = next;
+        next += 1;
+        placed.push(Placed {
+            id: title_id,
+            parents: vec![1],
+            centre: [centre_x, row_top + GROUP_TITLE_GAP + cell.title[1] / 2.0],
+            size: cell.title,
+            text: branch.text.clone(),
+        });
+        let mut child_top = row_top + cell.title[1] + 2.0 * GROUP_TITLE_GAP + GROUP_PADDING;
+        let first_child = next;
+        for (size, text) in &cell.children {
+            placed.push(Placed {
+                id: next,
+                parents: vec![title_id],
+                centre: [centre_x, child_top + size[1] / 2.0],
+                size: *size,
+                text: text.clone(),
+            });
+            next += 1;
+            child_top += size[1] + TREE_ROW_GAP;
+        }
+        // A leaf branch is a cell title with nothing under it: there is no boundary to draw.
+        if !cell.children.is_empty()
+            && let Some(descent) = union_of(&placed, first_child, next - 1)
+            && let Some(box_) = box_branch(&mut placed, title_id, descent, Dir::Down)
+        {
+            groups.push(box_);
+        }
+    }
+    Arrangement {
+        nodes: placed,
+        groups,
+        table: Some(TableRoute {
+            channel,
+            bus,
+            lanes,
+        }),
+    }
 }
 
 /// 发散: the root at the centre, one ring per depth, each child holding an angular slice proportional
@@ -2683,6 +2951,7 @@ fn tree_place(
     Arrangement {
         nodes: placed,
         groups,
+        table: None,
     }
 }
 
@@ -3078,6 +3347,7 @@ fn compare_place(
         // A comparison already reads as two columns with a shared one between them: a boundary around
         // each side would be an empty frame, so only a decomposition's branches are boxed.
         groups: Vec::new(),
+        table: None,
     })
 }
 
@@ -3312,12 +3582,12 @@ mod tests {
             candidate_kinds(None, &chain),
             vec![MapKind::Tree(Dir::Right), MapKind::Tree(Dir::Down)]
         );
-        // A wide level of two levels is a ring: spokes read better than a column of seven.
+        // More siblings than a column holds is a table.
         let wide = parse_mindmap(
             "mindmap\n  root((Robot))\n    A\n    B\n    C\n    D\n    E\n    F\n    G\n",
         )
         .unwrap();
-        assert_eq!(candidate_kinds(None, &wide), vec![MapKind::Radial]);
+        assert_eq!(candidate_kinds(None, &wide), vec![MapKind::Grid]);
         // What the answer names is an instruction, fitted when the tree cannot take it at all.
         assert_eq!(
             candidate_kinds(Some(MapKind::Compare), &two),

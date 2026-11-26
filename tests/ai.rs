@@ -1144,3 +1144,92 @@ fn an_answer_in_no_known_syntax_is_an_error_with_a_useful_message() {
     let empty = parse_diagram("").unwrap_err();
     assert!(!empty.is_empty());
 }
+
+#[test]
+fn a_table_wraps_its_cells_and_its_edges_keep_out_of_them() {
+    // Seven branches do not fit one row: the cells wrap, and the root reaches the second row down a
+    // channel beside the table rather than across the row above it.
+    let map = tree(
+        "robot",
+        (0..7)
+            .map(|index| {
+                tree(
+                    &format!("part {index}"),
+                    vec![leaf(&format!("a{index}")), leaf(&format!("b{index}"))],
+                )
+            })
+            .collect(),
+    );
+    let board = layout_mindmap(
+        MapKind::Grid,
+        &map,
+        [100.0, 600.0],
+        600.0,
+        "#e01b24",
+        &mut measure_fn(),
+    );
+    let nodes: Vec<(u64, sgraffito::canvas::Rect)> = board
+        .shapes
+        .iter()
+        .filter(|shape| shape.kind == ShapeKind::Rect && shape.color == "#e01b24")
+        .map(|shape| (shape.id, sgraffito::canvas::Shape::bounds(shape)))
+        .collect();
+    assert_eq!(nodes.len(), 1 + 7 + 14, "root, seven titles, two each");
+    // Wrapped: three columns by three rows of cells, so the titles are not all on one line.
+    let mut title_rows: Vec<i32> = nodes[1..8]
+        .iter()
+        .map(|(_, box_)| box_.y.round() as i32)
+        .collect();
+    title_rows.dedup();
+    assert!(
+        title_rows.len() >= 3,
+        "the cells did not wrap: {title_rows:?}"
+    );
+    // No edge is drawn through a node it does not join. This is the whole point of the channels.
+    for line in board
+        .shapes
+        .iter()
+        .filter(|shape| shape.kind == ShapeKind::Line)
+    {
+        let ends: Vec<u64> = line.attach.iter().flatten().map(|a| a.shape).collect();
+        let mut points = vec![line.from];
+        points.extend(line.points.iter().copied());
+        points.push(line.to);
+        for pair in points.windows(2) {
+            for (id, box_) in &nodes {
+                if ends.contains(id) {
+                    continue;
+                }
+                let grown = box_.grown(2.0);
+                // Sample the segment: a vertex outside a box can still cross it.
+                for step in 0..=32 {
+                    let t = step as f32 / 32.0;
+                    let x = pair[0][0] + (pair[1][0] - pair[0][0]) * t;
+                    let y = pair[0][1] + (pair[1][1] - pair[0][1]) * t;
+                    assert!(
+                        !(x > grown.x
+                            && x < grown.x + grown.w
+                            && y > grown.y
+                            && y < grown.y + grown.h),
+                        "edge {} runs through node {id} at ({x:.0}, {y:.0})",
+                        line.id
+                    );
+                }
+            }
+        }
+    }
+    // And the second row is reached from the left: some edge turns at an x to the left of every cell.
+    let left = nodes
+        .iter()
+        .map(|(_, box_)| box_.x)
+        .fold(f32::INFINITY, f32::min);
+    let reaches_left = board
+        .shapes
+        .iter()
+        .filter(|shape| shape.kind == ShapeKind::Line)
+        .any(|shape| shape.points.iter().any(|point| point[0] < left - 4.0));
+    assert!(
+        reaches_left,
+        "no edge came down the channel beside the cells"
+    );
+}
