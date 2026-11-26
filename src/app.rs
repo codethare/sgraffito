@@ -2165,45 +2165,52 @@ impl App {
                 return;
             }
         };
-        // The answer may name its arrangement in a `%%` line; otherwise the shape of the tree decides.
-        let kind = mermaid
-            .as_deref()
-            .and_then(crate::ai::layout_directive)
-            .unwrap_or_else(|| crate::ai::inferred_kind(&tree));
+        // The answer may name its arrangement in a `%%` line; otherwise the shape of the tree decides. Either
+        // way it is a preference: the rules allow a set of arrangements, and the cheapest of them is drawn.
+        let preference = mermaid.as_deref().and_then(crate::ai::layout_directive);
         let (anchor, room, color, seed) = {
             let session = self.ai.session();
             (
                 session.anchor,
                 session.room,
                 session.color.clone(),
-                session.seed.as_ref().map(|seed| seed.frame),
+                session.seed.clone(),
             )
-        };
-        let renderer = &mut self.renderer;
-        let board = crate::ai::layout_mindmap(
-            kind,
-            &tree,
-            anchor,
-            room,
-            &color,
-            &mut |text, size, wrap| renderer.measure_text(text, size, wrap),
-        );
-        // A request asked to expand a selection is laid out at that selection, not in the strip the
-        // panel leaves: the answer takes the place of the words that asked for it.
-        let board = match seed {
-            Some(frame) => crate::ai::place_at(board, &tree, kind, frame, anchor[0] + room),
-            None => board,
         };
         // Maps pile up as conversations do, so an answer goes where the board has room for it: past the
         // maps already standing there, and off the words this one replaces.
         let board_name = self.ai.board().to_string();
         let taken = self.ai_taken(&board_name);
         let preferred = self.ai.session().place;
-        let (board, place) = crate::ai::free_place(board, &taken, anchor[0] + room, preferred);
+        let limit = anchor[0] + room;
+        let renderer = &mut self.renderer;
+        let choice = crate::ai::choose_layout(
+            preference,
+            &tree,
+            anchor,
+            room,
+            &color,
+            seed.as_ref().map(|seed| seed.frame),
+            &taken,
+            limit,
+            preferred,
+            &mut |text, size, wrap| renderer.measure_text(text, size, wrap),
+        );
+        if !streaming {
+            log(&format!(
+                "ai: {:?} at ({:.0}, {:.0}), {} wide, {} crossing(s), {} covered",
+                choice.kind,
+                choice.place.unwrap_or_default()[0],
+                choice.place.unwrap_or_default()[1],
+                choice.cost.width.round(),
+                choice.cost.crossings,
+                choice.cost.covered.max(0.0).round(),
+            ));
+        }
         let answer_len = text.len();
         let session = self.ai.session_mut();
-        session.preview = Some(board);
-        session.place = place;
+        session.preview = Some(choice.board);
+        session.place = choice.place;
         session.last_preview = Instant::now();
         session.preview_len = answer_len;
         self.refresh_ai();

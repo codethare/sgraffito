@@ -1525,6 +1525,197 @@ pub fn place_at(
 pub const MAP_GAP: f32 = 32.0;
 /// The canvas x a map keeps clear of the screen's left edge, so an answer is never pushed out of sight.
 pub const MAP_MARGIN: f32 = 24.0;
+/// What one crossed pair of edges costs, in canvas units of width: about a node.
+pub const CROSSING_COST: f32 = 180.0;
+/// What covering a unit of the board's width in something already drawn costs. More than being wide, so
+/// a narrow arrangement that fits beats a wide one that does not.
+pub const OVERLAP_COST: f32 = 2.0;
+/// A map this small is a ring's shape even when it is deep: few enough nodes to be read at a glance.
+const FEW_NODES: usize = 6;
+
+/// What an arrangement costs, all three terms in canvas units so they add up: how wide it comes out, the
+/// edges that cross, and the board's own content it would still cover once it has found its place.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Cost {
+    pub width: f32,
+    pub crossings: usize,
+    /// Overlapped area divided by the map's height, which turns it into a width.
+    pub covered: f32,
+}
+
+impl Cost {
+    pub fn score(&self) -> f32 {
+        self.width + self.crossings as f32 * CROSSING_COST + self.covered * OVERLAP_COST
+    }
+}
+
+/// The arrangement the rules picked, with what it cost and where it stands.
+#[derive(Debug, Clone)]
+pub struct Choice {
+    pub board: Board,
+    pub kind: MapKind,
+    pub cost: Cost,
+    pub place: Option<[f32; 2]>,
+}
+
+/// The arrangements to lay out for this tree: the one the answer named, or — when it named none — what the
+/// shape of the tree allows, best guess first. A hierarchy three levels deep or more is a decomposition and
+/// reads to the right, and so is anything big; a shallow or small map goes on a ring; exactly two
+/// first-level nodes may be a comparison; a fishbone is only ever asked for, because "these are the causes
+/// of that" is not something indentation says.
+pub fn candidate_kinds(preference: Option<MapKind>, tree: &MindNode) -> Vec<MapKind> {
+    let (depth, nodes) = (levels(tree), count_nodes(tree));
+    let mut kinds: Vec<MapKind> = Vec::new();
+    let mut add = |kind: MapKind| {
+        let fitted = fit_kind(kind, tree);
+        if !kinds.contains(&fitted) {
+            kinds.push(fitted);
+        }
+    };
+    // What the answer names is an instruction, not a guess: a comparison's shared attribute and a
+    // fishbone's spine carry meaning indentation does not, and a decomposition's rightward growth is what
+    // makes it read as one. The cost below decides the *place*, and only chooses the family when the
+    // answer named none.
+    if let Some(kind) = preference {
+        add(kind);
+        return kinds;
+    }
+    add(inferred_kind(tree));
+    // A small, deep map can also be a ring: fewer nodes than a hand can count at a glance read the same
+    // either way, so the cheaper of the two is drawn.
+    if depth <= 2 || nodes <= FEW_NODES {
+        add(MapKind::Radial);
+    }
+    if depth >= 3 {
+        add(MapKind::Tree);
+    }
+    // Exactly two first-level nodes may be a comparison; the layout falls back to the ring by itself when
+    // the two have nothing to compare.
+    if tree.children.len() == 2 {
+        add(MapKind::Compare);
+    }
+    kinds
+}
+
+/// Lay the map out in every arrangement the rules allow, put each one where it would stand, and keep the
+/// cheapest. The geometry is the same throughout — the model names a shape of answer, never a coordinate.
+#[allow(clippy::too_many_arguments)]
+pub fn choose_layout(
+    preference: Option<MapKind>,
+    tree: &MindNode,
+    anchor: [f32; 2],
+    room: f32,
+    color: &str,
+    seed: Option<Rect>,
+    taken: &[Rect],
+    limit: f32,
+    preferred: Option<[f32; 2]>,
+    measure: &mut TextMeasure<'_>,
+) -> Choice {
+    let mut best: Option<(f32, Choice)> = None;
+    for kind in candidate_kinds(preference, tree) {
+        let board = layout_mindmap(kind, tree, anchor, room, color, measure);
+        let board = match seed {
+            Some(frame) => place_at(board, tree, kind, frame, limit),
+            None => board,
+        };
+        let (board, place) = free_place(board, taken, limit, preferred);
+        let Some(box_) = board_box(&board) else {
+            continue;
+        };
+        let cost = Cost {
+            width: box_.w,
+            crossings: crossings_of(&board),
+            covered: overlap_area(box_, taken) / box_.h.max(1.0),
+        };
+        let score = cost.score();
+        if best.as_ref().is_none_or(|(best, _)| score < *best) {
+            best = Some((
+                score,
+                Choice {
+                    board,
+                    kind,
+                    cost,
+                    place,
+                },
+            ));
+        }
+    }
+    if let Some((_, choice)) = best {
+        return choice;
+    }
+    // A tree with nothing in it: no arrangement has a box to cost, and an empty one is still an answer.
+    let kind = fit_kind(preference.unwrap_or_else(|| inferred_kind(tree)), tree);
+    let board = layout_mindmap(kind, tree, anchor, room, color, measure);
+    Choice {
+        board,
+        kind,
+        cost: Cost {
+            width: 0.0,
+            crossings: 0,
+            covered: 0.0,
+        },
+        place: None,
+    }
+}
+
+/// How many nodes a tree holds.
+fn count_nodes(node: &MindNode) -> usize {
+    1 + node.children.iter().map(count_nodes).sum::<usize>()
+}
+
+/// The edges that cross each other. Two edges that share a node meet there by design; any other pair that
+/// meets anywhere is a crossing the reader has to untangle.
+fn crossings_of(board: &Board) -> usize {
+    let lines: Vec<(&Shape, [u64; 2])> = board
+        .shapes
+        .iter()
+        .filter(|shape| shape.kind == ShapeKind::Line)
+        .filter_map(|shape| {
+            let from = shape.attach[0]?.shape;
+            let to = shape.attach[1]?.shape;
+            Some((shape, [from, to]))
+        })
+        .collect();
+    let mut crossings = 0;
+    for (index, (one, one_ids)) in lines.iter().enumerate() {
+        for (two, two_ids) in &lines[index + 1..] {
+            if one_ids.iter().any(|id| two_ids.contains(id)) {
+                continue;
+            }
+            if segments_cross(one.from, one.to, two.from, two.to) {
+                crossings += 1;
+            }
+        }
+    }
+    crossings
+}
+
+/// Whether two segments cross properly: each one has an end on either side of the other.
+fn segments_cross(a: [f32; 2], b: [f32; 2], c: [f32; 2], d: [f32; 2]) -> bool {
+    let side = |p: [f32; 2], q: [f32; 2], r: [f32; 2]| {
+        (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+    };
+    let (d1, d2) = (side(a, b, c), side(a, b, d));
+    let (d3, d4) = (side(c, d, a), side(c, d, b));
+    (d1 > 0.0) != (d2 > 0.0)
+        && (d1 != 0.0 && d2 != 0.0)
+        && (d3 > 0.0) != (d4 > 0.0)
+        && d3 != 0.0
+        && d4 != 0.0
+}
+
+/// The area of `box_` that `taken` covers.
+fn overlap_area(box_: Rect, taken: &[Rect]) -> f32 {
+    taken
+        .iter()
+        .map(|other| {
+            let w = (box_.x + box_.w).min(other.x + other.w) - box_.x.max(other.x);
+            let h = (box_.y + box_.h).min(other.y + other.h) - box_.y.max(other.y);
+            if w > 0.0 && h > 0.0 { w * h } else { 0.0 }
+        })
+        .sum()
+}
 
 /// Where a map of this size can stand among what is already on the board: the place it was asked for when
 /// that place is free; else the first free spot walking right, then left, then a row down. `taken` is what
@@ -2322,6 +2513,153 @@ mod tests {
                 .any(|turn| turn["role"] == serde_json::json!("assistant")
                     && turn["content"] == serde_json::json!(""))
         );
+    }
+
+    #[test]
+    fn the_rules_offer_only_arrangements_a_tree_can_take() {
+        let two = parse_mindmap("mindmap\n  root((Robot))\n    Sensors\n    Wheels\n").unwrap();
+        assert_eq!(
+            candidate_kinds(None, &two),
+            vec![MapKind::Radial, MapKind::Compare]
+        );
+        // Three levels: a decomposition is allowed, and a small one may still be a ring.
+        let deep = parse_mindmap("mindmap\n  root((Robot))\n    Sensors\n      Camera\n").unwrap();
+        assert_eq!(
+            candidate_kinds(None, &deep),
+            vec![MapKind::Tree, MapKind::Radial]
+        );
+        // Three levels and more than a handful of nodes: only the decomposition reads.
+        let wide = parse_mindmap(
+            "mindmap\n  root((Robot))\n    A\n      A1\n    B\n      B1\n    C\n      C1\n",
+        )
+        .unwrap();
+        assert_eq!(candidate_kinds(None, &wide), vec![MapKind::Tree]);
+        // What the answer names is what is drawn, fitted when the tree cannot take it at all.
+        assert_eq!(
+            candidate_kinds(Some(MapKind::Compare), &two),
+            vec![MapKind::Compare]
+        );
+        assert_eq!(
+            candidate_kinds(Some(MapKind::Compare), &deep),
+            vec![MapKind::Radial]
+        );
+        assert_eq!(
+            candidate_kinds(Some(MapKind::Fishbone), &two),
+            vec![MapKind::Fishbone]
+        );
+        assert_eq!(
+            candidate_kinds(Some(MapKind::Tree), &two),
+            vec![MapKind::Tree]
+        );
+        assert_eq!(
+            candidate_kinds(Some(MapKind::Radial), &wide),
+            vec![MapKind::Radial]
+        );
+    }
+
+    #[test]
+    fn a_crossed_pair_of_edges_is_counted_and_a_shared_node_is_not() {
+        let edge = |id: u64, a: u64, b: u64, from: [f32; 2], to: [f32; 2]| Shape {
+            kind: ShapeKind::Line,
+            color: "#ffffff".into(),
+            width: 1.5,
+            from,
+            to,
+            rotate: 0.0,
+            id,
+            points: Vec::new(),
+            roundness: None,
+            attach: [
+                Some(Attachment {
+                    shape: a,
+                    at: [0.0, 0.0],
+                }),
+                Some(Attachment {
+                    shape: b,
+                    at: [0.0, 0.0],
+                }),
+            ],
+            fill: None,
+        };
+        let mut board = Board::default();
+        // Two edges that cross in the middle.
+        board.shapes.push(edge(1, 1, 2, [0.0, 0.0], [100.0, 100.0]));
+        board.shapes.push(edge(2, 3, 4, [0.0, 100.0], [100.0, 0.0]));
+        assert_eq!(crossings_of(&board), 1);
+        // Two that share a node meet there by design.
+        let mut shared = Board::default();
+        shared
+            .shapes
+            .push(edge(1, 1, 2, [0.0, 0.0], [100.0, 100.0]));
+        shared
+            .shapes
+            .push(edge(2, 2, 3, [100.0, 100.0], [100.0, 0.0]));
+        assert_eq!(crossings_of(&shared), 0);
+        // Two that never meet.
+        let mut apart = Board::default();
+        apart.shapes.push(edge(1, 1, 2, [0.0, 0.0], [100.0, 0.0]));
+        apart.shapes.push(edge(2, 3, 4, [0.0, 40.0], [100.0, 40.0]));
+        assert_eq!(crossings_of(&apart), 0);
+    }
+
+    #[test]
+    fn the_cheapest_arrangement_is_the_one_drawn() {
+        let tree = parse_mindmap("mindmap\n  root((Robot))\n    Sensors\n      Camera\n").unwrap();
+        let mut measure = |_: &str, size: f32, _: Option<f32>| (size, size);
+        let anchor = [48.0, 300.0];
+        let limit = 400.0;
+        let chosen = choose_layout(
+            None,
+            &tree,
+            anchor,
+            344.0,
+            "#ffffff",
+            None,
+            &[],
+            limit,
+            None,
+            &mut measure,
+        );
+        // Every arrangement the rules allow is costed the same way, and none is cheaper than the winner.
+        let mut widths = Vec::new();
+        for kind in candidate_kinds(None, &tree) {
+            let board = layout_mindmap(kind, &tree, anchor, 344.0, "#ffffff", &mut measure);
+            let (board, _) = free_place(board, &[], limit, None);
+            widths.push(board_box(&board).unwrap().w);
+        }
+        assert!(widths.contains(&chosen.cost.width), "{widths:?} {chosen:?}");
+        assert!(
+            chosen.cost.width <= widths.iter().copied().fold(f32::INFINITY, f32::min) + 0.5,
+            "a wider arrangement won: {widths:?} {chosen:?}"
+        );
+    }
+
+    #[test]
+    fn an_arrangement_that_would_cover_the_board_gives_way() {
+        let tree = parse_mindmap("mindmap\n  root((Robot))\n    Sensors\n      Camera\n").unwrap();
+        let mut measure = |_: &str, size: f32, _: Option<f32>| (size, size);
+        // Everything the ring would cover is already used, so the other arrangement, or another place,
+        // has to win.
+        let blocked = [Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 900.0,
+            h: 600.0,
+        }];
+        let chosen = choose_layout(
+            None,
+            &tree,
+            [48.0, 300.0],
+            344.0,
+            "#ffffff",
+            None,
+            &blocked,
+            400.0,
+            None,
+            &mut measure,
+        );
+        assert!(chosen.cost.covered <= 1.0, "{chosen:?}");
+        assert!(chosen.place.is_some(), "it found no place at all");
     }
 
     #[test]
