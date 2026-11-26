@@ -2172,13 +2172,11 @@ impl App {
             }
         };
         let tree = parsed.tree;
-        // The answer may name its arrangement in a `%%` line; a syntax that implies one names it too; and
-        // otherwise the shape of the tree decides. Any of them is a preference: the rules allow a set of
-        // arrangements, and the cheapest of them is drawn.
-        let preference = mermaid
-            .as_deref()
-            .and_then(crate::ai::layout_directive)
-            .or(parsed.view);
+        // The answer's own `%%` line is an instruction and pins the arrangement. A syntax that implies one
+        // is a hint the rules weigh, and with neither, the shape of the tree decides: the cheapest of the
+        // arrangements the rule allows is the one drawn.
+        let preference = mermaid.as_deref().and_then(crate::ai::layout_directive);
+        let hint = parsed.view;
         let (anchor, room, color, seed) = {
             let session = self.ai.session();
             (
@@ -2197,6 +2195,7 @@ impl App {
         let renderer = &mut self.renderer;
         let choice = crate::ai::choose_layout(
             preference,
+            hint,
             &tree,
             anchor,
             room,

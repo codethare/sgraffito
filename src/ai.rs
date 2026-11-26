@@ -1340,11 +1340,12 @@ pub fn parse_diagram(source: &str) -> Result<Parsed, String> {
     match word {
         "mindmap" => {
             let tree = parse_mindmap(source)?;
-            let view = layout_directive(source).or(Some(inferred_kind(&tree)));
             Ok(Parsed {
                 tree,
                 syntax: Syntax::Mindmap,
-                view,
+                // A mind map's syntax says nothing about the arrangement: its own `%%` line may, and the
+                // shape rules do the rest.
+                view: layout_directive(source),
             })
         }
         "flowchart" | "graph" => flowchart_tree(source, &first).map(|tree| Parsed {
@@ -1807,6 +1808,46 @@ pub fn inferred_kind(tree: &MindNode) -> MapKind {
     }
 }
 
+/// Whether a map is one chain: every node has at most one child. A chain is a sequence — a process, a
+/// history — and it reads as a list rather than as a decomposition, down or across.
+pub fn is_chain(tree: &MindNode) -> bool {
+    tree.children.len() <= 1 && tree.children.iter().all(is_chain)
+}
+
+/// Whether the map is a comparison: exactly two first-level subjects that share at least one attribute,
+/// which is what `compare_place` draws side by side with the shared one between them.
+pub fn is_comparison(tree: &MindNode) -> bool {
+    let [left, right] = tree.children.as_slice() else {
+        return false;
+    };
+    left.children.iter().any(|a| {
+        right
+            .children
+            .iter()
+            .any(|b| a.text.eq_ignore_ascii_case(&b.text))
+    })
+}
+
+/// What the shape of the tree says the map is, and which readings of it are worth costing. The answer's
+/// own `%%` line is an instruction and pins one; the syntax may imply one; otherwise this table decides,
+/// and the cost only chooses between the readings the rule leaves open and the place they stand in.
+pub fn rule_kinds(tree: &MindNode, hint: Option<MapKind>) -> Vec<MapKind> {
+    if let Some(hint) = hint {
+        return vec![fit_kind(hint, tree)];
+    }
+    if is_comparison(tree) {
+        return vec![MapKind::Compare];
+    }
+    // A chain is the same list whichever way it is read, so both directions are costed.
+    if is_chain(tree) && levels(tree) >= 3 {
+        return vec![MapKind::Tree(Dir::Right), MapKind::Tree(Dir::Down)];
+    }
+    if levels(tree) >= 3 {
+        return vec![MapKind::Tree(Dir::Right), MapKind::Tree(Dir::Down)];
+    }
+    vec![MapKind::Radial]
+}
+
 /// The arrangements worth switching between for this structure, in the order a reader tries them: the
 /// two readings of a decomposition, then the ring, then the semantic shapes it supports. Every one of
 /// them is drawn from the same tree — switching asks the model nothing.
@@ -2082,8 +2123,6 @@ pub const CROSSING_COST: f32 = 180.0;
 /// What covering a unit of the board's width in something already drawn costs. More than being wide, so
 /// a narrow arrangement that fits beats a wide one that does not.
 pub const OVERLAP_COST: f32 = 2.0;
-/// A map this small is a ring's shape even when it is deep: few enough nodes to be read at a glance.
-const FEW_NODES: usize = 6;
 
 /// What an arrangement costs, all three terms in canvas units so they add up: how wide it comes out, the
 /// edges that cross, and the board's own content it would still cover once it has found its place.
@@ -2116,37 +2155,24 @@ pub struct Choice {
 /// first-level nodes may be a comparison; a fishbone is only ever asked for, because "these are the causes
 /// of that" is not something indentation says.
 pub fn candidate_kinds(preference: Option<MapKind>, tree: &MindNode) -> Vec<MapKind> {
-    let (depth, nodes) = (levels(tree), count_nodes(tree));
-    let mut kinds: Vec<MapKind> = Vec::new();
-    let mut add = |kind: MapKind| {
-        let fitted = fit_kind(kind, tree);
-        if !kinds.contains(&fitted) {
-            kinds.push(fitted);
-        }
-    };
-    // What the answer names is an instruction, not a guess: a comparison's shared attribute and a
-    // fishbone's spine carry meaning indentation does not, and a decomposition's rightward growth is what
-    // makes it read as one. The cost below decides the *place*, and only chooses the family when the
-    // answer named none.
-    if let Some(kind) = preference {
-        add(kind);
-        return kinds;
+    // An answer that names an arrangement is instructing, not suggesting: the reader asked for that map.
+    match preference {
+        Some(kind) => vec![fit_kind(kind, tree)],
+        None => rule_kinds(tree, None),
     }
-    add(inferred_kind(tree));
-    // A small, deep map can also be a ring: fewer nodes than a hand can count at a glance read the same
-    // either way, so the cheaper of the two is drawn.
-    if depth <= 2 || nodes <= FEW_NODES {
-        add(MapKind::Radial);
+}
+
+/// The arrangements to cost: the answer's own line if it wrote one, else what the rules offer for this
+/// shape — the syntax's reading first, then the readings the structure leaves open.
+pub fn layout_kinds(
+    preference: Option<MapKind>,
+    hint: Option<MapKind>,
+    tree: &MindNode,
+) -> Vec<MapKind> {
+    match preference {
+        Some(kind) => vec![fit_kind(kind, tree)],
+        None => rule_kinds(tree, hint),
     }
-    if depth >= 3 {
-        add(MapKind::Tree(Dir::Right));
-    }
-    // Exactly two first-level nodes may be a comparison; the layout falls back to the ring by itself when
-    // the two have nothing to compare.
-    if tree.children.len() == 2 {
-        add(MapKind::Compare);
-    }
-    kinds
 }
 
 /// Lay the map out in every arrangement the rules allow, put each one where it would stand, and keep the
@@ -2154,6 +2180,7 @@ pub fn candidate_kinds(preference: Option<MapKind>, tree: &MindNode) -> Vec<MapK
 #[allow(clippy::too_many_arguments)]
 pub fn choose_layout(
     preference: Option<MapKind>,
+    hint: Option<MapKind>,
     tree: &MindNode,
     anchor: [f32; 2],
     room: f32,
@@ -2165,7 +2192,7 @@ pub fn choose_layout(
     measure: &mut TextMeasure<'_>,
 ) -> Choice {
     let mut best: Option<(f32, Choice)> = None;
-    for kind in candidate_kinds(preference, tree) {
+    for kind in layout_kinds(preference, hint, tree) {
         let board = layout_mindmap(kind, tree, anchor, room, color, measure);
         let board = match seed {
             Some(frame) => place_at(board, tree, kind, frame, limit),
@@ -2209,11 +2236,6 @@ pub fn choose_layout(
         },
         place: None,
     }
-}
-
-/// How many nodes a tree holds.
-fn count_nodes(node: &MindNode) -> usize {
-    1 + node.children.iter().map(count_nodes).sum::<usize>()
 }
 
 /// The edges that cross each other. Two edges that share a node meet there by design; any other pair that
@@ -2632,6 +2654,8 @@ fn tree_place(
     });
     next += 1;
     let root_id = 1;
+    // A chain is a list, not a branch: a boundary around it would be a second thing to read.
+    let boxed = !is_chain(tree);
     let mut cursor = across_centre - total / 2.0;
     for (index, child) in tree.children.iter().enumerate() {
         let first = next;
@@ -2647,7 +2671,8 @@ fn tree_place(
             dir,
         );
         // A branch with nothing under it is a leaf, and a box around nothing reads as noise.
-        if !child.children.is_empty()
+        if boxed
+            && !child.children.is_empty()
             && let Some(descent) = union_of(&placed, first + 1, next - 1)
             && let Some(box_) = box_branch(&mut placed, branch_id, descent, dir)
         {
@@ -3261,28 +3286,39 @@ mod tests {
     }
 
     #[test]
-    fn the_rules_offer_only_arrangements_a_tree_can_take() {
+    fn the_rules_read_the_shape_of_the_tree() {
+        // A shallow map with nothing in common: a ring.
         let two = parse_mindmap("mindmap\n  root((Robot))\n    Sensors\n    Wheels\n").unwrap();
-        assert_eq!(
-            candidate_kinds(None, &two),
-            vec![MapKind::Radial, MapKind::Compare]
-        );
-        // Three levels: a decomposition is allowed, and a small one may still be a ring.
+        assert_eq!(candidate_kinds(None, &two), vec![MapKind::Radial]);
+        // Two subjects with a shared attribute are a comparison, and nothing else.
+        let shared = parse_mindmap(
+            "mindmap\n  root((Robot vs Car))\n    Robot\n      Wheels\n      Camera\n    Car\n      Wheels\n      Engine\n",
+        )
+        .unwrap();
+        assert!(is_comparison(&shared));
+        assert_eq!(candidate_kinds(None, &shared), vec![MapKind::Compare]);
+        // A decomposition is read both ways and the cost picks; the rules do not guess a direction.
         let deep = parse_mindmap("mindmap\n  root((Robot))\n    Sensors\n      Camera\n").unwrap();
         assert_eq!(
             candidate_kinds(None, &deep),
-            vec![MapKind::Tree(Dir::Right), MapKind::Radial]
+            vec![MapKind::Tree(Dir::Right), MapKind::Tree(Dir::Down)]
         );
-        // Three levels and more than a handful of nodes: only the decomposition reads.
+        // One per level is a chain: a process, a history, a sequence.
+        let chain =
+            parse_mindmap("mindmap\n  root((Idea))\n    Sketch\n      Prototype\n        Test\n")
+                .unwrap();
+        assert!(is_chain(&chain));
+        assert_eq!(
+            candidate_kinds(None, &chain),
+            vec![MapKind::Tree(Dir::Right), MapKind::Tree(Dir::Down)]
+        );
+        // A wide level of two levels is a ring: spokes read better than a column of seven.
         let wide = parse_mindmap(
-            "mindmap\n  root((Robot))\n    A\n      A1\n    B\n      B1\n    C\n      C1\n",
+            "mindmap\n  root((Robot))\n    A\n    B\n    C\n    D\n    E\n    F\n    G\n",
         )
         .unwrap();
-        assert_eq!(
-            candidate_kinds(None, &wide),
-            vec![MapKind::Tree(Dir::Right)]
-        );
-        // What the answer names is what is drawn, fitted when the tree cannot take it at all.
+        assert_eq!(candidate_kinds(None, &wide), vec![MapKind::Radial]);
+        // What the answer names is an instruction, fitted when the tree cannot take it at all.
         assert_eq!(
             candidate_kinds(Some(MapKind::Compare), &two),
             vec![MapKind::Compare]
@@ -3295,13 +3331,15 @@ mod tests {
             candidate_kinds(Some(MapKind::Fishbone), &two),
             vec![MapKind::Fishbone]
         );
+        // A syntax's reading is a hint: the rules take it as the answer, the cost still places it.
         assert_eq!(
-            candidate_kinds(Some(MapKind::Tree(Dir::Right)), &two),
-            vec![MapKind::Tree(Dir::Right)]
+            layout_kinds(None, Some(MapKind::Tree(Dir::Down)), &deep),
+            vec![MapKind::Tree(Dir::Down)]
         );
         assert_eq!(
-            candidate_kinds(Some(MapKind::Radial), &wide),
-            vec![MapKind::Radial]
+            layout_kinds(Some(MapKind::Radial), Some(MapKind::Tree(Dir::Down)), &deep),
+            vec![MapKind::Radial],
+            "the answer's own line overrules the syntax"
         );
     }
 
@@ -3358,6 +3396,7 @@ mod tests {
         let limit = 400.0;
         let chosen = choose_layout(
             None,
+            None,
             &tree,
             anchor,
             344.0,
@@ -3395,6 +3434,7 @@ mod tests {
             h: 600.0,
         }];
         let chosen = choose_layout(
+            None,
             None,
             &tree,
             [48.0, 300.0],
