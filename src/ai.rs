@@ -31,9 +31,12 @@ use crate::config::{Config, DEFAULT_AI_MODEL};
 /// What the model is asked for. One fenced `mindmap`, nothing after it: the parser reads the last
 /// fenced block, so a correction after an earlier attempt replaces it rather than adding to it.
 pub const SYSTEM_PROMPT: &str = "\
-You create Mermaid mind maps for the sgraffito drawing board.
+You create Mermaid diagrams for the sgraffito drawing board.
 Answer in the user's language. Keep prose to at most two short sentences.
-Then output exactly one fenced code block with language `mermaid` and a `mindmap` diagram.
+Then output exactly one fenced code block with language `mermaid`.
+Use a `mindmap` unless the content is a process, a history or a 2x2 comparison: then a tree-shaped
+`flowchart` (one start, no node with two parents; `flowchart TD` reads downwards, `flowchart LR` to the
+right), a `timeline`, or a `quadrantChart` are read too.
 The block starts with `mindmap`, then one comment line naming the arrangement:
   %% sgraffito layout: radial | tree | tree-down | fishbone | compare
 Use two spaces per indentation level. One root and at most 40 nodes. Do not add any text after the block.
@@ -1296,6 +1299,358 @@ pub fn parse_mindmap(source: &str) -> Result<MindNode, String> {
     stack
         .pop()
         .ok_or_else(|| "AI did not return a Mermaid mindmap".to_string())
+}
+
+/// Which diagram syntax an answer's block is written in. The model names the kind of thinking; the
+/// syntax says how it is written down, and the geometry is the same pipeline either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Syntax {
+    /// A Mermaid `mindmap`: indentation is the structure.
+    Mindmap,
+    /// A `flowchart`/`graph`: arrows are the structure, and the direction token is the reading direction.
+    Flowchart,
+    /// A `timeline`: sections in order, each with its events.
+    Timeline,
+    /// A `quadrantChart`: four named quadrants and the points that sit in them.
+    Quadrant,
+}
+
+/// What an answer's block holds, after its syntax is read: the structure to draw, and the arrangement its
+/// syntax implies, which the rules and the answer's own `%%` line may still overrule.
+#[derive(Debug, Clone)]
+pub struct Parsed {
+    pub tree: MindNode,
+    pub syntax: Syntax,
+    pub view: Option<MapKind>,
+}
+
+/// Read a Mermaid block: a `mindmap`, a tree-shaped `flowchart`, a `timeline` or a `quadrantChart`. All
+/// four become the one structure the layout understands — nodes and parents — so no geometry knows which
+/// syntax produced it.
+pub fn parse_diagram(source: &str) -> Result<Parsed, String> {
+    let first = source
+        .lines()
+        .find(|line| {
+            let line = line.trim();
+            !line.is_empty() && !line.starts_with("%%")
+        })
+        .map(|line| line.trim().to_string())
+        .unwrap_or_default();
+    let word = first.split_whitespace().next().unwrap_or_default();
+    match word {
+        "mindmap" => {
+            let tree = parse_mindmap(source)?;
+            let view = layout_directive(source).or(Some(inferred_kind(&tree)));
+            Ok(Parsed {
+                tree,
+                syntax: Syntax::Mindmap,
+                view,
+            })
+        }
+        "flowchart" | "graph" => flowchart_tree(source, &first).map(|tree| Parsed {
+            tree,
+            syntax: Syntax::Flowchart,
+            view: Some(flowchart_view(&first)),
+        }),
+        "timeline" => timeline_tree(source).map(|tree| Parsed {
+            tree,
+            syntax: Syntax::Timeline,
+            view: Some(MapKind::Tree(Dir::Down)),
+        }),
+        "quadrantChart" => quadrant_tree(source).map(|tree| Parsed {
+            tree,
+            syntax: Syntax::Quadrant,
+            view: Some(MapKind::Tree(Dir::Right)),
+        }),
+        _ => {
+            Err("AI did not return a Mermaid mindmap, flowchart, timeline or quadrant chart".into())
+        }
+    }
+}
+
+/// The reading direction a flowchart names: `LR` reads right, everything else (top-down, bottom-up,
+/// right-left) is drawn downwards, because that is the axis a chain of steps is written on.
+fn flowchart_view(header: &str) -> MapKind {
+    let mut words = header.split_whitespace();
+    let _ = words.next();
+    match words.next() {
+        Some("LR") => MapKind::Tree(Dir::Right),
+        _ => MapKind::Tree(Dir::Down),
+    }
+}
+
+/// One end of a flowchart edge: its id, and the text it was given if any.
+fn flowchart_end(raw: &str) -> (String, Option<String>) {
+    let raw = raw.trim();
+    let split = raw.find(['(', '[', '{', '>']).unwrap_or(raw.len());
+    let (id, wrapper) = raw.split_at(split);
+    let id = id.trim().to_string();
+    let text = if wrapper.trim().is_empty() {
+        None
+    } else {
+        let text = node_text(wrapper.trim());
+        (!text.is_empty()).then_some(text)
+    };
+    (id, text)
+}
+
+/// A flowchart as a tree: the one node nothing points at is the root, every other node hangs from the
+/// node its first arrow comes from. A graph with a merge (a node with two parents) is refused rather
+/// than flattened, because a tree would draw a different diagram from the one written.
+fn flowchart_tree(source: &str, header: &str) -> Result<MindNode, String> {
+    let _ = header;
+    let mut labels: std::collections::BTreeMap<String, String> = Default::default();
+    let mut order: Vec<String> = Vec::new();
+    let mut parents: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    let mut note = |id: &str, text: &Option<String>| {
+        if !labels.contains_key(id) {
+            order.push(id.to_string());
+            labels.insert(
+                id.to_string(),
+                text.clone().unwrap_or_else(|| id.to_string()),
+            );
+        } else if let Some(text) = text
+            && !text.is_empty()
+        {
+            labels.insert(id.to_string(), text.clone());
+        }
+    };
+    for raw in source.lines() {
+        let line = raw.trim();
+        if line.is_empty()
+            || line.starts_with("%%")
+            || line == "end"
+            || line.starts_with("subgraph")
+            || line.starts_with("classDef")
+            || line.starts_with("class ")
+            || line.starts_with("style ")
+            || line.starts_with("linkStyle")
+            || line.starts_with("click ")
+            || line.starts_with("direction ")
+        {
+            continue;
+        }
+        if line == "flowchart"
+            || line.starts_with("flowchart ")
+            || line == "graph"
+            || line.starts_with("graph ")
+        {
+            continue;
+        }
+        // `A[One] --> B[Two] --> C[Three]`, with an optional edge label after the arrow.
+        let Some((first, tail)) = line.split_once("-->") else {
+            continue;
+        };
+        let (from_id, from_text) = flowchart_end(first);
+        note(&from_id, &from_text);
+        let mut cursor = tail;
+        loop {
+            let (to_id, to_text) = match cursor.split_once("-->") {
+                Some((head, next)) => {
+                    let (id, text) = flowchart_end(head);
+                    cursor = next;
+                    (id, text)
+                }
+                None => {
+                    let head = cursor.split_once("|").map_or(cursor, |(head, _)| head);
+                    let (id, text) = flowchart_end(head);
+                    (id, text)
+                }
+            };
+            note(&to_id, &to_text);
+            parents.entry(to_id).or_default().push(from_id.clone());
+            if !cursor.contains("-->") {
+                break;
+            }
+        }
+    }
+    if labels.is_empty() {
+        return Err("the flowchart has no arrows to draw".into());
+    }
+    let roots: Vec<&String> = order
+        .iter()
+        .filter(|id| !parents.contains_key(*id))
+        .collect();
+    if roots.len() != 1 {
+        return Err("the flowchart needs exactly one start: draw a mind map instead".into());
+    }
+    if let Some((id, _)) = parents.iter().find(|(_, from)| from.len() > 1) {
+        return Err(format!(
+            "the flowchart joins back at '{id}', which a tree cannot draw"
+        ));
+    }
+    fn build(
+        id: &str,
+        labels: &std::collections::BTreeMap<String, String>,
+        parents: &std::collections::BTreeMap<String, Vec<String>>,
+        count: &mut usize,
+    ) -> Result<MindNode, String> {
+        *count += 1;
+        if *count > MAX_MINDMAP_NODES {
+            return Err("the mind map has too many nodes".into());
+        }
+        let mut children = Vec::new();
+        for (child, from) in parents {
+            if from.first().is_some_and(|parent| parent == id) {
+                children.push(build(child, labels, parents, count)?);
+            }
+        }
+        Ok(MindNode {
+            text: labels.get(id).cloned().unwrap_or_else(|| id.to_string()),
+            children,
+        })
+    }
+    let mut count = 0;
+    let tree = build(roots[0], &labels, &parents, &mut count)?;
+    Ok(tree)
+}
+
+/// A timeline as a tree: the title at the root, one child per section, the section's events under it.
+fn timeline_tree(source: &str) -> Result<MindNode, String> {
+    let mut title: Option<String> = None;
+    let mut sections: Vec<(String, Vec<String>)> = Vec::new();
+    let mut current: Option<usize> = None;
+    for raw in source.lines() {
+        let line = raw.trim();
+        if line.is_empty()
+            || line.starts_with("%%")
+            || line.starts_with("accTitle")
+            || line.starts_with("accDescr")
+        {
+            continue;
+        }
+        if line == "timeline" {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("title ") {
+            title = Some(rest.trim().to_string());
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("section ") {
+            sections.push((rest.trim().to_string(), Vec::new()));
+            current = Some(sections.len() - 1);
+            continue;
+        }
+        let events: Vec<&str> = line
+            .split(':')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .collect();
+        if let Some(index) = current {
+            for event in events {
+                if let Some(section) = sections.get_mut(index) {
+                    section.1.push(event.to_string());
+                }
+            }
+        } else {
+            // An event before any section is a period of its own.
+            for event in events {
+                sections.push((event.to_string(), Vec::new()));
+                current = Some(sections.len() - 1);
+            }
+        }
+    }
+    if sections.is_empty() {
+        return Err("the timeline has no sections".into());
+    }
+    let body = sections
+        .into_iter()
+        .map(|(name, events)| MindNode {
+            text: name,
+            children: events
+                .into_iter()
+                .map(|text| MindNode {
+                    text,
+                    children: Vec::new(),
+                })
+                .collect(),
+        })
+        .collect();
+    Ok(MindNode {
+        text: title.unwrap_or_else(|| "Timeline".into()),
+        children: body,
+    })
+}
+
+/// A quadrant chart as a tree: the title at the root, the four quadrants under it, each holding the
+/// points that fall in it. The axes' names are not drawn (the tree has no axis to put them on).
+fn quadrant_tree(source: &str) -> Result<MindNode, String> {
+    let mut title: Option<String> = None;
+    let mut quadrants: [Option<String>; 4] = Default::default();
+    let mut points: Vec<(String, usize)> = Vec::new();
+    for raw in source.lines() {
+        let line = raw.trim();
+        if line.is_empty()
+            || line.starts_with("%%")
+            || line == "quadrantChart"
+            || line.starts_with("x-axis")
+            || line.starts_with("y-axis")
+            || line.starts_with("accTitle")
+            || line.starts_with("accDescr")
+        {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("title ") {
+            title = Some(rest.trim().to_string());
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("quadrant-")
+            && let Some((index, name)) = rest.split_once(' ')
+        {
+            let index: usize = index.trim().parse().unwrap_or(0);
+            if (1..=4).contains(&index) {
+                quadrants[index - 1] = Some(name.trim().to_string());
+            }
+            continue;
+        }
+        if let Some((name, coords)) = line.split_once(':') {
+            let inside = coords.trim().trim_start_matches('[').trim_end_matches(']');
+            let mut parts = inside
+                .split(',')
+                .map(|part| part.trim().parse::<f32>().ok());
+            if let (Some(Some(x)), Some(Some(y))) = (parts.next(), parts.next()) {
+                // Quadrant 1 is the top right, and the numbering runs counter-clockwise from it.
+                let right = x >= 0.5;
+                let top = y >= 0.5;
+                let index = match (right, top) {
+                    (true, true) => 0,
+                    (false, true) => 1,
+                    (false, false) => 2,
+                    (true, false) => 3,
+                };
+                points.push((name.trim().to_string(), index));
+            }
+        }
+    }
+    if quadrants.iter().all(Option::is_none) && points.is_empty() {
+        return Err("the quadrant chart has nothing in it".into());
+    }
+    let children = (0..4)
+        .filter_map(|index| {
+            let named = quadrants[index].clone().or_else(|| {
+                points
+                    .iter()
+                    .any(|(_, at)| *at == index)
+                    .then(|| format!("Q{}", index + 1))
+            })?;
+            let inside = points
+                .iter()
+                .filter(|(_, at)| *at == index)
+                .map(|(name, _)| MindNode {
+                    text: name.clone(),
+                    children: Vec::new(),
+                })
+                .collect();
+            Some(MindNode {
+                text: named,
+                children: inside,
+            })
+        })
+        .collect();
+    Ok(MindNode {
+        text: title.unwrap_or_else(|| "Quadrants".into()),
+        children,
+    })
 }
 
 /// What a node says, from the line the model wrote.

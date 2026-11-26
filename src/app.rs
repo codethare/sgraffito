@@ -2143,19 +2143,27 @@ impl App {
         let streaming = last.streaming;
         let failure = "AI did not return a valid Mermaid mindmap".to_string();
         let mermaid = crate::ai::extract_mermaid(&text);
+        // The syntax says what is written — a mind map, a flowchart, a timeline, a quadrant chart — and the
+        // structure it yields is what every arrangement is drawn from.
         let parsed = mermaid
             .as_deref()
-            .map(crate::ai::parse_mindmap)
+            .map(crate::ai::parse_diagram)
             .unwrap_or_else(|| Err(failure.clone()));
-        let tree = match parsed {
-            Ok(tree) => tree,
+        let parsed = match parsed {
+            Ok(parsed) => parsed,
             Err(reason) => {
                 if !streaming && self.ai.session().error.is_none() {
-                    self.ai.session_mut().error = Some(if reason.starts_with("the mind map") {
-                        reason
-                    } else {
-                        failure
-                    });
+                    self.ai.session_mut().error = Some(
+                        if reason.starts_with("the mind map")
+                            || reason.starts_with("the flowchart")
+                            || reason.starts_with("the timeline")
+                            || reason.starts_with("the quadrant")
+                        {
+                            reason
+                        } else {
+                            failure
+                        },
+                    );
                     self.ai.clear_preview();
                     self.refresh_ai();
                     self.dirty = true;
@@ -2163,9 +2171,14 @@ impl App {
                 return;
             }
         };
-        // The answer may name its arrangement in a `%%` line; otherwise the shape of the tree decides. Either
-        // way it is a preference: the rules allow a set of arrangements, and the cheapest of them is drawn.
-        let preference = mermaid.as_deref().and_then(crate::ai::layout_directive);
+        let tree = parsed.tree;
+        // The answer may name its arrangement in a `%%` line; a syntax that implies one names it too; and
+        // otherwise the shape of the tree decides. Any of them is a preference: the rules allow a set of
+        // arrangements, and the cheapest of them is drawn.
+        let preference = mermaid
+            .as_deref()
+            .and_then(crate::ai::layout_directive)
+            .or(parsed.view);
         let (anchor, room, color, seed) = {
             let session = self.ai.session();
             (
@@ -2231,7 +2244,8 @@ impl App {
             .rev()
             .find(|message| message.role == crate::ai::Role::Assistant)
             .and_then(|message| crate::ai::extract_mermaid(&message.text))
-            .and_then(|mermaid| crate::ai::parse_mindmap(&mermaid).ok());
+            .and_then(|mermaid| crate::ai::parse_diagram(&mermaid).ok())
+            .map(|parsed| parsed.tree);
         let Some(tree) = tree else {
             return false;
         };

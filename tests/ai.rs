@@ -5,8 +5,9 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use sgraffito::ai::{
-    AiSettings, Dir, MAX_MINDMAP_NODES, MapKind, MindNode, extract_mermaid, fit_kind,
-    inferred_kind, layout_directive, layout_mindmap, parse_mindmap, resolve_with, status_message,
+    AiSettings, Dir, MAX_MINDMAP_NODES, MapKind, MindNode, Syntax, extract_mermaid, fit_kind,
+    inferred_kind, layout_directive, layout_mindmap, parse_diagram, parse_mindmap, resolve_with,
+    status_message,
 };
 use sgraffito::canvas::ShapeKind;
 use sgraffito::config::{AiConfig, Config, DEFAULT_AI_MODEL};
@@ -1078,4 +1079,68 @@ fn a_downward_decomposition_lays_its_levels_in_rows() {
         rows_right.len() > 3,
         "a rightward tree stacks its rows: {rows_right:?}"
     );
+}
+
+#[test]
+fn a_flowchart_is_read_as_the_tree_it_draws() {
+    // The structure is what the layout understands: nodes and their parents. Whatever syntax wrote it —
+    // a mind map's indentation, a flowchart's arrows — the geometry is the same pipeline.
+    let parsed = parse_diagram(
+        "flowchart TD\n  A[Start] --> B[Collect]\n  B --> C[Publish]\n  C --> D[Review]\n",
+    )
+    .unwrap();
+    assert_eq!(parsed.syntax, Syntax::Flowchart);
+    assert_eq!(parsed.tree.text, "Start");
+    assert_eq!(parsed.tree.children[0].text, "Collect");
+    assert_eq!(parsed.tree.children[0].children[0].text, "Publish");
+    assert_eq!(parsed.view, Some(MapKind::Tree(Dir::Down)));
+    // `LR` reads to the right.
+    let parsed = parse_diagram("graph LR\n  A[One] --> B[Two]\n").unwrap();
+    assert_eq!(parsed.view, Some(MapKind::Tree(Dir::Right)));
+    // A merge is a graph a tree cannot draw: refused rather than flattened into a different diagram.
+    let joined = parse_diagram("flowchart TD\n  A --> C\n  B --> C\n");
+    assert!(joined.is_err(), "{joined:?}");
+    // A graph with two starts has no single root.
+    let two_roots = parse_diagram("flowchart TD\n  A --> B\n  C --> D\n");
+    assert!(two_roots.is_err(), "{two_roots:?}");
+}
+
+#[test]
+fn a_timeline_and_a_quadrant_chart_are_read_as_trees() {
+    let timeline = parse_diagram(
+        "timeline\n  title Media\n  section 2002\n    LinkedIn\n  section 2004\n    Facebook : Flickr\n",
+    )
+    .unwrap();
+    assert_eq!(timeline.syntax, Syntax::Timeline);
+    assert_eq!(timeline.tree.text, "Media");
+    assert_eq!(timeline.tree.children.len(), 2);
+    assert_eq!(timeline.tree.children[0].text, "2002");
+    assert_eq!(timeline.tree.children[0].children[0].text, "LinkedIn");
+    assert_eq!(timeline.tree.children[1].children.len(), 2);
+    assert_eq!(timeline.view, Some(MapKind::Tree(Dir::Down)));
+
+    let quadrant = parse_diagram(
+        "quadrantChart\n  title Reach\n  x-axis Low --> High\n  y-axis Low --> High\n  quadrant-1 Grow\n  quadrant-2 Hold\n  quadrant-3 Drop\n  quadrant-4 Watch\n  Widget: [0.8, 0.7]\n  Gadget: [0.2, 0.3]\n",
+    )
+    .unwrap();
+    assert_eq!(quadrant.syntax, Syntax::Quadrant);
+    assert_eq!(quadrant.tree.text, "Reach");
+    let quarters: Vec<&str> = quadrant
+        .tree
+        .children
+        .iter()
+        .map(|q| q.text.as_str())
+        .collect();
+    assert_eq!(quarters, vec!["Grow", "Hold", "Drop", "Watch"]);
+    // A point sits under its quadrant: the top-right one first.
+    assert_eq!(quadrant.tree.children[0].children[0].text, "Widget");
+    assert_eq!(quadrant.tree.children[2].children[0].text, "Gadget");
+}
+
+#[test]
+fn an_answer_in_no_known_syntax_is_an_error_with_a_useful_message() {
+    let wrong = parse_diagram("pie\n  \"A\" : 40\n").unwrap_err();
+    assert!(wrong.contains("mindmap"), "{wrong}");
+    let empty = parse_diagram("").unwrap_err();
+    assert!(!empty.is_empty());
 }
