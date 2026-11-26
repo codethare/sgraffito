@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use sgraffito::ai::{
-    AiSettings, MAX_MINDMAP_NODES, MapKind, MindNode, extract_mermaid, fit_kind, inferred_kind,
-    layout_directive, layout_mindmap, parse_mindmap, resolve_with, status_message,
+    AiSettings, Dir, MAX_MINDMAP_NODES, MapKind, MindNode, extract_mermaid, fit_kind,
+    inferred_kind, layout_directive, layout_mindmap, parse_mindmap, resolve_with, status_message,
 };
 use sgraffito::canvas::ShapeKind;
 use sgraffito::config::{AiConfig, Config, DEFAULT_AI_MODEL};
@@ -632,7 +632,7 @@ fn levels(depth: usize) -> MindNode {
 fn a_directive_names_the_arrangement_and_anything_else_is_ignored() {
     assert_eq!(
         layout_directive("mindmap\n  %% sgraffito layout: tree\n  root\n"),
-        Some(MapKind::Tree)
+        Some(MapKind::Tree(Dir::Right))
     );
     assert_eq!(
         layout_directive("mindmap\n  %% sg\n  root"),
@@ -641,7 +641,7 @@ fn a_directive_names_the_arrangement_and_anything_else_is_ignored() {
     );
     assert_eq!(
         layout_directive("mindmap\n  %% sgraffito layout: Tree\n  root"),
-        Some(MapKind::Tree),
+        Some(MapKind::Tree(Dir::Right)),
         "the name is matched without case"
     );
     assert_eq!(
@@ -652,7 +652,7 @@ fn a_directive_names_the_arrangement_and_anything_else_is_ignored() {
     assert_eq!(layout_directive("mindmap\n  root"), None);
     for kind in [
         MapKind::Radial,
-        MapKind::Tree,
+        MapKind::Tree(Dir::Right),
         MapKind::Fishbone,
         MapKind::Compare,
     ] {
@@ -668,10 +668,10 @@ fn a_shallow_map_is_a_ring_and_a_hierarchy_is_a_tree() {
     );
     assert_eq!(
         inferred_kind(&tree("root", vec![tree("a", vec![leaf("a1")])])),
-        MapKind::Tree,
+        MapKind::Tree(Dir::Right),
         "three levels is a decomposition"
     );
-    assert_eq!(inferred_kind(&levels(4)), MapKind::Tree);
+    assert_eq!(inferred_kind(&levels(4)), MapKind::Tree(Dir::Right));
 }
 
 #[test]
@@ -703,7 +703,7 @@ fn a_tree_reads_left_to_right_with_one_column_per_level() {
         ],
     );
     let board = layout_mindmap(
-        MapKind::Tree,
+        MapKind::Tree(Dir::Right),
         &map,
         [100.0, 300.0],
         400.0,
@@ -974,5 +974,108 @@ fn a_burst_moves_further_than_the_notch_that_started_it() {
     assert_eq!(
         session.scroll_target, 25.0,
         "the second notch is half again"
+    );
+}
+
+#[test]
+fn a_downward_decomposition_lays_its_levels_in_rows() {
+    // The same tree, two directions: layers to the right, or layers downwards. An organisation or a
+    // chain of steps reads down; only the axes swap, and the nodes stay upright.
+    let map = tree(
+        "company",
+        vec![
+            tree("product", vec![leaf("design"), leaf("build")]),
+            tree("sales", vec![leaf("field")]),
+        ],
+    );
+    let board = layout_mindmap(
+        MapKind::Tree(Dir::Down),
+        &map,
+        [100.0, 600.0],
+        600.0,
+        "#e01b24",
+        &mut measure_fn(),
+    );
+    let nodes: Vec<sgraffito::canvas::Rect> = board
+        .shapes
+        .iter()
+        .filter(|shape| shape.kind == ShapeKind::Rect && shape.color == "#e01b24")
+        .map(sgraffito::canvas::Shape::bounds)
+        .collect();
+    assert_eq!(nodes.len(), 6);
+    let root = nodes[0];
+    // One row per level: everything below is under the root, and the three levels are three rows.
+    for node in &nodes[1..] {
+        assert!(
+            node.y > root.y + root.h,
+            "a child is not below its parent: {node:?} under {root:?}"
+        );
+    }
+    let mut rows: Vec<i32> = nodes.iter().map(|node| node.y.round() as i32).collect();
+    rows.sort_unstable();
+    rows.dedup();
+    assert_eq!(rows.len(), 3, "three levels, three rows: {rows:?}");
+    // The boxes hold their branches, and the title over a row is centred on it.
+    let boxes: Vec<sgraffito::canvas::Rect> = board
+        .shapes
+        .iter()
+        .filter(|shape| shape.kind == ShapeKind::Rect && shape.color.len() == 9)
+        .map(sgraffito::canvas::Shape::bounds)
+        .collect();
+    assert_eq!(boxes.len(), 2);
+    for box_ in &boxes {
+        let inside = nodes
+            .iter()
+            .filter(|node| {
+                node.x >= box_.x - 0.5
+                    && node.x + node.w <= box_.x + box_.w + 0.5
+                    && node.y >= box_.y
+                    && node.y + node.h <= box_.y + box_.h + 0.5
+            })
+            .count();
+        assert!(inside >= 2, "{box_:?} holds {inside} nodes");
+    }
+    // Its edges leave and arrive downwards, and they curve.
+    for edge in board
+        .shapes
+        .iter()
+        .filter(|shape| shape.kind == ShapeKind::Line)
+    {
+        assert_eq!(edge.roundness, Some(2));
+        let at = edge.attach[0].expect("an edge leaves its parent").at;
+        assert!(
+            at[1].abs() > at[0].abs(),
+            "it does not leave downwards: {at:?}"
+        );
+    }
+    // The same tree the other way round: three columns instead of three rows, and nothing else moved.
+    let right = layout_mindmap(
+        MapKind::Tree(Dir::Right),
+        &map,
+        [100.0, 600.0],
+        600.0,
+        "#e01b24",
+        &mut measure_fn(),
+    );
+    let mut columns: Vec<i32> = right
+        .shapes
+        .iter()
+        .filter(|shape| shape.kind == ShapeKind::Rect && shape.color == "#e01b24")
+        .map(|shape| sgraffito::canvas::Shape::bounds(shape).x.round() as i32)
+        .collect();
+    columns.sort_unstable();
+    columns.dedup();
+    assert_eq!(columns.len(), 3, "three levels, three columns: {columns:?}");
+    let mut rows_right: Vec<i32> = right
+        .shapes
+        .iter()
+        .filter(|shape| shape.kind == ShapeKind::Rect && shape.color == "#e01b24")
+        .map(|shape| sgraffito::canvas::Shape::bounds(shape).y.round() as i32)
+        .collect();
+    rows_right.sort_unstable();
+    rows_right.dedup();
+    assert!(
+        rows_right.len() > 3,
+        "a rightward tree stacks its rows: {rows_right:?}"
     );
 }

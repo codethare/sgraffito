@@ -35,12 +35,14 @@ You create Mermaid mind maps for the sgraffito drawing board.
 Answer in the user's language. Keep prose to at most two short sentences.
 Then output exactly one fenced code block with language `mermaid` and a `mindmap` diagram.
 The block starts with `mindmap`, then one comment line naming the arrangement:
-  %% sgraffito layout: radial | tree | fishbone | compare
+  %% sgraffito layout: radial | tree | tree-down | fishbone | compare
 Use two spaces per indentation level. One root and at most 40 nodes. Do not add any text after the block.
 
 Choose the arrangement by what the map is for:
 - radial: brainstorming a topic, no fixed order (发散).
 - tree: decomposing something into parts, two levels or more below the root (分解).
+- tree-down: a decomposition that is read top to bottom — an organisation, a process, a chain of steps
+  (流程/组织). Its levels are rows rather than columns.
 - fishbone: the causes of one effect; the root is the effect, each first-level node is a cause group (因果).
 - compare: exactly two first-level nodes, the two things compared; a child whose name appears under both is
   an attribute they share (对比).
@@ -1349,14 +1351,49 @@ fn has_unclosed_wrapper(text: &str) -> bool {
 /// block; a map that names none gets a sensible default, because the shape of the diagram is the
 /// reader's first clue about what kind of thinking it holds.
 ///
-/// The four are the four jobs a mind map does: brainstorm (radial), decompose (tree), explain a cause
-/// (fishbone), compare two things (double bubble).
+/// Which way a decomposition grows. A decomposition of a topic reads to the right, a column per
+/// level; a decomposition of an organisation or a process reads downwards, a row per level, because a
+/// chain of "then" is vertical. The nodes stay upright either way: only the layers swap axes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Dir {
+    Right,
+    Down,
+}
+
+impl Dir {
+    /// A node's extent along the depth axis: the way its children grow away from it.
+    fn along(self, size: [f32; 2]) -> f32 {
+        match self {
+            Dir::Right => size[0],
+            Dir::Down => size[1],
+        }
+    }
+
+    /// A node's extent across the depth axis: the way its siblings stand beside it.
+    fn across(self, size: [f32; 2]) -> f32 {
+        match self {
+            Dir::Right => size[1],
+            Dir::Down => size[0],
+        }
+    }
+
+    /// A canvas point from a distance along the depth axis and a distance across it.
+    fn point(self, along: f32, across: f32) -> [f32; 2] {
+        match self {
+            Dir::Right => [along, across],
+            Dir::Down => [across, along],
+        }
+    }
+}
+
+/// The arrangements a map can be drawn with: the four jobs a mind map does, plus the direction a
+/// decomposition reads in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MapKind {
     /// 发散: the root at the centre, branches on rings, clockwise from the right.
     Radial,
-    /// 分解: a decomposition, read left to right, one column per level.
-    Tree,
+    /// 分解: a decomposition, one column per level to the right or one row per level down.
+    Tree(Dir),
     /// 因果: causes of one effect, hung off a horizontal spine.
     Fishbone,
     /// 对比: exactly two subjects and the attributes they share between them.
@@ -1367,7 +1404,8 @@ impl MapKind {
     pub fn name(self) -> &'static str {
         match self {
             MapKind::Radial => "radial",
-            MapKind::Tree => "tree",
+            MapKind::Tree(Dir::Right) => "tree",
+            MapKind::Tree(Dir::Down) => "tree-down",
             MapKind::Fishbone => "fishbone",
             MapKind::Compare => "compare",
         }
@@ -1376,7 +1414,8 @@ impl MapKind {
     pub fn from_name(name: &str) -> Option<Self> {
         match name.trim().to_ascii_lowercase().as_str() {
             "radial" | "ring" => Some(MapKind::Radial),
-            "tree" | "right" => Some(MapKind::Tree),
+            "tree" | "right" | "tree-right" => Some(MapKind::Tree(Dir::Right)),
+            "down" | "tree-down" | "org" | "flow" => Some(MapKind::Tree(Dir::Down)),
             "fishbone" | "cause" => Some(MapKind::Fishbone),
             "compare" | "comparison" | "bubble" => Some(MapKind::Compare),
             _ => None,
@@ -1403,7 +1442,7 @@ pub fn layout_directive(source: &str) -> Option<MapKind> {
 /// decomposition and reads to the right; anything shallower is a brainstorm and goes on a ring.
 pub fn inferred_kind(tree: &MindNode) -> MapKind {
     if levels(tree) >= 3 {
-        MapKind::Tree
+        MapKind::Tree(Dir::Right)
     } else {
         MapKind::Radial
     }
@@ -1510,7 +1549,7 @@ pub fn layout_mindmap(
             nodes: radial_place(tree, anchor, measure),
             groups: Vec::new(),
         },
-        MapKind::Tree => tree_place(tree, anchor, measure),
+        MapKind::Tree(dir) => tree_place(tree, anchor, measure, dir),
         MapKind::Fishbone => return fishbone_board(tree, anchor, color, measure),
         MapKind::Compare => {
             compare_place(tree, anchor, room, measure).unwrap_or_else(|| Arrangement {
@@ -1520,7 +1559,7 @@ pub fn layout_mindmap(
         }
     };
     match kind {
-        MapKind::Tree => assemble_routed(&arrangement, color, measure, Route::Columns),
+        MapKind::Tree(dir) => assemble_routed(&arrangement, color, measure, Route::Branches(dir)),
         MapKind::Compare => assemble_routed(&arrangement, color, measure, Route::ByAxis),
         _ => assemble_routed(&arrangement, color, measure, Route::Direct),
     }
@@ -1551,9 +1590,10 @@ fn gap_mid(a_centre: f32, a_size: f32, b_centre: f32, b_size: f32) -> f32 {
 enum Route {
     /// Straight from one node to the other: a ring's spokes and a fishbone's ribs are already paths.
     Direct,
-    /// Through the gap between two columns, one bend at each node's row: a decomposition reads to the
-    /// right, so its edges leave and arrive horizontally.
-    Columns,
+    /// Through the corridor between two layers of a decomposition, leaving the parent and landing on the
+    /// child along the direction it grows: sideways when it grows to the right, downwards when it grows
+    /// down.
+    Branches(Dir),
     /// Along whichever axis the two nodes are furthest apart on: a comparison stacks vertically.
     ByAxis,
 }
@@ -1571,15 +1611,24 @@ impl Route {
         let down = gap_mid(from[1], parent.size[1], to[1], child.size[1]);
         let bends = match self {
             Route::Direct => Vec::new(),
-            Route::Columns => {
-                // The S a mind map draws: it leaves the parent's edge and lands on the child's edge
-                // horizontally, one curve per edge. Siblings fan out of the same point instead of sharing
-                // one corridor, which would draw the same line three times and knot it at the parent.
-                let ahead = if to[0] >= from[0] { 1.0 } else { -1.0 };
-                let start = [from[0] + ahead * parent.size[0] / 2.0, from[1]];
-                let end = [to[0] - ahead * child.size[0] / 2.0, to[1]];
-                let handle = (end[0] - start[0]) * COLUMN_HANDLE;
-                let (one, two) = ([start[0] + handle, start[1]], [end[0] - handle, end[1]]);
+            Route::Branches(dir) => {
+                // The S a mind map draws: it leaves the parent's edge and lands on the child's edge along
+                // the depth axis, one curve per edge. Siblings fan out of the same point instead of
+                // sharing one corridor, which would draw the same line three times and knot it.
+                let (from_along, to_along) = (dir.along(parent.size), dir.along(child.size));
+                let delta = match dir {
+                    Dir::Right => to[0] - from[0],
+                    Dir::Down => to[1] - from[1],
+                };
+                let ahead = if delta >= 0.0 { 1.0 } else { -1.0 };
+                let start = add(from, dir.point(ahead * from_along / 2.0, 0.0));
+                let end = add(to, dir.point(-ahead * to_along / 2.0, 0.0));
+                let reach = (delta.abs() - from_along / 2.0 - to_along / 2.0).max(0.0);
+                let handle = reach * COLUMN_HANDLE;
+                let (one, two) = (
+                    add(start, dir.point(ahead * handle, 0.0)),
+                    add(end, dir.point(-ahead * handle, 0.0)),
+                );
                 (1..COLUMN_SAMPLES)
                     .map(|step| cubic(start, one, two, end, step as f32 / COLUMN_SAMPLES as f32))
                     .collect()
@@ -1619,7 +1668,8 @@ pub fn place_at(
             frame.centre()[0] - bounds.centre()[0],
             frame.centre()[1] - bounds.centre()[1],
         ),
-        MapKind::Tree | MapKind::Fishbone => {
+        MapKind::Tree(Dir::Down) => (frame.centre()[0] - bounds.centre()[0], frame.y - bounds.y),
+        MapKind::Tree(Dir::Right) | MapKind::Fishbone => {
             // The words are gone by the time the map is drawn, so the map starts where they stood. A map
             // too wide to run to the right of them grows leftward instead of off the screen, and one that
             // fits nowhere stays at the place and is panned to.
@@ -1702,7 +1752,7 @@ pub fn candidate_kinds(preference: Option<MapKind>, tree: &MindNode) -> Vec<MapK
         add(MapKind::Radial);
     }
     if depth >= 3 {
-        add(MapKind::Tree);
+        add(MapKind::Tree(Dir::Right));
     }
     // Exactly two first-level nodes may be a comparison; the layout falls back to the ring by itself when
     // the two have nothing to compare.
@@ -1864,9 +1914,13 @@ pub fn free_place(
         return (candidate.shifted(x - box_.x, y - box_.y), preferred);
     }
     // The place it asked for, when nothing is in it — a wide map is still allowed to run on under the
-    // card, because a strip cannot hold it and the canvas pans.
+    // card, because a strip cannot hold it and the canvas pans. It may not start off the left edge,
+    // though: a map wider than the room is nudged just inside the margin, never half off-screen.
     if clear(box_) {
-        return (candidate, Some([box_.x, box_.y]));
+        let x = box_.x.max(MAP_MARGIN);
+        if x == box_.x || clear(at(x, box_.y)) {
+            return (candidate.shifted(x - box_.x, 0.0), Some([x, box_.y]));
+        }
     }
     let (step_x, step_y) = (box_.w + MAP_GAP, box_.h + MAP_GAP);
     // Candidates in the order a person would look: the nearest first, a row down before a column out, and
@@ -1914,8 +1968,10 @@ fn board_box(board: &Board) -> Option<Rect> {
 /// run on under the panel, because a wide tree cannot be made to fit a strip and the canvas pans.
 fn origin(kind: MapKind, anchor: [f32; 2], room: f32) -> [f32; 2] {
     match kind {
-        MapKind::Radial | MapKind::Compare => [anchor[0] + room / 2.0, anchor[1]],
-        MapKind::Tree | MapKind::Fishbone => [anchor[0] + 24.0, anchor[1]],
+        MapKind::Radial | MapKind::Compare | MapKind::Tree(Dir::Down) => {
+            [anchor[0] + room / 2.0, anchor[1]]
+        }
+        MapKind::Tree(Dir::Right) | MapKind::Fishbone => [anchor[0] + 24.0, anchor[1]],
     }
 }
 
@@ -2133,16 +2189,25 @@ fn ring(
 /// A first-level branch that has children becomes a group: its descendants are boxed, and the branch's
 /// own node stands inside the box's top edge as the title. The band that title stands in is reserved
 /// while the branches are spaced, so a box never grows into the branch above it.
-fn tree_place(tree: &MindNode, anchor: [f32; 2], measure: &mut TextMeasure<'_>) -> Arrangement {
+fn tree_place(
+    tree: &MindNode,
+    anchor: [f32; 2],
+    measure: &mut TextMeasure<'_>,
+    dir: Dir,
+) -> Arrangement {
     let depth = levels(tree);
-    let mut column = vec![0.0f32; depth];
-    measure_widths(tree, 0, &mut column, measure);
-    // Each column starts where the widest node of the column before it ended.
-    let mut xs = Vec::with_capacity(depth);
-    let mut x = anchor[0];
-    for width in &column {
-        xs.push(x);
-        x += width + TREE_COLUMN_GAP;
+    let mut layer = vec![0.0f32; depth];
+    measure_depths(tree, 0, &mut layer, measure, dir);
+    // Each layer starts where the deepest node of the layer before it ended, along the depth axis.
+    let (along_start, across_centre) = match dir {
+        Dir::Right => (anchor[0], anchor[1]),
+        Dir::Down => (anchor[1], anchor[0]),
+    };
+    let mut layers = Vec::with_capacity(depth);
+    let mut at = along_start;
+    for extent in &layer {
+        layers.push(at);
+        at += extent + TREE_COLUMN_GAP;
     }
     let bands: Vec<f32> = tree
         .children
@@ -2155,7 +2220,7 @@ fn tree_place(tree: &MindNode, anchor: [f32; 2], measure: &mut TextMeasure<'_>) 
         .iter()
         .zip(&bands)
         .map(|(child, band)| {
-            subtree_height(child, measure)
+            subtree_across(child, measure, dir)
                 + band
                 + TREE_ROW_GAP
                 + if child.children.is_empty() {
@@ -2174,29 +2239,30 @@ fn tree_place(tree: &MindNode, anchor: [f32; 2], measure: &mut TextMeasure<'_>) 
     placed.push(Placed {
         id: next,
         parents: Vec::new(),
-        centre: [xs[0] + root_size[0] / 2.0, anchor[1]],
+        centre: dir.point(layers[0] + dir.along(root_size) / 2.0, across_centre),
         size: root_size,
         text: tree.text.clone(),
     });
     next += 1;
     let root_id = 1;
-    let mut cursor = anchor[1] - total / 2.0;
+    let mut cursor = across_centre - total / 2.0;
     for (index, child) in tree.children.iter().enumerate() {
         let first = next;
         let branch_id = place_tree(
             child,
             1,
             cursor + bands[index],
-            &xs,
+            &layers,
             &mut next,
             measure,
             &mut placed,
             Some(root_id),
+            dir,
         );
         // A branch with nothing under it is a leaf, and a box around nothing reads as noise.
         if !child.children.is_empty()
             && let Some(descent) = union_of(&placed, first + 1, next - 1)
-            && let Some(box_) = box_branch(&mut placed, branch_id, descent)
+            && let Some(box_) = box_branch(&mut placed, branch_id, descent, dir)
         {
             groups.push(box_);
         }
@@ -2235,7 +2301,7 @@ fn union_of(nodes: &[Placed], first: u64, last: u64) -> Option<Rect> {
 /// The title keeps its own column — the box reaches left to include it — so the connector that arrives
 /// from the parent still crosses sideways and the edge keeps its bend. Only the title's height moves: it
 /// leaves the middle of its band and takes the band above it.
-fn box_branch(nodes: &mut [Placed], branch_id: u64, descent: Rect) -> Option<Rect> {
+fn box_branch(nodes: &mut [Placed], branch_id: u64, descent: Rect, dir: Dir) -> Option<Rect> {
     let branch = nodes.iter_mut().find(|node| node.id == branch_id)?;
     let held = Rect {
         x: descent.x - GROUP_PADDING,
@@ -2258,6 +2324,11 @@ fn box_branch(nodes: &mut [Placed], branch_id: u64, descent: Rect) -> Option<Rec
         w: right - left,
         h: held.y + held.h - top,
     };
+    // A column of children is headed by its title at the edge the parent arrives on; a row of children
+    // is headed by it centred over them, which is how an org chart reads.
+    if dir == Dir::Down {
+        branch.centre[0] = box_.x + box_.w / 2.0;
+    }
     branch.centre[1] = box_.y + GROUP_TITLE_GAP + branch.size[1] / 2.0;
     Some(box_)
 }
@@ -2266,29 +2337,30 @@ fn levels(node: &MindNode) -> usize {
     1 + node.children.iter().map(levels).max().unwrap_or(0)
 }
 
-fn measure_widths(
+fn measure_depths(
     node: &MindNode,
     depth: usize,
-    column: &mut [f32],
+    layer: &mut [f32],
     measure: &mut TextMeasure<'_>,
+    dir: Dir,
 ) {
-    let width = node_size(&node.text, measure)[0];
-    column[depth] = column[depth].max(width);
+    let along = dir.along(node_size(&node.text, measure));
+    layer[depth] = layer[depth].max(along);
     for child in &node.children {
-        measure_widths(child, depth + 1, column, measure);
+        measure_depths(child, depth + 1, layer, measure, dir);
     }
 }
 
 /// The vertical room a subtree needs: its own box, or its children's bands and the gaps between them.
-fn subtree_height(node: &MindNode, measure: &mut TextMeasure<'_>) -> f32 {
-    let own = node_size(&node.text, measure)[1];
+fn subtree_across(node: &MindNode, measure: &mut TextMeasure<'_>, dir: Dir) -> f32 {
+    let own = dir.across(node_size(&node.text, measure));
     if node.children.is_empty() {
         return own;
     }
     let children: f32 = node
         .children
         .iter()
-        .map(|child| subtree_height(child, measure))
+        .map(|child| subtree_across(child, measure, dir))
         .sum::<f32>()
         + TREE_ROW_GAP * (node.children.len() - 1) as f32;
     own.max(children)
@@ -2298,21 +2370,22 @@ fn subtree_height(node: &MindNode, measure: &mut TextMeasure<'_>) -> f32 {
 fn place_tree(
     node: &MindNode,
     depth: usize,
-    top: f32,
-    xs: &[f32],
+    start: f32,
+    layers: &[f32],
     next: &mut u64,
     measure: &mut TextMeasure<'_>,
     out: &mut Vec<Placed>,
     parent: Option<u64>,
+    dir: Dir,
 ) -> u64 {
     let id = *next;
     *next += 1;
-    let band = subtree_height(node, measure);
+    let band = subtree_across(node, measure, dir);
     let size = node_size(&node.text, measure);
     out.push(Placed {
         id,
         parents: parent.into_iter().collect(),
-        centre: [xs[depth] + size[0] / 2.0, top + band / 2.0],
+        centre: dir.point(layers[depth] + dir.along(size) / 2.0, start + band / 2.0),
         size,
         text: node.text.clone(),
     });
@@ -2322,13 +2395,23 @@ fn place_tree(
     let children: f32 = node
         .children
         .iter()
-        .map(|child| subtree_height(child, measure))
+        .map(|child| subtree_across(child, measure, dir))
         .sum::<f32>()
         + TREE_ROW_GAP * (node.children.len() - 1) as f32;
-    let mut y = top + (band - children) / 2.0;
+    let mut at = start + (band - children) / 2.0;
     for child in &node.children {
-        place_tree(child, depth + 1, y, xs, next, measure, out, Some(id));
-        y += subtree_height(child, measure) + TREE_ROW_GAP;
+        place_tree(
+            child,
+            depth + 1,
+            at,
+            layers,
+            next,
+            measure,
+            out,
+            Some(id),
+            dir,
+        );
+        at += subtree_across(child, measure, dir) + TREE_ROW_GAP;
     }
     id
 }
@@ -2595,6 +2678,10 @@ fn leaves(node: &MindNode) -> u32 {
     }
 }
 
+fn add(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
+    [a[0] + b[0], a[1] + b[1]]
+}
+
 fn sub(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
     [a[0] - b[0], a[1] - b[1]]
 }
@@ -2797,14 +2884,17 @@ mod tests {
         let deep = parse_mindmap("mindmap\n  root((Robot))\n    Sensors\n      Camera\n").unwrap();
         assert_eq!(
             candidate_kinds(None, &deep),
-            vec![MapKind::Tree, MapKind::Radial]
+            vec![MapKind::Tree(Dir::Right), MapKind::Radial]
         );
         // Three levels and more than a handful of nodes: only the decomposition reads.
         let wide = parse_mindmap(
             "mindmap\n  root((Robot))\n    A\n      A1\n    B\n      B1\n    C\n      C1\n",
         )
         .unwrap();
-        assert_eq!(candidate_kinds(None, &wide), vec![MapKind::Tree]);
+        assert_eq!(
+            candidate_kinds(None, &wide),
+            vec![MapKind::Tree(Dir::Right)]
+        );
         // What the answer names is what is drawn, fitted when the tree cannot take it at all.
         assert_eq!(
             candidate_kinds(Some(MapKind::Compare), &two),
@@ -2819,8 +2909,8 @@ mod tests {
             vec![MapKind::Fishbone]
         );
         assert_eq!(
-            candidate_kinds(Some(MapKind::Tree), &two),
-            vec![MapKind::Tree]
+            candidate_kinds(Some(MapKind::Tree(Dir::Right)), &two),
+            vec![MapKind::Tree(Dir::Right)]
         );
         assert_eq!(
             candidate_kinds(Some(MapKind::Radial), &wide),
@@ -2946,7 +3036,7 @@ mod tests {
         .unwrap();
         let mut measure = |_: &str, size: f32, _: Option<f32>| (size, size);
         let board = layout_mindmap(
-            MapKind::Tree,
+            MapKind::Tree(Dir::Right),
             &tree,
             [0.0, 300.0],
             600.0,
@@ -3203,14 +3293,14 @@ mod tests {
         );
         // A tree starts where the words stood: they are gone by the time it is drawn.
         let tree_map = layout_mindmap(
-            MapKind::Tree,
+            MapKind::Tree(Dir::Right),
             &tree,
             [0.0, 0.0],
             600.0,
             "#ffffff",
             &mut measure,
         );
-        let placed = place_at(tree_map, &tree, MapKind::Tree, frame, 1200.0);
+        let placed = place_at(tree_map, &tree, MapKind::Tree(Dir::Right), frame, 1200.0);
         let box_ = board_box(&placed).unwrap();
         assert!((box_.x - frame.x).abs() < 0.5, "{box_:?}");
         assert!(
@@ -3220,7 +3310,7 @@ mod tests {
         // A tree too wide to run to the right of them grows leftward, ending where they stood, rather
         // than under the panel.
         let tree_map = layout_mindmap(
-            MapKind::Tree,
+            MapKind::Tree(Dir::Right),
             &tree,
             [0.0, 0.0],
             600.0,
@@ -3233,7 +3323,13 @@ mod tests {
             w: 120.0,
             h: 80.0,
         };
-        let placed = place_at(tree_map, &tree, MapKind::Tree, right_frame, 700.0);
+        let placed = place_at(
+            tree_map,
+            &tree,
+            MapKind::Tree(Dir::Right),
+            right_frame,
+            700.0,
+        );
         let box_ = board_box(&placed).unwrap();
         assert!(
             (box_.x + box_.w - right_frame.x).abs() < 0.5,
