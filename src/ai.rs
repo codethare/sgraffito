@@ -1443,6 +1443,19 @@ const RING_STEP: f32 = 190.0;
 /// The gap between the columns of a tree, and between the rows of one.
 const TREE_COLUMN_GAP: f32 = 44.0;
 const TREE_ROW_GAP: f32 = 22.0;
+/// How far a branch's boundary stands off the nodes it holds, and how much room its title keeps above
+/// them: the title is a node of its own, standing inside the boundary's top edge.
+const GROUP_PADDING: f32 = 18.0;
+const GROUP_TITLE_GAP: f32 = 10.0;
+const GROUP_STROKE: f32 = 1.5;
+/// A boundary is drawn at a little over half the ink, thin: it reads as a boundary and not as another
+/// node, and the edges it holds still carry the eye.
+const GROUP_ALPHA: u8 = 0x88;
+/// Edges are drawn through their bends as a smooth curve: Excalidraw's proportional roundness.
+const EDGE_ROUNDNESS: u8 = 2;
+/// How much one axis has to dominate the other before an edge is routed as an elbow rather than a
+/// straight diagonal: root-to-subject at 45° is a diagonal, a stack of attributes is an elbow.
+const ELBOW_RATIO: f32 = 1.6;
 /// How far a fishbone's bones rise off its spine, how far apart they sit, and how far their own
 /// children step away from them.
 const FISH_RISE: f32 = 120.0;
@@ -1476,14 +1489,88 @@ pub fn layout_mindmap(
 ) -> Board {
     let kind = fit_kind(kind, tree);
     let anchor = origin(kind, anchor, room);
-    let placed = match kind {
-        MapKind::Radial => radial_place(tree, anchor, measure),
+    let arrangement = match kind {
+        MapKind::Radial => Arrangement {
+            nodes: radial_place(tree, anchor, measure),
+            groups: Vec::new(),
+        },
         MapKind::Tree => tree_place(tree, anchor, measure),
         MapKind::Fishbone => return fishbone_board(tree, anchor, color, measure),
-        MapKind::Compare => compare_place(tree, anchor, room, measure)
-            .unwrap_or_else(|| radial_place(tree, anchor, measure)),
+        MapKind::Compare => {
+            compare_place(tree, anchor, room, measure).unwrap_or_else(|| Arrangement {
+                nodes: radial_place(tree, anchor, measure),
+                groups: Vec::new(),
+            })
+        }
     };
-    assemble(&placed, color, measure)
+    match kind {
+        MapKind::Tree => assemble_routed(&arrangement, color, measure, Route::Columns),
+        MapKind::Compare => assemble_routed(&arrangement, color, measure, Route::ByAxis),
+        _ => assemble_routed(&arrangement, color, measure, Route::Direct),
+    }
+}
+
+/// A laid-out map: its nodes, and the boxes that group a branch, drawn behind everything.
+struct Arrangement {
+    nodes: Vec<Placed>,
+    /// One box per first-level branch that has children: the branch's own node stands inside its top
+    /// edge as the title, and its descendants fill the rest. Nothing is stored about a group beyond the
+    /// box: the title is a node like any other, so it moves, labels and attaches like one.
+    groups: Vec<Rect>,
+}
+
+/// The middle of the free corridor between two nodes, measured from their edges rather than their
+/// centres: an edge runs down the gap it is given, not through the wider node's box.
+fn gap_mid(a_centre: f32, a_size: f32, b_centre: f32, b_size: f32) -> f32 {
+    if b_centre >= a_centre {
+        (a_centre + a_size / 2.0 + b_centre - b_size / 2.0) / 2.0
+    } else {
+        (a_centre - a_size / 2.0 + b_centre + b_size / 2.0) / 2.0
+    }
+}
+
+/// How the edge between two nodes gets from one to the other. Every edge is drawn with curved roundness;
+/// a route only decides where its bend points are.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Route {
+    /// Straight from one node to the other: a ring's spokes and a fishbone's ribs are already paths.
+    Direct,
+    /// Through the gap between two columns, one bend at each node's row: a decomposition reads to the
+    /// right, so its edges leave and arrive horizontally.
+    Columns,
+    /// Along whichever axis the two nodes are furthest apart on: a comparison stacks vertically.
+    ByAxis,
+}
+
+impl Route {
+    /// The bend points between two node centres, in canvas coordinates.
+    fn bends(self, parent: &Placed, child: &Placed) -> Vec<[f32; 2]> {
+        let (from, to) = (parent.centre, child.centre);
+        // A bend that lands on an end is no bend at all: two nodes in one column are joined straight.
+        let real = |point: [f32; 2]| {
+            (point[0] - from[0]).abs() + (point[1] - from[1]).abs() > 0.5
+                && (point[0] - to[0]).abs() + (point[1] - to[1]).abs() > 0.5
+        };
+        let across = gap_mid(from[0], parent.size[0], to[0], child.size[0]);
+        let down = gap_mid(from[1], parent.size[1], to[1], child.size[1]);
+        let bends = match self {
+            Route::Direct => Vec::new(),
+            Route::Columns => vec![[across, from[1]], [across, to[1]]],
+            // An elbow reads as a route when the two sit mostly above one another; at an angle it is a
+            // detour, and the curve of a straight line is what says the two are joined.
+            Route::ByAxis => {
+                let (dx, dy) = ((to[0] - from[0]).abs(), (to[1] - from[1]).abs());
+                if dy >= dx * ELBOW_RATIO {
+                    vec![[from[0], down], [to[0], down]]
+                } else if dx >= dy * ELBOW_RATIO {
+                    vec![[across, from[1]], [across, to[1]]]
+                } else {
+                    Vec::new()
+                }
+            }
+        };
+        bends.into_iter().filter(|point| real(*point)).collect()
+    }
 }
 
 /// Move a laid-out map so it takes the place its selection held: a ring is centred on the selection, and
@@ -1806,23 +1893,31 @@ fn origin(kind: MapKind, anchor: [f32; 2], room: f32) -> [f32; 2] {
 
 /// The board for a set of placed nodes: the links first, so the nodes are drawn over them, then each
 /// box with its label centred on it.
-fn assemble(placed: &[Placed], color: &str, measure: &mut TextMeasure<'_>) -> Board {
+fn assemble_routed(
+    arrangement: &Arrangement,
+    color: &str,
+    measure: &mut TextMeasure<'_>,
+    route: Route,
+) -> Board {
     let mut board = Board::default();
+    let placed = &arrangement.nodes;
     let mut next = placed.iter().map(|node| node.id).max().unwrap_or(0) + 1;
+    // The group boxes go down first: an edge belongs over its branch's boundary, and a node over both.
+    for group in &arrangement.groups {
+        push_group(&mut board, next, *group, color);
+        next += 1;
+    }
     for node in placed {
         for parent_id in &node.parents {
             let Some(parent) = placed.iter().find(|other| other.id == *parent_id) else {
                 continue;
             };
-            push_edge(
-                &mut board,
-                next,
-                parent.centre,
-                node.centre,
-                *parent_id,
-                node.id,
-                color,
-            );
+            let bends = route.bends(parent, node);
+            let mut points = Vec::with_capacity(bends.len() + 2);
+            points.push(parent.centre);
+            points.extend(bends);
+            points.push(node.centre);
+            push_edge(&mut board, next, &points, *parent_id, node.id, color);
             next += 1;
         }
     }
@@ -1835,33 +1930,70 @@ fn assemble(placed: &[Placed], color: &str, measure: &mut TextMeasure<'_>) -> Bo
     board
 }
 
-fn push_edge(
-    board: &mut Board,
-    id: u64,
-    from: [f32; 2],
-    to: [f32; 2],
-    from_id: u64,
-    to_id: u64,
-    color: &str,
-) {
+/// A group's boundary: a thin rectangle behind its branch, in the ink the map is drawn in but faint, so it
+/// reads as a boundary rather than as another node.
+fn push_group(board: &mut Board, id: u64, rect: Rect, color: &str) {
     board.shapes.push(Shape {
-        kind: ShapeKind::Line,
-        color: color.to_string(),
-        width: EDGE_STROKE,
-        from,
-        to,
+        kind: ShapeKind::Rect,
+        color: faded(color),
+        width: GROUP_STROKE,
+        from: [rect.x, rect.y],
+        to: [rect.x + rect.w, rect.y + rect.h],
         rotate: 0.0,
         id,
         points: Vec::new(),
         roundness: None,
+        attach: [None, None],
+        fill: None,
+    });
+}
+
+/// `#rrggbb` at `alpha` of its strength; a colour that already carries an alpha keeps its own hue.
+fn faded(color: &str) -> String {
+    let hex = color.trim_start_matches('#');
+    let rgb = &hex[..hex.len().min(6)];
+    format!("#{rgb}{GROUP_ALPHA:02x}")
+}
+
+/// One connector, through its bend points. The first and last segments are what the attachments aim
+/// along, so an edge that leaves a node sideways stays on its outline however many bends follow.
+fn push_edge(
+    board: &mut Board,
+    id: u64,
+    points: &[[f32; 2]],
+    from_id: u64,
+    to_id: u64,
+    color: &str,
+) {
+    let (Some(first), Some(last)) = (points.first(), points.last()) else {
+        return;
+    };
+    let leave = match points.get(1) {
+        Some(bend) => unit(sub(*bend, *first)),
+        None => unit(sub(*last, *first)),
+    };
+    let arrive = match points.len().checked_sub(2).and_then(|i| points.get(i)) {
+        Some(bend) => unit(sub(*bend, *last)),
+        None => unit(sub(*first, *last)),
+    };
+    board.shapes.push(Shape {
+        kind: ShapeKind::Line,
+        color: color.to_string(),
+        width: EDGE_STROKE,
+        from: *first,
+        to: *last,
+        rotate: 0.0,
+        id,
+        points: points[1..points.len() - 1].to_vec(),
+        roundness: Some(EDGE_ROUNDNESS),
         attach: [
             Some(Attachment {
                 shape: from_id,
-                at: unit(sub(to, from)),
+                at: leave,
             }),
             Some(Attachment {
                 shape: to_id,
-                at: unit(sub(from, to)),
+                at: arrive,
             }),
         ],
         fill: None,
@@ -1969,7 +2101,11 @@ fn ring(
 }
 
 /// 分解: one column per level, read left to right, each parent centred on the band its children occupy.
-fn tree_place(tree: &MindNode, anchor: [f32; 2], measure: &mut TextMeasure<'_>) -> Vec<Placed> {
+///
+/// A first-level branch that has children becomes a group: its descendants are boxed, and the branch's
+/// own node stands inside the box's top edge as the title. The band that title stands in is reserved
+/// while the branches are spaced, so a box never grows into the branch above it.
+fn tree_place(tree: &MindNode, anchor: [f32; 2], measure: &mut TextMeasure<'_>) -> Arrangement {
     let depth = levels(tree);
     let mut column = vec![0.0f32; depth];
     measure_widths(tree, 0, &mut column, measure);
@@ -1980,20 +2116,122 @@ fn tree_place(tree: &MindNode, anchor: [f32; 2], measure: &mut TextMeasure<'_>) 
         xs.push(x);
         x += width + TREE_COLUMN_GAP;
     }
-    let total = subtree_height(tree, measure);
+    let bands: Vec<f32> = tree
+        .children
+        .iter()
+        .map(|child| title_band(child, measure))
+        .collect();
+    // What each branch takes, room for its box included, so the map is centred on what it really covers.
+    let spacing: Vec<f32> = tree
+        .children
+        .iter()
+        .zip(&bands)
+        .map(|(child, band)| {
+            subtree_height(child, measure)
+                + band
+                + TREE_ROW_GAP
+                + if child.children.is_empty() {
+                    0.0
+                } else {
+                    GROUP_PADDING
+                }
+        })
+        .collect();
+    let total = spacing.iter().sum::<f32>() - TREE_ROW_GAP;
     let mut placed = Vec::new();
+    let mut groups = Vec::new();
     let mut next = 1u64;
-    place_tree(
-        tree,
-        0,
-        anchor[1] - total / 2.0,
-        &xs,
-        &mut next,
-        measure,
-        &mut placed,
-        None,
-    );
-    placed
+    // The root first, level with the middle of what hangs from it.
+    let root_size = node_size(&tree.text, measure);
+    placed.push(Placed {
+        id: next,
+        parents: Vec::new(),
+        centre: [xs[0] + root_size[0] / 2.0, anchor[1]],
+        size: root_size,
+        text: tree.text.clone(),
+    });
+    next += 1;
+    let root_id = 1;
+    let mut cursor = anchor[1] - total / 2.0;
+    for (index, child) in tree.children.iter().enumerate() {
+        let first = next;
+        let branch_id = place_tree(
+            child,
+            1,
+            cursor + bands[index],
+            &xs,
+            &mut next,
+            measure,
+            &mut placed,
+            Some(root_id),
+        );
+        // A branch with nothing under it is a leaf, and a box around nothing reads as noise.
+        if !child.children.is_empty()
+            && let Some(descent) = union_of(&placed, first + 1, next - 1)
+            && let Some(box_) = box_branch(&mut placed, branch_id, descent)
+        {
+            groups.push(box_);
+        }
+        cursor += spacing[index];
+    }
+    Arrangement {
+        nodes: placed,
+        groups,
+    }
+}
+
+/// The room a branch's title keeps above its descendants: the title itself, the gaps around it and the
+/// box's own padding. None for a leaf, which gets no box, so the branches sit as tightly as before.
+fn title_band(node: &MindNode, measure: &mut TextMeasure<'_>) -> f32 {
+    if node.children.is_empty() {
+        return 0.0;
+    }
+    node_size(&node.text, measure)[1] + 2.0 * GROUP_TITLE_GAP + GROUP_PADDING
+}
+
+/// The box around the nodes with ids `first..=last`, which placement numbers contiguously.
+fn union_of(nodes: &[Placed], first: u64, last: u64) -> Option<Rect> {
+    (first..=last)
+        .filter_map(|id| nodes.get(id as usize - 1))
+        .map(|node| Rect {
+            x: node.centre[0] - node.size[0] / 2.0,
+            y: node.centre[1] - node.size[1] / 2.0,
+            w: node.size[0],
+            h: node.size[1],
+        })
+        .reduce(Rect::union)
+}
+
+/// Box a branch's descendants and stand the branch itself inside the box's top edge as the title.
+///
+/// The title keeps its own column — the box reaches left to include it — so the connector that arrives
+/// from the parent still crosses sideways and the edge keeps its bend. Only the title's height moves: it
+/// leaves the middle of its band and takes the band above it.
+fn box_branch(nodes: &mut [Placed], branch_id: u64, descent: Rect) -> Option<Rect> {
+    let branch = nodes.iter_mut().find(|node| node.id == branch_id)?;
+    let held = Rect {
+        x: descent.x - GROUP_PADDING,
+        y: descent.y - GROUP_PADDING,
+        w: descent.w + 2.0 * GROUP_PADDING,
+        h: descent.h + 2.0 * GROUP_PADDING,
+    };
+    // The box reaches the title's own edge rather than padding past it, so the corridor the parent's
+    // edge runs down stays clear of the boundary it runs beside.
+    let left = held.x.min(branch.centre[0] - branch.size[0] / 2.0);
+    let right = held
+        .x
+        .max(branch.centre[0] + branch.size[0] / 2.0)
+        .max(held.x + held.w)
+        + GROUP_PADDING;
+    let top = held.y - (branch.size[1] + 2.0 * GROUP_TITLE_GAP);
+    let box_ = Rect {
+        x: left,
+        y: top,
+        w: right - left,
+        h: held.y + held.h - top,
+    };
+    branch.centre[1] = box_.y + GROUP_TITLE_GAP + branch.size[1] / 2.0;
+    Some(box_)
 }
 
 fn levels(node: &MindNode) -> usize {
@@ -2103,6 +2341,7 @@ fn fishbone_board(
         rotate: 0.0,
         id: next,
         points: Vec::new(),
+        // The spine runs straight; only the ribs and their children are curves' business.
         roundness: None,
         attach: [
             Some(Attachment {
@@ -2170,8 +2409,7 @@ fn fishbone_board(
             push_edge(
                 &mut board,
                 next,
-                cause_centre,
-                centre,
+                &[cause_centre, centre],
                 cause_id,
                 child_id,
                 color,
@@ -2203,7 +2441,7 @@ fn compare_place(
     anchor: [f32; 2],
     room: f32,
     measure: &mut TextMeasure<'_>,
-) -> Option<Vec<Placed>> {
+) -> Option<Arrangement> {
     let mut subjects = tree.children.iter();
     let left = subjects.next()?;
     let right = subjects.next()?;
@@ -2312,7 +2550,12 @@ fn compare_place(
         &mut next,
         &mut placed,
     );
-    Some(placed)
+    Some(Arrangement {
+        nodes: placed,
+        // A comparison already reads as two columns with a shared one between them: a boundary around
+        // each side would be an empty frame, so only a decomposition's branches are boxed.
+        groups: Vec::new(),
+    })
 }
 
 /// How much of the map hangs below a node; a leaf owns one slice.
@@ -2660,6 +2903,126 @@ mod tests {
         );
         assert!(chosen.cost.covered <= 1.0, "{chosen:?}");
         assert!(chosen.place.is_some(), "it found no place at all");
+    }
+
+    /// A boundary is the map's ink with the group's alpha, whatever the colour was.
+    fn is_group_ink(color: &str) -> bool {
+        color.len() == 9 && color.ends_with(&format!("{GROUP_ALPHA:02x}"))
+    }
+
+    #[test]
+    fn a_branch_is_boxed_with_its_title_inside_the_top_edge() {
+        let tree = parse_mindmap(
+            "mindmap\n  root((Robot))\n    Sensors\n      Camera\n      Lidar\n    Actuators\n      Wheels\n",
+        )
+        .unwrap();
+        let mut measure = |_: &str, size: f32, _: Option<f32>| (size, size);
+        let board = layout_mindmap(
+            MapKind::Tree,
+            &tree,
+            [0.0, 300.0],
+            600.0,
+            "#e01b24",
+            &mut measure,
+        );
+        let boxes: Vec<Rect> = board
+            .shapes
+            .iter()
+            .filter(|shape| shape.kind == ShapeKind::Rect && is_group_ink(&shape.color))
+            .map(Shape::bounds)
+            .collect();
+        // Two branches with children, two boxes; the root's own children are not boxed separately.
+        assert_eq!(boxes.len(), 2, "{boxes:?}");
+        let nodes: Vec<Rect> = board
+            .shapes
+            .iter()
+            .filter(|shape| shape.color == "#e01b24" && shape.kind == ShapeKind::Rect)
+            .map(Shape::bounds)
+            .collect();
+        assert_eq!(
+            nodes.len(),
+            6,
+            "six nodes: root, two branches, three leaves"
+        );
+        for box_ in &boxes {
+            // The title is a node standing in the box's top band, and its descendants are below it.
+            // Painted bounds against a painted box: the title is flush with the boundary, so its own
+            // stroke may stand a fraction outside it.
+            let titled = nodes.iter().any(|node| {
+                node.y >= box_.y
+                    && node.y + node.h / 2.0 <= box_.y + 0.4 * box_.h
+                    && node.x >= box_.x - 0.5
+                    && node.x + node.w <= box_.x + box_.w + 0.5
+            });
+            assert!(titled, "no title inside the top edge of {box_:?}");
+            let held = nodes
+                .iter()
+                .filter(|node| {
+                    node.x >= box_.x - 0.5
+                        && node.x + node.w <= box_.x + box_.w + 0.5
+                        && node.y >= box_.y
+                })
+                .count();
+            assert!(held >= 2, "{box_:?} holds {held} of {nodes:?}");
+            // Branches never overlap: each box keeps to its own band.
+            for other in &boxes {
+                if *other != *box_ {
+                    assert!(
+                        box_.y + box_.h <= other.y + 0.5 || other.y + other.h <= box_.y + 0.5,
+                        "{box_:?} runs into {other:?}"
+                    );
+                }
+            }
+        }
+        // Every edge is drawn as a curve, and a decomposition's arrive and leave sideways.
+        let edges: Vec<&Shape> = board
+            .shapes
+            .iter()
+            .filter(|shape| shape.kind == ShapeKind::Line)
+            .collect();
+        assert_eq!(edges.len(), 5, "one edge per parent-child pair");
+        for edge in &edges {
+            assert_eq!(edge.roundness, Some(2), "an edge is drawn curved");
+            assert_eq!(
+                edge.points.len(),
+                2,
+                "a tree edge bends in the gap between columns"
+            );
+            let at = edge.attach[0].expect("an edge leaves its parent").at;
+            assert!(at[0].abs() > at[1].abs(), "it leaves sideways: {at:?}");
+        }
+    }
+
+    #[test]
+    fn a_ring_keeps_its_spokes_straight() {
+        let tree = parse_mindmap("mindmap\n  root((Robot))\n    Sensors\n    Wheels\n").unwrap();
+        let mut measure = |_: &str, size: f32, _: Option<f32>| (size, size);
+        let board = layout_mindmap(
+            MapKind::Radial,
+            &tree,
+            [0.0, 0.0],
+            600.0,
+            "#e01b24",
+            &mut measure,
+        );
+        let edges: Vec<&Shape> = board
+            .shapes
+            .iter()
+            .filter(|shape| shape.kind == ShapeKind::Line)
+            .collect();
+        assert_eq!(edges.len(), 2);
+        for edge in edges {
+            assert_eq!(edge.roundness, Some(2));
+            assert!(
+                edge.points.is_empty(),
+                "a spoke needs no bend: {:?}",
+                edge.points
+            );
+        }
+        assert!(
+            !board.shapes.iter().any(|shape| is_group_ink(&shape.color)),
+            "a ring has no groups"
+        );
     }
 
     #[test]

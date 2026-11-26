@@ -710,12 +710,21 @@ fn a_tree_reads_left_to_right_with_one_column_per_level() {
         "#e01b24",
         &mut measure_fn(),
     );
+    // Nodes are in the map's own ink; a branch's boundary is the same ink at a third of its strength.
     let boxes: Vec<&sgraffito::canvas::Shape> = board
         .shapes
         .iter()
-        .filter(|shape| shape.kind == ShapeKind::Rect)
+        .filter(|shape| shape.kind == ShapeKind::Rect && shape.color == "#e01b24")
         .collect();
     assert_eq!(boxes.len(), 6);
+    let groups = board
+        .shapes
+        .iter()
+        .filter(|shape| {
+            shape.kind == ShapeKind::Rect && shape.color.len() == 9 && shape.color.ends_with("88")
+        })
+        .count();
+    assert_eq!(groups, 2, "one boundary per branch that has children");
     let root = boxes.iter().find(|shape| shape.id == 1).unwrap();
     // Every link goes rightward: no arrangement in this map may point back at the root.
     for line in board
