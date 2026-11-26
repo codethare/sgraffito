@@ -357,6 +357,10 @@ pub struct Session {
     /// What this request was asked to expand, when it was sent with a selection: the answer is laid out
     /// where that selection stood and takes its place.
     pub seed: Option<Seed>,
+    /// Where this answer's own box was put on the board, in canvas coordinates. A map grows as the answer
+    /// streams, and a fresh search on every rebuild would make it hop across the board; it keeps its
+    /// corner while that corner still fits.
+    pub place: Option<[f32; 2]>,
 }
 
 impl Default for Session {
@@ -385,6 +389,7 @@ impl Session {
             last_preview: Instant::now(),
             preview_len: 0,
             seed: None,
+            place: None,
         }
     }
 
@@ -595,6 +600,7 @@ impl Chat {
         // The place the answer was to take is part of the preview, not of the conversation: a request
         // that failed or was committed leaves no instruction behind for the next one.
         session.seed = None;
+        session.place = None;
     }
 
     /// Record a failure against `board`'s own conversation, whether or not that board is on screen.
@@ -1515,6 +1521,78 @@ pub fn place_at(
     board.shifted(dx, dy)
 }
 
+/// How far apart two maps are kept, in canvas units.
+pub const MAP_GAP: f32 = 32.0;
+/// The canvas x a map keeps clear of the screen's left edge, so an answer is never pushed out of sight.
+pub const MAP_MARGIN: f32 = 24.0;
+
+/// Where a map of this size can stand among what is already on the board: the place it was asked for when
+/// that place is free; else the first free spot walking right, then left, then a row down. `taken` is what
+/// the map may not cover — the caller leaves out what this answer is about to replace — and `limit` is the
+/// canvas x the panel's card starts at, so a spot that would hide the map under the card is passed over
+/// while there is anywhere else to go. A board with no room anywhere keeps the place it asked for.
+///
+/// Returns the map and the canvas point its own box now starts at, which the caller keeps so the next
+/// rebuild of the same answer grows in place instead of hopping to another spot.
+pub fn free_place(
+    candidate: Board,
+    taken: &[Rect],
+    limit: f32,
+    preferred: Option<[f32; 2]>,
+) -> (Board, Option<[f32; 2]>) {
+    let Some(box_) = board_box(&candidate) else {
+        return (candidate, preferred);
+    };
+    let clear = |at: Rect| !taken.iter().any(|other| other.intersects(at));
+    let at = |x: f32, y: f32| Rect {
+        x,
+        y,
+        w: box_.w,
+        h: box_.h,
+    };
+    // A map that is already on its corner stays there while it fits: it is the same answer growing, not
+    // a new one looking for room.
+    if let Some([x, y]) = preferred
+        && clear(at(x, y))
+    {
+        return (candidate.shifted(x - box_.x, y - box_.y), preferred);
+    }
+    // The place it asked for, when nothing is in it — a wide map is still allowed to run on under the
+    // card, because a strip cannot hold it and the canvas pans.
+    if clear(box_) {
+        return (candidate, Some([box_.x, box_.y]));
+    }
+    let (step_x, step_y) = (box_.w + MAP_GAP, box_.h + MAP_GAP);
+    // Candidates in the order a person would look: the nearest first, a row down before a column out, and
+    // visible spots before anything else. A map pushed off the screen is worse than one that runs on under
+    // the card, and both are worse than covering another map.
+    let mut spots: Vec<(u32, u32, f32, f32)> = Vec::new();
+    for row in 0..=12 {
+        for col in 0..=12 {
+            for sign in [1.0_f32, -1.0] {
+                if col == 0 && sign < 0.0 {
+                    continue;
+                }
+                spots.push((row, col, sign * col as f32 * step_x, row as f32 * step_y));
+            }
+        }
+    }
+    spots.sort_by_key(|(row, col, _, _)| ((*row).max(*col), *col, *row));
+    let search = |left: f32, right: f32| {
+        spots.iter().find_map(|(_, _, dx, dy)| {
+            let spot = at(box_.x + dx, box_.y + dy);
+            (spot.x >= left && spot.x + spot.w <= right && clear(spot)).then_some([spot.x, spot.y])
+        })
+    };
+    let found = search(MAP_MARGIN, limit)
+        .or_else(|| search(MAP_MARGIN, f32::INFINITY))
+        .or_else(|| search(f32::NEG_INFINITY, f32::INFINITY));
+    match found {
+        Some([x, y]) => (candidate.shifted(x - box_.x, y - box_.y), Some([x, y])),
+        None => (candidate, None),
+    }
+}
+
 /// The box a board's content covers, which is what a map has to be moved by.
 fn board_box(board: &Board) -> Option<Rect> {
     board
@@ -2244,6 +2322,109 @@ mod tests {
                 .any(|turn| turn["role"] == serde_json::json!("assistant")
                     && turn["content"] == serde_json::json!(""))
         );
+    }
+
+    #[test]
+    fn a_map_stands_clear_of_the_ones_before_it() {
+        let tree = parse_mindmap("mindmap\n  root((Robot))\n    Sensors\n    Actuators\n").unwrap();
+        let mut measure = |_: &str, size: f32, _: Option<f32>| (size, size);
+        let mut map = || {
+            layout_mindmap(
+                MapKind::Radial,
+                &tree,
+                [0.0, 0.0],
+                600.0,
+                "#ffffff",
+                &mut measure,
+            )
+        };
+        // Nothing in the way: the map keeps the place it asked for, and says where that is.
+        let first = map();
+        let box_ = board_box(&first).unwrap();
+        let (placed, at) = free_place(first, &[], 1200.0, None);
+        assert_eq!(board_box(&placed), Some(box_));
+        assert_eq!(at, Some([box_.x, box_.y]));
+        // Something already stands there: the map walks out of it, and says where it landed.
+        let taken = [box_.grown(4.0)];
+        let (placed, at) = free_place(map(), &taken, 1200.0, None);
+        let moved = board_box(&placed).unwrap();
+        assert!(!moved.intersects(box_.grown(4.0)), "{moved:?} on {box_:?}");
+        assert_eq!(at, Some([moved.x, moved.y]));
+        // It steps aside by a gap, and stays on the screen: a row down is the first place it looks.
+        let apart_x = moved.x >= box_.x + box_.w + MAP_GAP || moved.x + moved.w + MAP_GAP <= box_.x;
+        let apart_y = moved.y >= box_.y + box_.h + MAP_GAP || moved.y + moved.h + MAP_GAP <= box_.y;
+        assert!(
+            apart_x || apart_y,
+            "{moved:?} is not a gap away from {box_:?}"
+        );
+        assert!(moved.x >= MAP_MARGIN, "{moved:?} was pushed off the screen");
+        // The corner an answer already stands on is kept while it still fits, so a streaming map grows
+        // in place instead of hopping.
+        let (placed, at) = free_place(map(), &taken, 1200.0, Some([moved.x, moved.y]));
+        assert_eq!(board_box(&placed), Some(moved));
+        assert_eq!(at, Some([moved.x, moved.y]));
+    }
+
+    #[test]
+    fn a_map_that_would_hide_under_the_panel_steps_aside() {
+        let tree = parse_mindmap("mindmap\n  root((Robot))\n    Sensors\n").unwrap();
+        let mut measure = |_: &str, size: f32, _: Option<f32>| (size, size);
+        let map = layout_mindmap(
+            MapKind::Radial,
+            &tree,
+            [600.0, 300.0],
+            600.0,
+            "#ffffff",
+            &mut measure,
+        );
+        let box_ = board_box(&map).unwrap();
+        // Something stands where it asked to be, and the card begins before the map ends: it steps aside
+        // to a free spot that is not under the card, rather than walking right into the panel.
+        let limit = box_.x + 20.0;
+        let taken = [Rect {
+            x: box_.x,
+            y: box_.y,
+            w: 10.0,
+            h: 10.0,
+        }];
+        let (placed, _) = free_place(map, &taken, limit, None);
+        let moved = board_box(&placed).unwrap();
+        assert!(
+            !moved.intersects(taken[0]),
+            "{moved:?} covers what stood there"
+        );
+        assert!(
+            moved.x + moved.w <= limit,
+            "{moved:?} still under the card at {limit}"
+        );
+    }
+
+    #[test]
+    fn a_board_with_no_room_keeps_the_place_it_asked_for() {
+        let tree = parse_mindmap("mindmap\n  root((Robot))\n    Sensors\n").unwrap();
+        let mut measure = |_: &str, size: f32, _: Option<f32>| (size, size);
+        let map = layout_mindmap(
+            MapKind::Radial,
+            &tree,
+            [0.0, 0.0],
+            600.0,
+            "#ffffff",
+            &mut measure,
+        );
+        let box_ = board_box(&map).unwrap();
+        let everywhere = [Rect {
+            x: box_.x - 100_000.0,
+            y: box_.y - 100_000.0,
+            w: 200_000.0,
+            h: 200_000.0,
+        }];
+        let (placed, at) = free_place(map, &everywhere, 1200.0, None);
+        assert_eq!(
+            board_box(&placed),
+            Some(box_),
+            "a crowded board is not a lost board"
+        );
+        assert_eq!(at, None);
     }
 
     #[test]

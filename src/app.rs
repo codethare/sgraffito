@@ -2013,12 +2013,24 @@ impl App {
             .get(self.color_idx)
             .cloned()
             .unwrap_or_else(|| colors[0].clone());
+        if let Some(seed) = &seed {
+            // What a request expands is worth saying out loud: it is the one place a wrong selection
+            // turns into a wrong diagram.
+            log(&format!(
+                "ai: expanding {} shape(s), {} text(s) at ({:.0}, {:.0}) on {board}",
+                seed.shapes.len(),
+                seed.texts.len(),
+                seed.frame.x + seed.frame.w / 2.0,
+                seed.frame.y + seed.frame.h / 2.0,
+            ));
+        }
         {
             let session = self.ai.session_mut();
             session.anchor = anchor;
             session.room = room;
             session.color = color;
             session.seed = seed;
+            session.place = None;
             session.preview = None;
             session.error = None;
             session.follow = true;
@@ -2182,12 +2194,57 @@ impl App {
             Some(frame) => crate::ai::place_at(board, &tree, kind, frame, anchor[0] + room),
             None => board,
         };
+        // Maps pile up as conversations do, so an answer goes where the board has room for it: past the
+        // maps already standing there, and off the words this one replaces.
+        let board_name = self.ai.board().to_string();
+        let taken = self.ai_taken(&board_name);
+        let preferred = self.ai.session().place;
+        let (board, place) = crate::ai::free_place(board, &taken, anchor[0] + room, preferred);
         let answer_len = text.len();
         let session = self.ai.session_mut();
         session.preview = Some(board);
+        session.place = place;
         session.last_preview = Instant::now();
         session.preview_len = answer_len;
         self.refresh_ai();
+    }
+
+    /// What the board already holds, as boxes an answer may not cover. Nothing this answer replaces is in
+    /// the list: the diagram this conversation placed last time, the shapes and texts its selection named,
+    /// and the labels of both, all leave the board when the answer is committed.
+    fn ai_taken(&self, board_name: &str) -> Vec<Rect> {
+        let Some(board) = self.doc.boards.get(board_name) else {
+            return Vec::new();
+        };
+        let session = self.ai.session();
+        let mut gone: Vec<u64> = session.placed_shapes.clone();
+        let mut gone_texts: Vec<usize> = Vec::new();
+        if let Some(seed) = &session.seed {
+            gone.extend(seed.shapes.iter().copied());
+            gone_texts.extend(seed.texts.iter().map(|(index, _)| *index));
+        }
+        let mut taken = Vec::new();
+        for shape in &board.shapes {
+            if !gone.contains(&shape.id) {
+                taken.push(shape.paint_bounds());
+            }
+        }
+        for (index, text) in board.texts.iter().enumerate() {
+            let is_gone = gone_texts.contains(&index)
+                || text
+                    .container
+                    .is_some_and(|container| gone.contains(&container));
+            if !is_gone {
+                taken.push(text.paint_bounds());
+            }
+        }
+        for note in &board.notes {
+            taken.push(note.bounds());
+        }
+        for stroke in &board.strokes {
+            taken.extend(stroke.paint_bounds());
+        }
+        taken
     }
 
     /// Write the preview into its board as one change: the diagram this conversation placed last time
