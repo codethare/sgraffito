@@ -2298,10 +2298,24 @@ impl Renderer {
             "AI mind map",
         );
         self.draw_text(pixmap, &title, screen, None, None, None);
+        let mut after = layout.header.x + self.measure_text("AI mind map", AI_TITLE_SIZE, None).0;
+        // Which arrangement the diagram on the board is drawn in: the same map redrawn is a different
+        // view, not a different answer, so the name belongs in the header rather than in the transcript.
+        if let Some(name) = view.view {
+            let label = toolbar_text(
+                after + AI_TITLE_GAP,
+                layout.header.y,
+                layout.header.h,
+                AI_STATUS_SIZE,
+                AI_MUTED,
+                name,
+            );
+            self.draw_text(pixmap, &label, screen, None, None, None);
+            after = label.x + self.measure_text(name, AI_STATUS_SIZE, None).0;
+        }
         if view.streaming {
-            let width = self.measure_text("AI mind map", AI_TITLE_SIZE, None).0;
             let status = toolbar_text(
-                layout.header.x + width + AI_TITLE_GAP,
+                after + AI_TITLE_GAP,
                 layout.header.y,
                 layout.header.h,
                 AI_STATUS_SIZE,
@@ -2310,6 +2324,24 @@ impl Renderer {
             );
             self.draw_text(pixmap, &status, screen, None, None, None);
         }
+        // The view control: a small plate with its word, beside the way out.
+        round_rect(
+            pixmap,
+            screen.ui_rect(layout.view),
+            TOOLBAR_RADIUS * scale,
+            parse_hex(AI_BUTTON_MUTED),
+            None,
+        );
+        let word = self.measure_text("view", AI_STATUS_SIZE, None).0;
+        let control = toolbar_text(
+            layout.view.x + (layout.view.w - word) / 2.0,
+            layout.view.y,
+            layout.view.h,
+            AI_STATUS_SIZE,
+            TOOLBAR_FOREGROUND,
+            "view",
+        );
+        self.draw_text(pixmap, &control, screen, None, None, None);
         let glyph = self.measure_text("\u{00d7}", AI_CLOSE_SIZE, None).0;
         let close = toolbar_text(
             layout.close.x + (layout.close.w - glyph) / 2.0,
@@ -5428,6 +5460,8 @@ pub struct AiPanelLayout {
     pub log: Rect,
     pub input: Rect,
     pub close: Rect,
+    /// The `view` control: draw the last answer again in the next arrangement, without asking the model.
+    pub view: Rect,
     pub send: Rect,
     pub scrollbar: Rect,
 }
@@ -5462,6 +5496,8 @@ const AI_SEND_SIZE: f32 = 12.0;
 const AI_SEND_WIDTH: f32 = 56.0;
 const AI_SEND_HEIGHT: f32 = 28.0;
 const AI_CLOSE_SIDE: f32 = 24.0;
+/// The `view` control beside the close button: wide enough for its word, the same height as the cross.
+const AI_VIEW_WIDTH: f32 = 42.0;
 const AI_INSET: f32 = 7.0;
 const AI_SCROLLBAR_WIDTH: f32 = 2.0;
 const AI_SCROLLBAR_MIN: f32 = 24.0;
@@ -5489,6 +5525,7 @@ fn shifted(layout: &AiPanelLayout, dx: f32) -> AiPanelLayout {
         log: shift(layout.log),
         input: shift(layout.input),
         close: shift(layout.close),
+        view: shift(layout.view),
         send: shift(layout.send),
         scrollbar: shift(layout.scrollbar),
     }
@@ -5611,6 +5648,12 @@ pub fn ai_panel_layout_at(
         w: AI_CLOSE_SIDE.min(header.w.max(0.0)),
         h: AI_CLOSE_SIDE.min(header.h.max(0.0)),
     };
+    let view = Rect {
+        x: (close.x - AI_VIEW_WIDTH - AI_TITLE_GAP).max(header.x),
+        y: header.y + AI_INSET,
+        w: AI_VIEW_WIDTH.min(header.w.max(0.0)),
+        h: AI_CLOSE_SIDE.min(header.h.max(0.0)),
+    };
     let send = Rect {
         x: input.x + input.w - AI_SEND_WIDTH - AI_INSET,
         y: input.y + input.h - AI_SEND_HEIGHT - AI_INSET,
@@ -5629,6 +5672,7 @@ pub fn ai_panel_layout_at(
         log,
         input,
         close,
+        view,
         send,
         scrollbar,
     }

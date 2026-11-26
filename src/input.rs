@@ -459,6 +459,12 @@ impl KeyboardHandler for App {
             }
             return;
         }
+        // `Ctrl+L` redraws the last answer in its next arrangement. It works whether or not the input
+        // line has the keyboard: the switch is about the diagram, not about what is being typed.
+        if self.ctrl && matches!(event.keysym, Keysym::l | Keysym::L) && self.ai.open {
+            self.cycle_ai_view();
+            return;
+        }
         // The AI panel's input line takes its own keys first: `Enter` sends, `Shift+Enter` adds a line,
         // `Esc` closes the panel, and everything else — including `Ctrl+V` — is the ordinary text path.
         if self.ai.open && self.ai.focus {
@@ -1150,6 +1156,10 @@ impl App {
                     } else {
                         self.send_ai();
                     }
+                    return;
+                }
+                if layout.view.contains(x, y) {
+                    self.cycle_ai_view();
                     return;
                 }
                 if layout.input.contains(x, y) {

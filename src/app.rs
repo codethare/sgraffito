@@ -2208,10 +2208,85 @@ impl App {
         let answer_len = text.len();
         let session = self.ai.session_mut();
         session.preview = Some(choice.board);
+        session.view = Some(choice.kind);
         session.place = choice.place;
         session.last_preview = Instant::now();
         session.preview_len = answer_len;
         self.refresh_ai();
+    }
+
+    /// Draw the last answer again in another arrangement, without asking the model anything: the Mermaid
+    /// it sent is still in the transcript, so the switch is the same parse and layout as the first draw,
+    /// committed over the diagram that stands there now, as one undo step.
+    pub(crate) fn cycle_ai_view(&mut self) -> bool {
+        if self.ai.output.is_none() {
+            return false;
+        }
+        let board_name = self.ai.board().to_string();
+        let tree = self
+            .ai
+            .session()
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == crate::ai::Role::Assistant)
+            .and_then(|message| crate::ai::extract_mermaid(&message.text))
+            .and_then(|mermaid| crate::ai::parse_mindmap(&mermaid).ok());
+        let Some(tree) = tree else {
+            return false;
+        };
+        let current = self.ai.session().view;
+        let next = crate::ai::next_view(current, &tree);
+        // The diagram it replaces decides where the new one stands: the same corner, so a switch looks
+        // like the same map redrawn rather than a second map appearing.
+        let old = self
+            .doc
+            .boards
+            .get(&board_name)
+            .and_then(|board| {
+                let ids: Vec<crate::canvas::ItemId> = self
+                    .ai
+                    .session()
+                    .placed_shapes
+                    .iter()
+                    .filter_map(|id| board.shape_index_by_id(*id))
+                    .map(crate::canvas::ItemId::Shape)
+                    .collect();
+                crate::canvas::selection_frame(board, &ids, None)
+            })
+            .map(|box_| [box_.x, box_.y]);
+        let (anchor, room, color) = {
+            let session = self.ai.session();
+            (session.anchor, session.room, session.color.clone())
+        };
+        let limit = anchor[0] + room;
+        let taken = self.ai_taken(&board_name);
+        let preferred = old.or(self.ai.session().place);
+        let renderer = &mut self.renderer;
+        let board = crate::ai::layout_mindmap(
+            next,
+            &tree,
+            anchor,
+            room,
+            &color,
+            &mut |text, size, wrap| renderer.measure_text(text, size, wrap),
+        );
+        let (board, place) = crate::ai::free_place(board, &taken, limit, preferred);
+        {
+            let session = self.ai.session_mut();
+            session.preview = Some(board);
+            session.view = Some(next);
+            session.place = place;
+            session.error = None;
+        }
+        log(&format!(
+            "ai: view switched to {} without asking the model",
+            next.name()
+        ));
+        self.commit_ai_preview();
+        self.refresh_ai();
+        self.dirty = true;
+        true
     }
 
     /// What the board already holds, as boxes an answer may not cover. Nothing this answer replaces is in

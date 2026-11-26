@@ -3881,6 +3881,8 @@ pub struct AiView {
     /// How far the panel has slid into place, 0 to 1. The rail's own transitions use the same curve
     /// and the same 140 ms, so the panel arrives at the speed the rest of the interface moves.
     pub grow: f32,
+    /// The arrangement the diagram on the board was drawn with, as it is named to the reader.
+    pub view: Option<&'static str>,
 }
 
 impl Default for AiView {
@@ -3895,6 +3897,7 @@ impl Default for AiView {
             burst: 1.0,
             // A panel that has no animation of its own is settled at its full size.
             grow: 1.0,
+            view: None,
         }
     }
 }

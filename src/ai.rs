@@ -363,6 +363,8 @@ pub struct Session {
     /// streams, and a fresh search on every rebuild would make it hop across the board; it keeps its
     /// corner while that corner still fits.
     pub place: Option<[f32; 2]>,
+    /// The arrangement the diagram on the board was drawn with: what a view switch counts from.
+    pub view: Option<MapKind>,
 }
 
 impl Default for Session {
@@ -392,6 +394,7 @@ impl Session {
             preview_len: 0,
             seed: None,
             place: None,
+            view: None,
         }
     }
 
@@ -654,6 +657,7 @@ impl Chat {
             scroll: session.scroll,
             burst: session.burst_drawn,
             grow: 1.0,
+            view: session.view.map(|kind| kind.name()),
         }
     }
 
@@ -1445,6 +1449,34 @@ pub fn inferred_kind(tree: &MindNode) -> MapKind {
         MapKind::Tree(Dir::Right)
     } else {
         MapKind::Radial
+    }
+}
+
+/// The arrangements worth switching between for this structure, in the order a reader tries them: the
+/// two readings of a decomposition, then the ring, then the semantic shapes it supports. Every one of
+/// them is drawn from the same tree — switching asks the model nothing.
+pub fn view_cycle(tree: &MindNode) -> Vec<MapKind> {
+    let mut views = vec![
+        MapKind::Tree(Dir::Right),
+        MapKind::Tree(Dir::Down),
+        MapKind::Radial,
+    ];
+    if tree.children.len() == 2 {
+        views.push(MapKind::Compare);
+    }
+    if !tree.children.is_empty() {
+        views.push(MapKind::Fishbone);
+    }
+    views
+}
+
+/// The arrangement after `current` in the cycle, wrapping. A view that is not in the cycle (the answer
+/// named a shape this structure cannot take) starts at the top.
+pub fn next_view(current: Option<MapKind>, tree: &MindNode) -> MapKind {
+    let views = view_cycle(tree);
+    match current.and_then(|kind| views.iter().position(|view| *view == kind)) {
+        Some(index) => views[(index + 1) % views.len()],
+        None => views[0],
     }
 }
 

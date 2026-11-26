@@ -4911,6 +4911,80 @@ fn an_open_panel_damages_its_box_and_a_closed_one_is_painted_over() {
 }
 
 #[test]
+fn the_header_carries_the_view_control_and_the_view_s_name() {
+    let (w, h) = (900u32, 600u32);
+    let toolbar = ai_toolbar();
+    let layout = ai_panel_layout((w as f32, h as f32), Some(&toolbar));
+    // The control sits in the header, left of the way out, and never outside the card.
+    assert!(layout.view.x >= layout.header.x, "{:?}", layout.view);
+    assert!(
+        layout.view.x + layout.view.w <= layout.close.x,
+        "{:?} runs into {:?}",
+        layout.view,
+        layout.close
+    );
+    assert!(layout.header.contains(layout.view.x, layout.view.y));
+    // The view's name is drawn beside the title, so a switch can be read off the panel.
+    let named = Overlay {
+        toolbar: Some(toolbar.clone()),
+        ai: Some(AiView {
+            view: Some("tree-down"),
+            ..ai_view()
+        }),
+        ..Default::default()
+    };
+    let plain = Overlay {
+        toolbar: Some(toolbar.clone()),
+        ai: Some(AiView {
+            view: None,
+            ..ai_view()
+        }),
+        ..Default::default()
+    };
+    let mut one = buffer(w, h);
+    let mut two = buffer(w, h);
+    let mut renderer = Renderer::new();
+    renderer.render(
+        &mut one,
+        w,
+        h,
+        1.0,
+        View::default(),
+        &Board::default(),
+        &named,
+        None,
+    );
+    renderer.render(
+        &mut two,
+        w,
+        h,
+        1.0,
+        View::default(),
+        &Board::default(),
+        &plain,
+        None,
+    );
+    let box_ = layout.header;
+    let changed = (box_.y as u32..(box_.y + box_.h) as u32)
+        .flat_map(|y| (box_.x as u32..(box_.x + box_.w) as u32).map(move |x| (x, y)))
+        .filter(|&(x, y)| {
+            let at = ((y * w + x) * 4) as usize;
+            one[at..at + 3] != two[at..at + 3]
+        })
+        .count();
+    assert!(
+        changed > 100,
+        "the header does not name the view ({changed} pixels)"
+    );
+    // The control itself is a plate: something is painted inside its box even with no view named.
+    let control = layout.view;
+    let ink = (control.y as u32..(control.y + control.h) as u32)
+        .flat_map(|y| (control.x as u32..(control.x + control.w) as u32).map(move |x| (x, y)))
+        .any(|(x, y)| two[((y * w + x) * 4) as usize] > 40);
+    assert!(ink, "the view control is blank");
+}
+
+#[test]
 fn the_panel_slides_into_place_and_a_settled_one_is_where_it_belongs() {
     let (w, h) = (900u32, 600u32);
     let mut settled = buffer(w, h);
