@@ -2496,85 +2496,6 @@ fn selection_press_full(
     }
 }
 
-/// The selection `items` implies once a closed shape takes what it encloses. A circle, rectangle or
-/// diamond holds every stroke, text box, note and shape whose whole geometry lies inside it, and a
-/// selected child shape carries its own contents in turn. An element picked directly stays on its
-/// own; the container is what pulls a group together.
-pub fn selection_with_contents(ann: &Board, items: &[ItemId]) -> Vec<ItemId> {
-    let mut selected = items.to_vec();
-    let mut containers: Vec<usize> = items
-        .iter()
-        .filter_map(|item| match *item {
-            ItemId::Shape(index)
-                if ann
-                    .shapes
-                    .get(index)
-                    .is_some_and(|shape| shape.kind.is_closed()) =>
-            {
-                Some(index)
-            }
-            _ => None,
-        })
-        .collect();
-    let mut scanned = vec![false; ann.shapes.len()];
-    for &index in &containers {
-        if let Some(slot) = scanned.get_mut(index) {
-            *slot = true;
-        }
-    }
-    let mut at = 0;
-    while at < containers.len() {
-        let container_index = containers[at];
-        at += 1;
-        let Some(container) = ann.shapes.get(container_index) else {
-            continue;
-        };
-        let mut add = |id: ItemId| {
-            if !selected.contains(&id) {
-                selected.push(id);
-                true
-            } else {
-                false
-            }
-        };
-        for (index, stroke) in ann.strokes.iter().enumerate() {
-            if !stroke.points.is_empty()
-                && stroke.points.iter().all(|p| container.contains_point(*p))
-            {
-                add(ItemId::Stroke(index));
-            }
-        }
-        for (index, text) in ann.texts.iter().enumerate() {
-            // A bound label is implicit content of its container, not a second selected object.
-            // Selecting the container must not add the label to the frame or scale its font.
-            if text.container.is_none() && container.contains_rect(text.bounds()) {
-                add(ItemId::Text(index));
-            }
-        }
-        for (index, note) in ann.notes.iter().enumerate() {
-            if container.contains_rect(note.bounds()) {
-                add(ItemId::Note(index));
-            }
-        }
-        for (index, shape) in ann.shapes.iter().enumerate() {
-            if index == container_index {
-                continue;
-            }
-            let outline = shape.outline();
-            if !outline.is_empty()
-                && outline.iter().all(|p| container.contains_point(*p))
-                && add(ItemId::Shape(index))
-                && shape.kind.is_closed()
-                && !scanned[index]
-            {
-                scanned[index] = true;
-                containers.push(index);
-            }
-        }
-    }
-    selected
-}
-
 /// The selection a `Shift` press on `id` produces: the element appended when it was not held, removed
 /// when it was, and every other element left where it was in the order.
 pub fn toggle_selection(held: &[ItemId], id: ItemId) -> Vec<ItemId> {
@@ -2584,23 +2505,6 @@ pub fn toggle_selection(held: &[ItemId], id: ItemId) -> Vec<ItemId> {
             items.remove(index);
         }
         None => items.push(id),
-    }
-    items
-}
-
-/// `Shift` toggling a closed shape toggles the contents it encloses with it: adding the shape adds
-/// them, and removing it removes the group that came in with it.
-pub fn toggle_selection_with_contents(ann: &Board, held: &[ItemId], id: ItemId) -> Vec<ItemId> {
-    let target = selection_with_contents(ann, &[id]);
-    let mut items = held.to_vec();
-    if items.contains(&id) {
-        items.retain(|item| !target.contains(item));
-    } else {
-        for item in target {
-            if !items.contains(&item) {
-                items.push(item);
-            }
-        }
     }
     items
 }

@@ -47,8 +47,7 @@ use crate::canvas::{
     TEXT_SIZE_MIN, TEXT_SIZE_STEP, Target, TextBuffer, TextItem, TextOverlay, Toolbar, Transform,
     View, ZOOM_STEP, Zoom, date_stamp, link_source, marquee_select, note_drag, nudge_delta,
     selected_linear, selection_bounds, selection_frame, selection_frame_with,
-    selection_press_linear, selection_with_contents, snap_square, stepped_size,
-    toggle_selection_with_contents,
+    selection_press_linear, snap_square, stepped_size,
 };
 
 pub use crate::canvas::{Tool, ToolbarAction};
@@ -1088,7 +1087,6 @@ impl App {
         let empty = Board::default();
         let ann = self.doc.boards.get(&board_name).unwrap_or(&empty);
         let items = crate::canvas::cycle_selection(ann, &held, forward);
-        let items = self.expand_selection(&key, items);
         self.set_selection(key, items, None);
     }
 
@@ -2337,8 +2335,19 @@ impl App {
         let count = placed_shapes.len();
         self.ai.session_mut().placed_shapes = placed_shapes;
         // The answer is what the user wants next: it is selected on every screen showing its board, so a
-        // move, a colour or a delete acts on what the request just made.
-        let selected = crate::canvas::selection_with_contents(board, &appended);
+        // move, a colour or a delete acts on what the request just made. A label is not in the list: it
+        // rides with the shape it is bound to, and a selected text is a text a resize would re-size.
+        let selected: Vec<ItemId> = appended
+            .iter()
+            .copied()
+            .filter(|id| match id {
+                ItemId::Text(index) => board
+                    .texts
+                    .get(*index)
+                    .is_some_and(|text| text.container.is_none()),
+                _ => true,
+            })
+            .collect();
         let shown: Vec<u32> = self
             .outputs
             .iter()
@@ -3005,8 +3014,9 @@ impl App {
             }
             Press::Element(id) => {
                 self.undo.begin_gesture(&self.doc);
-                let items = self.expand_selection(&key, vec![id]);
-                self.set_selection(key, items, None);
+                // The element under the pointer, and only that one: a shape is not a group of what
+                // happens to be drawn inside it. Grouping is what a marquee is for.
+                self.set_selection(key, vec![id], None);
                 self.gesture = Some(Gesture::start(None, Rect::default(), at[0], at[1], alt));
             }
             Press::Marquee { canvas } => {
@@ -3023,13 +3033,7 @@ impl App {
                     .and_then(|out| out.overlay.selection.as_ref())
                     .map(|s| s.items.clone())
                     .unwrap_or_default();
-                let empty = Board::default();
-                let ann = self
-                    .outputs
-                    .get(&key)
-                    .and_then(|out| self.doc.boards.get(out.board()))
-                    .unwrap_or(&empty);
-                let items = toggle_selection_with_contents(ann, &held, id);
+                let items = crate::canvas::toggle_selection(&held, id);
                 self.set_selection(key, items, None);
             }
             Press::Inert => {}
@@ -3532,17 +3536,6 @@ impl App {
         self.undo.abandon_gesture();
     }
 
-    /// Add what a picked closed shape encloses. A container is the thing the pointer aimed at; its
-    /// inside strokes, texts, notes and shapes ride with it rather than needing a second pass.
-    fn expand_selection(&self, key: &u32, items: Vec<ItemId>) -> Vec<ItemId> {
-        let Some(out) = self.outputs.get(key) else {
-            return items;
-        };
-        let empty = Board::default();
-        let ann = self.doc.boards.get(out.board()).unwrap_or(&empty);
-        selection_with_contents(ann, &items)
-    }
-
     /// Hold `items` on one output and let go everywhere else: at most one selection exists at a
     /// time, the way at most one text box is under edit.
     fn set_selection(&mut self, key: u32, items: Vec<ItemId>, transform: Option<Transform>) {
@@ -3590,7 +3583,6 @@ impl App {
             }
             None => Vec::new(),
         };
-        let items = self.expand_selection(&key, items);
         self.set_selection(key, items, None);
     }
 

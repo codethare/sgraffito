@@ -1,6 +1,6 @@
 use sgraffito::canvas::{
     Board, ERASER_THRESHOLD, ItemId, LinearHandle, PALETTE, Rect, SEED_MAX_CHARS, Shape, ShapeKind,
-    Stroke, TextItem, View, linear_handle_at, seed_of, selected_linear, selection_with_contents,
+    Stroke, TextItem, View, linear_handle_at, seed_of, selected_linear,
 };
 use sgraffito::sketch::SKETCH_SLACK;
 
@@ -2285,67 +2285,45 @@ fn one_shot_drawing_tools_hand_the_pointer_back_to_select() {
     }
 }
 
-// --- a closed shape takes what it encloses ------------------------------------------------
+// --- a closed shape is picked on its own ------------------------------------------------
 
-use sgraffito::canvas::toggle_selection_with_contents;
-
-fn enclosed_board(outer_rotate: f32) -> Board {
+#[test]
+fn a_press_on_a_closed_shape_picks_that_shape_and_nothing_it_encloses() {
+    // What a shape holds is not a group: a press on the outline is a press on the outline. Otherwise a
+    // boundary drawn around a branch would drag the whole branch whenever the branch was moved, and a
+    // resize of one rectangle would resize everything drawn inside it.
     let mut board = Board::default();
-    let mut outer = shape(ShapeKind::Rect, [0.0, 0.0], [300.0, 300.0]);
-    outer.rotate = outer_rotate;
-    board.add_shape(outer);
-    board.add_shape(shape(ShapeKind::Circle, [100.0, 100.0], [200.0, 200.0]));
-    board.add_shape(shape(ShapeKind::Line, [110.0, 120.0], [180.0, 180.0]));
-    board.texts = vec![text(120.0, 120.0, "in"), text(350.0, 350.0, "out")];
-    board.strokes = vec![
-        line(130.0, 110.0, 180.0),
-        Stroke {
-            color: "#e01b24".into(),
-            width: 3.0,
-            points: vec![[250.0, 250.0], [350.0, 350.0]],
-            attach: [None, None],
+    board.add_shape(shape(ShapeKind::Rect, [0.0, 0.0], [300.0, 300.0]));
+    board.add_shape(shape(ShapeKind::Rect, [100.0, 100.0], [200.0, 200.0]));
+    for at in [[0.0, 150.0], [150.0, 0.0], [300.0, 150.0], [150.0, 300.0]] {
+        let press = selection_press(&board, &[], View::default(), at, ERASER_THRESHOLD, false);
+        assert_eq!(
+            press,
+            Press::Element(ItemId::Shape(0)),
+            "a press at {at:?} picked more than the shape"
+        );
+    }
+    // A press on the inner shape picks the inner shape, and only it.
+    let press = selection_press(
+        &board,
+        &[],
+        View::default(),
+        [100.0, 150.0],
+        ERASER_THRESHOLD,
+        false,
+    );
+    assert_eq!(press, Press::Element(ItemId::Shape(1)));
+    // A marquee still takes everything it wholly contains: that is what a group is drawn with.
+    let caught = marquee_select(
+        &board,
+        Rect {
+            x: -10.0,
+            y: -10.0,
+            w: 320.0,
+            h: 320.0,
         },
-    ];
-    board.notes = vec![Note::new(60.0, 60.0, "#f6d32d", "2026/11/22".into())];
-    board
-}
-
-#[test]
-fn selecting_a_closed_shape_takes_everything_it_encloses() {
-    let board = enclosed_board(0.0);
-    let selected = selection_with_contents(&board, &[ItemId::Shape(0)]);
-    assert!(selected.contains(&ItemId::Shape(1)), "inner shape missing");
-    assert!(selected.contains(&ItemId::Shape(2)), "inner line missing");
-    assert!(selected.contains(&ItemId::Text(0)), "inner text missing");
-    assert!(selected.contains(&ItemId::Note(0)), "inner note missing");
-    assert!(
-        selected.contains(&ItemId::Stroke(0)),
-        "inner stroke missing"
     );
-    assert!(!selected.contains(&ItemId::Text(1)), "outside text taken");
-    assert!(
-        !selected.contains(&ItemId::Stroke(1)),
-        "crossing stroke taken"
-    );
-}
-
-#[test]
-fn a_rotated_container_uses_the_shape_it_draws() {
-    let board = enclosed_board(std::f32::consts::FRAC_PI_4);
-    let selected = selection_with_contents(&board, &[ItemId::Shape(0)]);
-    assert!(selected.contains(&ItemId::Text(0)));
-}
-
-#[test]
-fn shift_removing_a_container_removes_its_contents() {
-    let board = enclosed_board(0.0);
-    let held = toggle_selection_with_contents(&board, &[], ItemId::Shape(0));
-    assert!(held.len() > 1);
-    let removed = toggle_selection_with_contents(&board, &held, ItemId::Shape(0));
-    assert!(
-        removed.is_empty(),
-        "contents stayed after the container went"
-    );
+    assert_eq!(caught.len(), 2, "{caught:?}");
 }
 
 #[test]
@@ -2806,7 +2784,7 @@ fn a_bound_label_is_removed_with_its_container_and_copied_with_it() {
     assert_eq!(board.bound_text(7).map(|t| t.text.as_str()), Some("label"));
     assert_eq!(board.text_wrap(&board.texts[0]), Some(184.0));
     assert!(
-        !selection_with_contents(&board, &[ItemId::Shape(0)]).contains(&ItemId::Text(0)),
+        board.texts[0].container == Some(7),
         "a bound label was selected as a second object"
     );
 
