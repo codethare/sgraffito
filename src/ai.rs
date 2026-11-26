@@ -1456,6 +1456,22 @@ const EDGE_ROUNDNESS: u8 = 2;
 /// How much one axis has to dominate the other before an edge is routed as an elbow rather than a
 /// straight diagonal: root-to-subject at 45° is a diagonal, a stack of attributes is an elbow.
 const ELBOW_RATIO: f32 = 1.6;
+/// How far a decomposition's edge reaches sideways before it turns, as a fraction of the corridor it
+/// crosses: at half, the curve keeps its S instead of bulging into a block.
+const COLUMN_HANDLE: f32 = 0.5;
+/// How many pieces a decomposition's S is sampled into. The curve is drawn through these points, so they
+/// are the shape: a handful is enough for a curve that is smooth at both ends.
+const COLUMN_SAMPLES: usize = 6;
+
+/// A point on the cubic through `a`, `b`, `c` and `d`.
+fn cubic(a: [f32; 2], b: [f32; 2], c: [f32; 2], d: [f32; 2], t: f32) -> [f32; 2] {
+    let u = 1.0 - t;
+    let (w0, w1, w2, w3) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+    [
+        w0 * a[0] + w1 * b[0] + w2 * c[0] + w3 * d[0],
+        w0 * a[1] + w1 * b[1] + w2 * c[1] + w3 * d[1],
+    ]
+}
 /// How far a fishbone's bones rise off its spine, how far apart they sit, and how far their own
 /// children step away from them.
 const FISH_RISE: f32 = 120.0;
@@ -1555,7 +1571,19 @@ impl Route {
         let down = gap_mid(from[1], parent.size[1], to[1], child.size[1]);
         let bends = match self {
             Route::Direct => Vec::new(),
-            Route::Columns => vec![[across, from[1]], [across, to[1]]],
+            Route::Columns => {
+                // The S a mind map draws: it leaves the parent's edge and lands on the child's edge
+                // horizontally, one curve per edge. Siblings fan out of the same point instead of sharing
+                // one corridor, which would draw the same line three times and knot it at the parent.
+                let ahead = if to[0] >= from[0] { 1.0 } else { -1.0 };
+                let start = [from[0] + ahead * parent.size[0] / 2.0, from[1]];
+                let end = [to[0] - ahead * child.size[0] / 2.0, to[1]];
+                let handle = (end[0] - start[0]) * COLUMN_HANDLE;
+                let (one, two) = ([start[0] + handle, start[1]], [end[0] - handle, end[1]]);
+                (1..COLUMN_SAMPLES)
+                    .map(|step| cubic(start, one, two, end, step as f32 / COLUMN_SAMPLES as f32))
+                    .collect()
+            }
             // An elbow reads as a route when the two sit mostly above one another; at an angle it is a
             // detour, and the curve of a straight line is what says the two are joined.
             Route::ByAxis => {
@@ -2983,10 +3011,12 @@ mod tests {
         assert_eq!(edges.len(), 5, "one edge per parent-child pair");
         for edge in &edges {
             assert_eq!(edge.roundness, Some(2), "an edge is drawn curved");
-            assert_eq!(
-                edge.points.len(),
-                2,
-                "a tree edge bends in the gap between columns"
+            // The S is drawn through sampled points, so an edge that crosses columns carries several:
+            // it is a curve of its own rather than a chord shared with its siblings.
+            assert!(
+                edge.points.len() >= 2,
+                "a tree edge has a shape of its own: {:?}",
+                edge.points
             );
             let at = edge.attach[0].expect("an edge leaves its parent").at;
             assert!(at[0].abs() > at[1].abs(), "it leaves sideways: {at:?}");
