@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use sgraffito::ai::{
     AiSettings, Dir, MAX_MINDMAP_NODES, MapKind, MindNode, Syntax, extract_mermaid, fit_kind,
-    inferred_kind, layout_directive, layout_mindmap, parse_diagram, parse_mindmap, resolve_with,
-    status_message,
+    inferred_kind, layout_directive, layout_mindmap, next_view, parse_diagram, parse_mindmap,
+    resolve_with, status_message, view_cycle,
 };
 use sgraffito::canvas::ShapeKind;
 use sgraffito::config::{AiConfig, Config, DEFAULT_AI_MODEL};
@@ -692,6 +692,31 @@ fn an_arrangement_that_cannot_be_drawn_falls_back_to_the_ring() {
         fit_kind(MapKind::Fishbone, &two_children),
         MapKind::Fishbone
     );
+    assert_eq!(
+        fit_kind(MapKind::Grid, &leaf("root")),
+        MapKind::Radial,
+        "a table needs cells to wrap"
+    );
+    assert_eq!(fit_kind(MapKind::Grid, &two_children), MapKind::Grid);
+}
+
+#[test]
+fn the_view_cycle_starts_with_the_reading_the_structure_suggests() {
+    let wide = tree(
+        "root",
+        (0..7).map(|index| leaf(&format!("part {index}"))).collect(),
+    );
+    let views = view_cycle(&wide);
+    assert_eq!(views[0], MapKind::Grid, "a wide level reads as a table");
+    assert!(views.contains(&MapKind::Grid));
+    assert_eq!(
+        next_view(Some(MapKind::Grid), &wide),
+        MapKind::Tree(Dir::Right),
+        "switching walks out from the natural view"
+    );
+    let hierarchy = tree("root", vec![tree("a", vec![tree("a1", vec![leaf("a2")])])]);
+    assert_eq!(view_cycle(&hierarchy)[0], MapKind::Tree(Dir::Right));
+    assert!(view_cycle(&hierarchy).contains(&MapKind::Grid));
 }
 
 #[test]

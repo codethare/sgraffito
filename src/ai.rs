@@ -1865,16 +1865,21 @@ pub fn rule_kinds(tree: &MindNode, hint: Option<MapKind>) -> Vec<MapKind> {
 /// two readings of a decomposition, then the ring, then the semantic shapes it supports. Every one of
 /// them is drawn from the same tree — switching asks the model nothing.
 pub fn view_cycle(tree: &MindNode) -> Vec<MapKind> {
-    let mut views = vec![
+    // The reading the structure itself suggests comes first, then every other shape this structure can
+    // actually take: switching walks from the natural view outwards instead of from a fixed list.
+    let mut views = rule_kinds(tree, None);
+    for kind in [
         MapKind::Tree(Dir::Right),
         MapKind::Tree(Dir::Down),
         MapKind::Radial,
-    ];
-    if tree.children.len() == 2 {
-        views.push(MapKind::Compare);
-    }
-    if !tree.children.is_empty() {
-        views.push(MapKind::Fishbone);
+        MapKind::Grid,
+        MapKind::Compare,
+        MapKind::Fishbone,
+    ] {
+        let kind = fit_kind(kind, tree);
+        if !views.contains(&kind) {
+            views.push(kind);
+        }
     }
     views
 }
@@ -1895,7 +1900,7 @@ pub fn next_view(current: Option<MapKind>, tree: &MindNode) -> MapKind {
 pub fn fit_kind(kind: MapKind, tree: &MindNode) -> MapKind {
     match kind {
         MapKind::Compare if tree.children.len() != 2 => MapKind::Radial,
-        MapKind::Fishbone if tree.children.is_empty() => MapKind::Radial,
+        MapKind::Grid | MapKind::Fishbone if tree.children.is_empty() => MapKind::Radial,
         other => other,
     }
 }
