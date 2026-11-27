@@ -600,6 +600,21 @@ pub enum ItemId {
     Note(usize),
 }
 
+/// One word of a board found by a search: the element, and where in its preview the match sits.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchHit {
+    pub item: ItemId,
+    /// The line to show: the match with a window of its own line around it, `…` where it was clipped.
+    pub preview: String,
+    /// The matched run in `preview`, in characters — not bytes, because a board holds CJK.
+    pub at: usize,
+    pub len: usize,
+}
+
+/// How many characters of lead-in and follow-on a preview keeps around a match. Characters rather than
+/// words because a Chinese line has no spaces to count words by.
+pub const PREVIEW_CHARS: usize = 24;
+
 /// Annotations belonging to a single board: what is drawn on it, however many screens show it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Board {
@@ -1349,6 +1364,35 @@ impl Board {
         (ids, box_)
     }
 
+    /// The elements whose text holds `query`, case-insensitively: texts first, then notes, each in the
+    /// order the board draws them. One hit per element, on its first match — a card beside the rail has
+    /// a handful of rows, and a note that says the same word three times should not spend three of them.
+    pub fn search(&self, query: &str) -> Vec<SearchHit> {
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let needle = query.to_lowercase();
+        let mut hits = Vec::new();
+        let mut push = |item: ItemId, text: &str| {
+            if let Some((at, len)) = first_match(text, &needle) {
+                let (preview, at) = preview_around(text, at, len);
+                hits.push(SearchHit {
+                    item,
+                    preview,
+                    at,
+                    len,
+                });
+            }
+        };
+        for (index, text) in self.texts.iter().enumerate() {
+            push(ItemId::Text(index), &text.text);
+        }
+        for (index, note) in self.notes.iter().enumerate() {
+            push(ItemId::Note(index), &note.text);
+        }
+        hits
+    }
+
     /// Give every closed shape `items` names this inside colour, `None` clearing it, and return the box
     /// they occupy. A line and an arrow have no inside, and text and notes are their own colour rather
     /// than a container's, so a fill pick leaves them alone; the indices are left alone either way.
@@ -1522,6 +1566,38 @@ fn union_into(acc: &mut Option<Rect>, box_: Option<Rect>) {
         (Some(a), Some(b)) => Some(a.union(b)),
         (a, b) => a.or(b),
     };
+}
+
+/// The first case-insensitive occurrence of `needle` (already lowercased) in `text`, as a character
+/// range. The search runs on a lowered copy, which can be longer than the text (`İ` lowercases to two
+/// characters), so a range that runs past the end is no match rather than a panic.
+fn first_match(text: &str, needle: &str) -> Option<(usize, usize)> {
+    let lower = text.to_lowercase();
+    let byte = lower.find(needle)?;
+    let at = lower[..byte].chars().count();
+    let len = needle.chars().count();
+    (at + len <= text.chars().count()).then_some((at, len))
+}
+
+/// The matched run with a window of its own line around it, and where the run sits in that window.
+fn preview_around(text: &str, at: usize, len: usize) -> (String, usize) {
+    let chars: Vec<char> = text.chars().collect();
+    let from = at.saturating_sub(PREVIEW_CHARS);
+    let to = (at + len + PREVIEW_CHARS).min(chars.len());
+    let mut preview = String::new();
+    if from > 0 {
+        preview.push('…');
+    }
+    let before: String = chars[from..at].iter().collect();
+    preview.push_str(before.trim_start());
+    let at_preview = preview.chars().count();
+    preview.extend(&chars[at..at + len]);
+    let after: String = chars[at + len..to].iter().collect();
+    preview.push_str(after.trim_end());
+    if to < chars.len() {
+        preview.push('…');
+    }
+    (preview, at_preview)
 }
 
 /// Remove `indices` from `list`, highest first, skipping any that are past its end.

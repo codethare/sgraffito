@@ -1624,6 +1624,58 @@ fn a_fill_recolours_only_the_closed_shapes_it_holds() {
     );
 }
 
+/// The byte offset of a character index, for slicing a preview by characters the way the board
+/// counts them.
+fn char_bytes(s: &str, chars: usize) -> usize {
+    s.char_indices()
+        .nth(chars)
+        .map_or(s.len(), |(byte, _)| byte)
+}
+
+#[test]
+fn a_search_finds_every_word_on_the_board_and_names_the_match() {
+    use sgraffito::canvas::Note;
+    let mut a = Board {
+        texts: vec![
+            text(20.0, 80.0, "buy Milk and eggs"),
+            text(20.0, 200.0, "nothing here"),
+        ],
+        notes: vec![{
+            let mut note = Note::new(100.0, 20.0, PALETTE[1], "2026/10/14".into());
+            note.text = "milk first".into();
+            note
+        }],
+        ..Board::default()
+    };
+    let hits = a.search("MILK");
+    // Texts come before notes, and only the elements that hold the word are listed.
+    assert_eq!(hits.len(), 2, "{hits:?}");
+    assert_eq!(hits[0].item, ItemId::Text(0));
+    assert_eq!(hits[1].item, ItemId::Note(0));
+    // `at` and `len` name the matched characters of the preview, case-insensitively.
+    let preview = hits[0].preview.clone();
+    let (at, len) = (hits[0].at, hits[0].len);
+    assert_eq!(len, 4);
+    assert_eq!(
+        &preview[char_bytes(&preview, at)..char_bytes(&preview, at + len)],
+        "Milk"
+    );
+    // A query that matches nothing, and the empty query, list nothing.
+    assert!(a.search("yogurt").is_empty());
+    assert!(a.search("").is_empty());
+    // The preview stays short: a long line is clipped around the match with an ellipsis.
+    a.texts[0].text = format!("{}milk{}", "word ".repeat(40), " tail".repeat(40));
+    let hits = a.search("milk");
+    assert!(hits[0].preview.chars().count() < 80, "{}", hits[0].preview);
+    assert!(hits[0].preview.contains('…'), "{}", hits[0].preview);
+    let preview = hits[0].preview.clone();
+    let (at, len) = (hits[0].at, hits[0].len);
+    assert_eq!(
+        &preview[char_bytes(&preview, at)..char_bytes(&preview, at + len)],
+        "milk"
+    );
+}
+
 #[test]
 fn a_copy_leaves_the_original_in_place_and_keeps_every_index() {
     use sgraffito::canvas::{Note, ShapeKind};
