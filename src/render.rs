@@ -3326,12 +3326,13 @@ impl Renderer {
                 }
             }
         }
-        self.draw_color_strip(pixmap, &pill, toolbar, origin, position, scale);
+        self.draw_palette_strip(pixmap, &pill, toolbar, origin, position, scale);
     }
 
-    /// The four colours that are not in hand, beside the one swatch that is. The strip is one card,
-    /// like the rail, and each chip keeps the number of its colour key.
-    fn draw_color_strip(
+    /// The choices the swatch is not showing, beside the swatch that is. The strip is one card, like
+    /// the rail; a stroke chip keeps the number of its colour key, and the fill strip's last chip is the
+    /// crossed square that says no fill.
+    fn draw_palette_strip(
         &mut self,
         pixmap: &mut PixmapMut,
         pill: &ToolbarPill,
@@ -3340,7 +3341,7 @@ impl Renderer {
         position: ToolbarPosition,
         scale: f32,
     ) {
-        let Some(strip) = color_strip(pill, toolbar, origin, position) else {
+        let Some(strip) = palette_strip(pill, toolbar, origin, position) else {
             return;
         };
         let scaled = |r: Rect| Rect {
@@ -3392,36 +3393,48 @@ impl Renderer {
                 w: TOOLBAR_BLOCK,
                 h: TOOLBAR_BLOCK,
             });
-            if toolbar.hover == Some(ToolbarAction::Color(*index)) {
-                round_rect(
-                    pixmap,
-                    rect.grown(2.0 * scale),
-                    TOOLBAR_RADIUS * scale,
-                    parse_hex(TOOLBAR_HOVER_FILL),
-                    None,
-                );
-            }
-            round_rect(
+            let action = chip_action(strip.palette, *index);
+            draw_chip(
                 pixmap,
                 rect,
-                TOOLBAR_RADIUS * scale,
-                parse_hex(&colors[*index]),
-                Some((parse_hex(TOOLBAR_SWATCH_EDGE), TOOLBAR_HAIRLINE * scale)),
+                scale,
+                index.map(|index| colors[index].as_str()),
+                false,
+                toolbar.hover == Some(action),
             );
-            let key = ["1", "2", "3", "4", "5"]
-                .get(*index)
-                .copied()
-                .unwrap_or("?");
-            self.draw_badge(pixmap, rect, scale, key, note_ink(&colors[*index]));
+            // Only the stroke palette has keys: a fill colour is picked from this card alone.
+            if strip.palette == Palette::Stroke
+                && let Some(index) = index
+            {
+                let key = ["1", "2", "3", "4", "5"]
+                    .get(*index)
+                    .copied()
+                    .unwrap_or("?");
+                self.draw_badge(pixmap, rect, scale, key, note_ink(&colors[*index]));
+            }
         }
         if grow < 0.95 {
             return;
         }
-        let Some(ToolbarAction::Color(index)) = toolbar.hover else {
+        let Some((index, _)) = strip
+            .chips
+            .iter()
+            .find(|(index, _)| toolbar.hover == Some(chip_action(strip.palette, *index)))
+        else {
             return;
         };
-        let key = ["1", "2", "3", "4", "5"].get(index).copied().unwrap_or("?");
-        let label = format!("colour {} ({key})", index + 1);
+        let label = match (strip.palette, index) {
+            (Palette::Stroke, Some(index)) => {
+                let key = ["1", "2", "3", "4", "5"]
+                    .get(*index)
+                    .copied()
+                    .unwrap_or("?");
+                format!("colour {} ({key})", index + 1)
+            }
+            (Palette::Fill, Some(index)) => format!("fill colour {}", index + 1),
+            (Palette::Fill, None) => "no fill".to_string(),
+            (Palette::Stroke, None) => return,
+        };
         let width = self.text_width(&label, TOOLBAR_TEXT_SIZE) + 2.0 * TOOLBAR_LABEL_PAD;
         let surface = (
             pixmap.width() as f32 / scale,
@@ -3723,7 +3736,7 @@ impl Renderer {
         let position = config::current().toolbar;
         let pill = self.cached_toolbar_pill(toolbar, (width, height), position)?;
         let origin = position.origin((width, height), pill.column);
-        let strip = color_strip(&pill, toolbar, origin, position)?;
+        let strip = palette_strip(&pill, toolbar, origin, position)?;
         // Include the short corridor from the active swatch into the card, so crossing it
         // does not fold the strip before the pointer reaches the first colour.
         let reach = TOOLBAR_PAD + TOOLBAR_GAP;
@@ -3733,7 +3746,7 @@ impl Renderer {
             w: strip.plate.w + 2.0 * reach,
             h: strip.plate.h + 2.0 * reach,
         };
-        plate.contains(x, y).then_some(Palette::Stroke)
+        plate.contains(x, y).then_some(strip.palette)
     }
 
     /// The toolbar block under a pointer position for a rail docked to `position`. The public
@@ -3763,10 +3776,10 @@ impl Renderer {
         let pill = self.cached_toolbar_pill(toolbar, (width, height), position)?;
         let origin = position.origin((width, height), pill.column);
         let (along, across) = position.to_local(origin, x, y);
-        if let Some(strip) = color_strip(&pill, toolbar, origin, position)
+        if let Some(strip) = palette_strip(&pill, toolbar, origin, position)
             && let Some((index, _)) = strip.chips.iter().find(|(_, rect)| rect.contains(x, y))
         {
-            return Some(ToolbarAction::Color(*index));
+            return Some(chip_action(strip.palette, *index));
         }
         if along < 0.0 || across < 0.0 || along >= pill.reach {
             return None;
@@ -5262,15 +5275,19 @@ fn draw_card_shadow(pixmap: &mut PixmapMut, rect: Rect, radius: f32, scale: f32)
     );
 }
 
-/// The other colours, beside the one swatch that stays on the rail. The row is always horizontal
-/// on screen, whichever edge the rail is docked to.
+/// The choices beside the swatch that stays on the rail. The row is always horizontal on screen,
+/// whichever edge the rail is docked to.
 #[derive(Clone)]
-struct ColorStrip {
+struct PaletteStrip {
+    /// Which swatch opened this card, and so which action a chip carries.
+    palette: Palette,
     plate: Rect,
-    chips: Vec<(usize, Rect)>,
+    /// The choices the swatch is not showing, palette index order, with `None` — no fill — last when
+    /// the fill palette is open. A stroke palette never has one: a stroke is always a colour.
+    chips: Vec<(Option<usize>, Rect)>,
 }
 
-fn color_strip_plate(active: Rect, position: ToolbarPosition, count: usize) -> Rect {
+fn palette_strip_plate(active: Rect, position: ToolbarPosition, count: usize) -> Rect {
     let row = count.saturating_sub(1) as f32 * (TOOLBAR_BLOCK + TOOLBAR_GAP) - TOOLBAR_GAP;
     let plate_w = row + 2.0 * TOOLBAR_PAD;
     let plate_h = TOOLBAR_BLOCK + 2.0 * TOOLBAR_PAD;
@@ -5300,22 +5317,39 @@ fn color_strip_plate(active: Rect, position: ToolbarPosition, count: usize) -> R
     }
 }
 
-fn color_strip(
+/// The action a chip of this palette carries. A stroke is always a colour, so the stroke palette has no
+/// no-colour chip to name.
+fn chip_action(palette: Palette, index: Option<usize>) -> ToolbarAction {
+    match palette {
+        Palette::Stroke => {
+            ToolbarAction::Color(index.expect("a stroke palette has no no-colour chip"))
+        }
+        Palette::Fill => ToolbarAction::FillColor(index),
+    }
+}
+
+fn palette_strip(
     pill: &ToolbarPill,
     toolbar: &Toolbar,
     origin: (f32, f32),
     position: ToolbarPosition,
-) -> Option<ColorStrip> {
-    let _palette = toolbar.open?;
+) -> Option<PaletteStrip> {
+    let palette = toolbar.open?;
     let colors = &config::current().colors;
-    let active = colors
-        .iter()
-        .position(|color| color == &toolbar.color)
-        .unwrap_or(0);
+    let (swatch, active) = match palette {
+        Palette::Stroke => {
+            let active = colors
+                .iter()
+                .position(|color| color == &toolbar.color)
+                .unwrap_or(0);
+            (ToolbarAction::Color(active), Some(active))
+        }
+        Palette::Fill => (ToolbarAction::FillColor(toolbar.fill), toolbar.fill),
+    };
     let control = pill
         .controls
         .iter()
-        .find(|control| control.block.action == Some(ToolbarAction::Color(active)))?;
+        .find(|control| control.block.action == Some(swatch))?;
     let active_rect = position.place(
         origin,
         RailRect {
@@ -5325,16 +5359,22 @@ fn color_strip(
             across_extent: TOOLBAR_BLOCK,
         },
     );
-    let plate = color_strip_plate(active_rect, position, colors.len());
+    // The choices, the one in hand included: the plate is sized for all of them and the chip in hand
+    // is the swatch on the rail, so it is not drawn again in the row.
+    let mut choices: Vec<Option<usize>> = (0..colors.len()).map(Some).collect();
+    if palette == Palette::Fill {
+        choices.push(None);
+    }
+    let plate = palette_strip_plate(active_rect, position, choices.len());
     let mut chips = Vec::new();
     let mut chip_x = plate.x + TOOLBAR_PAD;
     let chip_y = plate.y + TOOLBAR_PAD;
-    for index in 0..colors.len() {
-        if index == active {
+    for choice in choices {
+        if choice == active {
             continue;
         }
         chips.push((
-            index,
+            choice,
             Rect {
                 x: chip_x,
                 y: chip_y,
@@ -5344,7 +5384,11 @@ fn color_strip(
         ));
         chip_x += TOOLBAR_BLOCK + TOOLBAR_GAP;
     }
-    Some(ColorStrip { plate, chips })
+    Some(PaletteStrip {
+        palette,
+        plate,
+        chips,
+    })
 }
 
 /// The room a stretched block may take/// The room a stretched block may take, from the rail's own edge: bounded by the output's width and by the
@@ -5431,22 +5475,31 @@ pub fn cards_bounds(surface: (f32, f32), position: CardPosition) -> Rect {
     }
 }
 
-/// The card behind the colour flyout, in output coordinates. The swatch stays the first rail block,
-/// so its position is fixed and this can be measured without a renderer.
+/// The card behind a colour flyout, in output coordinates, covering whichever swatch is open. The two
+/// swatches stay the rail's first two blocks, so their positions are fixed and this can be measured
+/// without a renderer; the fill card is one block further along and one chip wider, so the box that
+/// damages the rail has to hold both or a closing fill strip leaves pixels behind.
 pub fn color_strip_bounds(position: ToolbarPosition, surface: (f32, f32), column: f32) -> Rect {
     let origin = position.origin(surface, column);
-    let active = position.place(
-        origin,
-        RailRect {
-            along: TOOLBAR_PAD,
-            across: 0.0,
-            along_extent: TOOLBAR_BLOCK,
-            across_extent: TOOLBAR_BLOCK,
-        },
+    let swatch = |along: f32| {
+        position.place(
+            origin,
+            RailRect {
+                along,
+                across: 0.0,
+                along_extent: TOOLBAR_BLOCK,
+                across_extent: TOOLBAR_BLOCK,
+            },
+        )
+    };
+    let colors = config::current().colors.len();
+    let stroke = palette_strip_plate(swatch(TOOLBAR_PAD), position, colors);
+    let fill = palette_strip_plate(
+        swatch(TOOLBAR_PAD + TOOLBAR_BLOCK + TOOLBAR_GAP),
+        position,
+        colors + 1,
     );
-    let plate = color_strip_plate(active, position, config::current().colors.len());
-    // The spring overshoots a little and the hover label may sit on either side; reserve both so a
-    // closing strip leaves no pixels behind.
+    let plate = stroke.union(fill);
     plate.union(Rect {
         x: plate.x - 210.0,
         y: plate.y,
@@ -5902,9 +5955,7 @@ fn caret_geometry(prepared: &PreparedText, at: usize, preedit_len: usize) -> Car
 /// A rounded rectangle with a fill and an optional hairline edge, in device pixels. The
 /// corners are cubic approximations of a circle, so a radius of half the height is a real
 /// capsule.
-/// The face of a colour swatch: the chip keeps its place and the capsule unfurls around it. `colour` is
-/// `None` for the fill swatch with no fill in hand, which draws the block's own surface crossed out —
-/// the one state a colour cannot show for itself.
+/// The face of a swatch block: the chip keeps its place and the capsule unfurls around it.
 fn draw_swatch(
     pixmap: &mut PixmapMut,
     control: &Control,
@@ -5928,6 +5979,19 @@ fn draw_swatch(
             Some((parse_hex(TOOLBAR_BLOCK_EDGE), TOOLBAR_HAIRLINE * scale)),
         );
     }
+    draw_chip(pixmap, square, scale, colour, control.block.active, hovered);
+}
+
+/// One colour chip: the square, the edge that marks it, and — for no fill — the slash that says so.
+/// The rail's swatches and the strip's chips are this same face, which is why they cannot drift apart.
+fn draw_chip(
+    pixmap: &mut PixmapMut,
+    square: Rect,
+    scale: f32,
+    colour: Option<&str>,
+    active: bool,
+    hovered: bool,
+) {
     if hovered {
         round_rect(
             pixmap,
@@ -5947,16 +6011,12 @@ fn draw_swatch(
         TOOLBAR_RADIUS * scale,
         ink,
         Some((
-            parse_hex(if control.block.active {
+            parse_hex(if active {
                 TOOLBAR_ACCENT
             } else {
                 TOOLBAR_SWATCH_EDGE
             }),
-            if control.block.active {
-                2.0
-            } else {
-                TOOLBAR_HAIRLINE
-            } * scale,
+            if active { 2.0 } else { TOOLBAR_HAIRLINE } * scale,
         )),
     );
     if colour.is_some() {
@@ -9673,7 +9733,7 @@ mod tests {
     }
 
     #[test]
-    fn the_colour_strip_shows_only_the_active_chip_until_opened() {
+    fn the_stroke_strip_shows_only_the_active_chip_until_opened() {
         let mut toolbar = crate::render::tests::rail_for_legend();
         let mut renderer = Renderer::new();
         let surface = (900.0, 1000.0);
@@ -9688,7 +9748,7 @@ mod tests {
         toolbar.open = Some(Palette::Stroke);
         let open = renderer.toolbar_pill(&toolbar, surface, ToolbarPosition::Left);
         let origin = ToolbarPosition::Left.origin(surface, open.column);
-        let strip = color_strip(&open, &toolbar, origin, ToolbarPosition::Left)
+        let strip = palette_strip(&open, &toolbar, origin, ToolbarPosition::Left)
             .expect("the opened strip is missing");
         assert_eq!(strip.chips.len(), 4);
         let first = strip.chips[0].1;
@@ -9710,7 +9770,9 @@ mod tests {
                     x,
                     y
                 ),
-                Some(ToolbarAction::Color(*index))
+                Some(ToolbarAction::Color(
+                    index.expect("a stroke chip is a colour")
+                ))
             );
         }
         // The gaps and padding are part of the open card too: only the card edge folds it.
@@ -9779,5 +9841,54 @@ mod tests {
         assert_eq!(blocks[1].mark, Mark::Fill(Some(1)));
         assert_eq!(blocks[1].label, "fill colour 2");
         assert!(blocks[1].active, "a fill in hand carries no accent");
+    }
+
+    /// The fill strip is the five choices the swatch is not showing: the four other colours and the
+    /// crossed-out square, which always comes last. A stroke strip has no such entry, because a stroke is
+    /// always a colour.
+    #[test]
+    fn the_fill_strip_offers_four_colours_and_no_fill() {
+        let mut toolbar = rail_for_legend();
+        toolbar.fill = Some(0);
+        toolbar.open = Some(Palette::Fill);
+        let mut renderer = Renderer::new();
+        let surface = (900.0, 1000.0);
+        let pill = renderer.toolbar_pill(&toolbar, surface, ToolbarPosition::Left);
+        let origin = ToolbarPosition::Left.origin(surface, pill.column);
+        let strip = palette_strip(&pill, &toolbar, origin, ToolbarPosition::Left)
+            .expect("the opened fill strip is missing");
+        assert_eq!(strip.palette, Palette::Fill);
+        assert_eq!(strip.chips.len(), 5);
+        let picked: Vec<_> = strip.chips.iter().map(|(index, _)| *index).collect();
+        assert_eq!(picked, vec![Some(1), Some(2), Some(3), Some(4), None]);
+        for (index, rect) in &strip.chips {
+            let hit = renderer.toolbar_hit_at(
+                ToolbarPosition::Left,
+                &toolbar,
+                surface.0,
+                surface.1,
+                rect.x + rect.w / 2.0,
+                rect.y + rect.h / 2.0,
+            );
+            assert_eq!(hit, Some(ToolbarAction::FillColor(*index)));
+        }
+        let gap = strip.chips[0].1.x + TOOLBAR_BLOCK + TOOLBAR_GAP / 2.0;
+        assert_eq!(
+            renderer.toolbar_over_palette(&toolbar, surface.0, surface.1, gap, strip.plate.y + 4.0),
+            Some(Palette::Fill)
+        );
+        // The anchor is the fill swatch, not the stroke one: the card opens beside the block it belongs
+        // to, one row along the rail past the stroke swatch it sits under.
+        let stroke = rail_for_legend();
+        let mut stroke_toolbar = stroke.clone();
+        stroke_toolbar.open = Some(Palette::Stroke);
+        let pill = renderer.toolbar_pill(&stroke_toolbar, surface, ToolbarPosition::Left);
+        let origin = ToolbarPosition::Left.origin(surface, pill.column);
+        let stroke_strip = palette_strip(&pill, &stroke_toolbar, origin, ToolbarPosition::Left)
+            .expect("the opened stroke strip is missing");
+        assert!(
+            strip.plate.y > stroke_strip.plate.y,
+            "the fill strip is not under its own swatch"
+        );
     }
 }
