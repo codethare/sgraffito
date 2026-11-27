@@ -329,6 +329,8 @@ pub(crate) const SEARCH_WINDOW: usize = 6;
 pub struct Rename {
     /// The row's place in the rail's list, which is stable while the keyboard is on it.
     pub(crate) index: usize,
+    /// Whether this edit makes a board instead of renaming one: the name row at the foot of the list.
+    pub(crate) new: bool,
     /// When the edit began, which is what the caret blinks from.
     pub(crate) since: Instant,
     /// The name the row had: the key the rename moves.
@@ -995,6 +997,7 @@ impl App {
                     target: self.target,
                     rename: self.rename.as_ref().map(|rename| BoardEdit {
                         index: rename.index,
+                        new: rename.new,
                         text: rename.text.text.clone(),
                         cursor: rename.text.cursor,
                         preedit: rename.preedit.clone(),
@@ -2550,6 +2553,7 @@ impl App {
         self.delete_confirm = None;
         self.rename = Some(Rename {
             index,
+            new: false,
             since: Instant::now(),
             board: name.to_string(),
             text: TextBuffer::new(name),
@@ -2560,6 +2564,38 @@ impl App {
         self.refresh_toolbar();
     }
 
+    /// Start naming a new board: the panel's foot row becomes the field, and the board is made when the
+    /// name is taken. Cancelling makes nothing at all, and an offered name that is kept makes exactly the
+    /// board the old `new board` made.
+    pub(crate) fn begin_new_board(&mut self) {
+        self.end_text_edit();
+        self.commit_transient_drawing();
+        self.delete_confirm = None;
+        self.rename = Some(Rename {
+            index: self.doc.boards.len(),
+            new: true,
+            since: Instant::now(),
+            board: String::new(),
+            text: TextBuffer::new(self.doc.next_board_name()),
+            preedit: String::new(),
+        });
+        self.dirty = true;
+        self.sync_text_input();
+        self.refresh_toolbar();
+    }
+
+    /// A new board is offered the next free `Board N`, and the first character typed replaces that offer:
+    /// taking it is `Enter`, and appending to it makes a name nobody asked for.
+    pub(crate) fn drop_offered_board_name(&mut self) {
+        let offered = self.doc.next_board_name();
+        if let Some(rename) = self.rename.as_mut()
+            && rename.new
+            && rename.text.text == offered
+        {
+            rename.text = TextBuffer::default();
+        }
+    }
+
     /// Take the edited name if the document can hold it; anything else leaves the board as it was. A
     /// refused name is dropped rather than reported: the rail has nowhere to say why.
     pub(crate) fn commit_rename(&mut self) {
@@ -2567,7 +2603,17 @@ impl App {
             return;
         };
         let name = rename.text.text.trim().to_string();
-        if name != rename.board {
+        if rename.new {
+            // The board is made here, with the name it was given: the row said `new board`, so the name
+            // comes first and nothing exists until it is taken.
+            if self.doc.add_board(&name) {
+                self.store.mark_dirty(Instant::now());
+                log(&format!("board created: {name}"));
+                let acting = self.keyboard_focus;
+                self.switch_board(acting, &name);
+                self.close_panels();
+            }
+        } else if name != rename.board {
             self.rename_board(&rename.board, &name);
         }
         self.dirty = true;

@@ -470,6 +470,7 @@ impl KeyboardHandler for App {
                         EditAction::Paste => self.paste(),
                         EditAction::Local => {
                             if let Some(text) = event.utf8 {
+                                self.drop_offered_board_name();
                                 self.edit_buffer(|b| b.insert(&text));
                             }
                         }
@@ -616,7 +617,7 @@ impl KeyboardHandler for App {
                     }
                 }
                 BoardListKey::New => {
-                    self.new_board(Some(acting));
+                    self.begin_new_board();
                 }
             }
             return;
@@ -1610,7 +1611,7 @@ impl App {
             }
             ToolbarAction::NewBoard => {
                 self.delete_confirm = None;
-                self.new_board(acting);
+                self.begin_new_board();
             }
             // The X asks first: the row itself becomes the question, and nothing is removed until the
             // `yes` button that replaces the X is pressed.

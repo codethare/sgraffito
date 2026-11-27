@@ -3838,15 +3838,32 @@ impl Doc {
     /// Create an empty board named `Board N` for the smallest `N` no board holds, without selecting it.
     /// The smallest free number is what keeps creating from colliding with a board loaded from the file.
     pub fn new_board(&mut self) -> String {
+        let name = self.next_board_name();
+        self.add_board(&name);
+        name
+    }
+
+    /// The first free `Board N` name: what the new board is offered before it is named.
+    pub fn next_board_name(&self) -> String {
         let mut n = 1;
         loop {
             let name = format!("{BOARD_PREFIX}{n}");
             if !self.boards.contains_key(&name) {
-                self.boards.insert(name.clone(), Board::default());
                 return name;
             }
             n += 1;
         }
+    }
+
+    /// Put an empty board under `name`, unless the document already holds one or the name is empty — the
+    /// same two refusals a rename makes, so a name means one thing whether it is typed into a new row or
+    /// an old one.
+    pub fn add_board(&mut self, name: &str) -> bool {
+        if name.is_empty() || self.boards.contains_key(name) {
+            return false;
+        }
+        self.boards.insert(name.to_string(), Board::default());
+        true
     }
 
     /// Remove a board with everything drawn on it, and name the board that takes its place: the first one
@@ -4054,6 +4071,9 @@ pub struct BoardRow {
 pub struct BoardEdit {
     /// The row's place in [`Toolbar::boards`].
     pub index: usize,
+    /// Whether this edit makes a board rather than moving a name: the row it is typed in is the panel's
+    /// `new board` row, not a board's.
+    pub new: bool,
     pub text: String,
     pub cursor: usize,
     pub preedit: String,

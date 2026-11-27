@@ -1009,6 +1009,9 @@ pub fn closes_panel_on_pick(action: ToolbarAction) -> bool {
         && !matches!(
             action,
             ToolbarAction::Search
+                // The foot row names a board rather than making one on the spot: the list has to stay up
+                // for the name to be typed in it, exactly as a rename keeps it up.
+                | ToolbarAction::NewBoard
                 | ToolbarAction::SizeStep(_)
                 | ToolbarAction::AskDeleteBoard(_)
                 | ToolbarAction::CancelDeleteBoard
@@ -1128,6 +1131,12 @@ fn drawer_blocks(toolbar: &Toolbar, overflow: &[Block]) -> Vec<Block> {
 fn row_label<'a>(toolbar: &'a Toolbar, row: &'a Block) -> &'a str {
     if let (Some(edit), Some(ToolbarAction::Board(index))) = (&toolbar.rename, row.action)
         && edit.index == index
+    {
+        return &edit.text;
+    }
+    // The foot row is the field while a new board is being named, so what is typed is what is read.
+    if let (Some(edit), Some(ToolbarAction::NewBoard)) = (&toolbar.rename, row.action)
+        && edit.new
     {
         return &edit.text;
     }
@@ -3359,6 +3368,11 @@ impl Renderer {
                         .rename
                         .as_ref()
                         .filter(|edit| edit.index == index)
+                        .map(|edit| (edit.cursor, edit.caret, edit.preedit.as_str())),
+                    Some(ToolbarAction::NewBoard) => toolbar
+                        .rename
+                        .as_ref()
+                        .filter(|edit| edit.new)
                         .map(|edit| (edit.cursor, edit.caret, edit.preedit.as_str())),
                     Some(ToolbarAction::Search) => toolbar
                         .search
@@ -7854,7 +7868,10 @@ mod tests {
         assert!(!closes_panel_on_pick(ToolbarAction::SizeStep(-1.0)));
         assert!(!closes_panel_on_pick(ToolbarAction::SizeStep(1.0)));
         assert!(closes_panel_on_pick(ToolbarAction::Board(0)));
-        assert!(closes_panel_on_pick(ToolbarAction::NewBoard));
+        assert!(
+            !closes_panel_on_pick(ToolbarAction::NewBoard),
+            "the foot row names a board in the list, so the list must stay up while it is typed"
+        );
         assert!(!closes_panel_on_pick(ToolbarAction::Scrim));
         assert!(!closes_panel_on_pick(ToolbarAction::Backdrop(
             Backdrop::Grid
@@ -8406,6 +8423,7 @@ mod tests {
         assert_eq!(row_label(&toolbar, &row), "laptop");
         toolbar.rename = Some(crate::canvas::BoardEdit {
             index: 0,
+            new: false,
             text: "left".into(),
             cursor: 4,
             preedit: String::new(),
@@ -8466,6 +8484,7 @@ mod tests {
             };
             toolbar.rename = text.map(|text| crate::canvas::BoardEdit {
                 index: 0,
+                new: false,
                 text: text.into(),
                 cursor: text.chars().count(),
                 preedit: String::new(),
@@ -10129,6 +10148,42 @@ mod tests {
             "the drawer owns the row"
         );
         assert!(!closes_panel_on_pick(ToolbarAction::Search));
+    }
+
+    /// `new board` names the board before it exists: the foot row reads the typed name while that edit is
+    /// open, and the row's action is still the one that started it.
+    #[test]
+    fn the_foot_row_reads_the_name_a_new_board_is_given() {
+        let mut rail = rail_for_legend();
+        rail.boards = vec![crate::canvas::BoardRow {
+            name: "office".into(),
+            current: true,
+        }];
+        let rows = board_rows(&rail, 6);
+        assert_eq!(rows.last().unwrap().action, Some(ToolbarAction::NewBoard));
+        assert_eq!(row_label(&rail, rows.last().unwrap()), "new board");
+        rail.rename = Some(crate::canvas::BoardEdit {
+            index: 1,
+            new: true,
+            text: "garden".into(),
+            cursor: 6,
+            preedit: String::new(),
+            caret: true,
+        });
+        let rows = board_rows(&rail, 6);
+        assert_eq!(row_label(&rail, rows.last().unwrap()), "garden");
+        // A rename of an existing board is the board's row, not the foot one.
+        rail.rename = Some(crate::canvas::BoardEdit {
+            index: 0,
+            new: false,
+            text: "shed".into(),
+            cursor: 4,
+            preedit: String::new(),
+            caret: true,
+        });
+        let rows = board_rows(&rail, 6);
+        assert_eq!(row_label(&rail, &rows[0]), "shed");
+        assert_eq!(row_label(&rail, rows.last().unwrap()), "new board");
     }
 
     /// The search lives in the drawer, beside `link text to board`, and states the key that opens it.

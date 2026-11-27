@@ -365,6 +365,29 @@ tools_after=$(grep -c "tool switched to" "$work/daemon.log" || true)
 [ "$tools_after" -gt "$tools" ] || fail "Esc with the boards panel open left edit mode"
 echo "  boards panel closed on Esc"
 
+# 5b2. `new board` names the board before it exists. `c` opens the list, `n` turns its foot row into the
+# field, the name typed there is read back off the foot row, and the board appears on `Enter`. The screen
+# is switched back afterwards so the stages below keep drawing on HEADLESS-1.
+"$vinject" "$layout" seq <<VINJECT
+key c
+sleep 400
+key n
+sleep 400
+key g
+key a
+key r
+key d
+key e
+key n
+sleep 400
+key Return
+sleep 1200
+VINJECT
+"$bin" boards | grep -q '^\* garden' || fail "the named board was not created and picked"
+"$bin" board HEADLESS-1 > /dev/null || fail "could not switch back to HEADLESS-1"
+sleep 1.2
+echo "  new board named first ok"
+
 # 5c. the eraser's hit test, through a pointer: arm it by its block and click the stroke away.
 # The first event of a fresh connection can be lost while the seat gains the pointer capability, and a click
 # issued immediately after the previous stage closed went missing here, so this stage waits before it clicks.

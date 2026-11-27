@@ -1632,6 +1632,26 @@ fn char_bytes(s: &str, chars: usize) -> usize {
         .map_or(s.len(), |(byte, _)| byte)
 }
 
+/// A new board is added by the name it was given, and refused exactly where a rename would be: an empty
+/// name or one already in the document.
+#[test]
+fn a_board_is_added_by_its_name_and_named_boards_are_offered() {
+    use sgraffito::canvas::Doc;
+    let mut doc = Doc::default();
+    assert_eq!(doc.next_board_name(), "Board 1");
+    assert!(doc.add_board("garden"));
+    assert!(!doc.add_board("garden"), "a name already in the document");
+    assert!(!doc.add_board("  ".trim()), "an empty name");
+    assert_eq!(
+        doc.next_board_name(),
+        "Board 1",
+        "the free name is untouched"
+    );
+    // `new_board` makes the same board it always made: the offer, kept as it stands.
+    assert_eq!(doc.new_board(), "Board 1");
+    assert_eq!(doc.next_board_name(), "Board 2");
+}
+
 #[test]
 fn a_search_finds_every_word_on_the_board_and_names_the_match() {
     use sgraffito::canvas::Note;
