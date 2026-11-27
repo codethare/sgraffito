@@ -124,6 +124,10 @@ const TOOLBAR_PLATE_FILL: &str = "#000000e6";
 const TOOLBAR_FOREGROUND: &str = "#ffffffee";
 const TOOLBAR_LABEL_TEXT: &str = "#ebebf59e";
 const TOOLBAR_SWATCH_EDGE: &str = "#ffffff4d";
+/// `#rrggbbaa`. The wash the fill swatch wears when the hand holds no fill. A swatch with nothing in it
+/// still has to read as a swatch: on the plate's black a square filled with the plate colour and crossed
+/// out looked like a disabled button rather than a colour that happens to be transparent.
+const TOOLBAR_NO_FILL_FILL: &str = "#ffffff2e";
 /// The wash a hovered button of a board's row takes. White rather than the accent: on the row of the
 /// board this screen shows the capsule is accent-filled, and an accent ring there is invisible.
 const TOOLBAR_HOVER_FILL: &str = "#ffffff3d";
@@ -6003,7 +6007,7 @@ fn draw_chip(
     }
     let ink = match colour {
         Some(colour) => parse_hex(colour),
-        None => parse_hex(TOOLBAR_BLOCK_FILL),
+        None => parse_hex(TOOLBAR_NO_FILL_FILL),
     };
     round_rect(
         pixmap,
@@ -6030,12 +6034,14 @@ fn draw_chip(
     let Some(path) = slash.finish() else {
         return;
     };
-    let c = parse_hex(TOOLBAR_LABEL_TEXT);
+    let c = parse_hex(TOOLBAR_FOREGROUND);
     let mut paint = Paint::default();
     paint.set_color_rgba8(c[0], c[1], c[2], c[3]);
     paint.anti_alias = true;
     let stroke = SkStroke {
-        width: TOOLBAR_HAIRLINE.max(1.0) * scale,
+        // Heavier than a hairline: one device pixel of the label colour vanished into a swatch's own
+        // wash, which is how the mark stopped reading as a mark.
+        width: 1.5 * TOOLBAR_HAIRLINE.max(1.0) * scale,
         line_cap: LineCap::Round,
         ..Default::default()
     };
@@ -10009,15 +10015,17 @@ mod tests {
                     assert_eq!(centre, want, "chip {index} is not its colour");
                 }
                 None => {
-                    // The square is the block surface, and the slash crosses it: the corner is that
-                    // surface and the diagonal through the middle carries the lighter stroke.
-                    let corner = pixel(&buf, rect.x + 5.0, rect.y + 5.0);
-                    let want = parse_hex(TOOLBAR_BLOCK_FILL);
-                    assert_eq!(&corner[..3], &want[..3]);
+                    // The square is a wash of foreground, and the slash crosses it: the left middle is
+                    // that wash, and the diagonal through the middle carries the lighter stroke.
+                    let wash = pixel(&buf, rect.x + 6.0, rect.y + rect.h / 2.0);
+                    assert!(
+                        (40..120).contains(&wash[0]),
+                        "the no-fill chip's wash is not a visible grey: {wash:?}"
+                    );
                     let mut lighter = 0;
                     for step in 0..(rect.w as u32) {
                         let at = pixel(&buf, rect.x + step as f32, rect.y + step as f32);
-                        if at[0] > corner[0] && at[1] > corner[1] && at[2] > corner[2] {
+                        if at[0] > wash[0] + 40 && at[1] > wash[1] + 40 && at[2] > wash[2] + 40 {
                             lighter += 1;
                         }
                     }
