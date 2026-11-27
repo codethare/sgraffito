@@ -150,6 +150,9 @@ enum Mark {
     /// The fill colour in hand, by palette index. `None` is no fill, drawn as a crossed-out square:
     /// the one face a colour cannot show for itself.
     Fill(Option<usize>),
+    /// A search result's line, split into runs: `true` marks the characters the query matched, which
+    /// the row paints in the accent instead of the label colour.
+    Hit(Vec<(String, bool)>),
     /// A value as a bare number.
     Value(String),
     /// Nothing on its face: a row of names has nothing to show but the name, and a repeated glyph beside
@@ -491,6 +494,47 @@ fn rail_candidates(toolbar: &Toolbar) -> Vec<Block> {
         gap: TOOLBAR_GROUP_GAP,
     });
     blocks
+}
+
+/// The search card: the field it is typed in, then one row per hit. The field's own text is the block's
+/// label, so the caret is measured where the same text is drawn.
+fn search_rows(toolbar: &Toolbar) -> Vec<Block> {
+    let Some(search) = &toolbar.search else {
+        return Vec::new();
+    };
+    let mut rows = vec![Block {
+        mark: Mark::None,
+        column: 1,
+        label: search.query.text.clone(),
+        action: Some(ToolbarAction::Search),
+        active: false,
+        gap: TOOLBAR_GAP,
+    }];
+    rows.extend(search.hits.iter().enumerate().map(|(index, hit)| Block {
+        mark: Mark::Hit(hit_runs(hit)),
+        column: 1,
+        label: hit.preview.clone(),
+        action: Some(ToolbarAction::SearchPick(index)),
+        active: index == search.focus,
+        gap: TOOLBAR_GAP,
+    }));
+    rows
+}
+
+/// A hit's preview split into the runs the row paints: everything before the match, the match, and the
+/// rest, dropping the empty ones.
+fn hit_runs(hit: &crate::canvas::SearchHit) -> Vec<(String, bool)> {
+    let chars: Vec<char> = hit.preview.chars().collect();
+    let at = hit.at.min(chars.len());
+    let end = (at + hit.len).min(chars.len());
+    [
+        (chars[..at].iter().collect::<String>(), false),
+        (chars[at..end].iter().collect::<String>(), true),
+        (chars[end..].iter().collect::<String>(), false),
+    ]
+    .into_iter()
+    .filter(|(text, _)| !text.is_empty())
+    .collect()
 }
 
 /// The foot of the rail: the way into the panels and the way out of edit mode. It is always on the rail
@@ -888,7 +932,9 @@ fn open_panel(
     overflow: &[Block],
     room: usize,
 ) -> Option<(ToolbarAction, Vec<Block>)> {
-    let rows = if toolbar.boards_open {
+    let rows = if toolbar.search.is_some() {
+        Some((ToolbarAction::Search, search_rows(toolbar)))
+    } else if toolbar.boards_open {
         Some((ToolbarAction::Boards, board_rows(toolbar, room)))
     } else if toolbar.size_open {
         Some((ToolbarAction::Size, size_rows(toolbar)))
@@ -921,6 +967,7 @@ pub fn picks_from_panel(action: ToolbarAction) -> bool {
                 | ToolbarAction::RenameBoard(_)
                 | ToolbarAction::SizeStep(_)
                 | ToolbarAction::Backdrop(_)
+                | ToolbarAction::SearchPick(_)
         )
 }
 
@@ -3143,7 +3190,7 @@ impl Renderer {
                                     None,
                                 );
                             }
-                            Mark::Swatch(_) | Mark::Fill(_) | Mark::None => {}
+                            Mark::Swatch(_) | Mark::Fill(_) | Mark::Hit(_) | Mark::None => {}
                         }
                     }
                 }
@@ -3207,6 +3254,42 @@ impl Renderer {
                         None,
                     );
                 }
+                // A search result paints its own line, so the characters the query matched can take the
+                // accent. The runs are laid out left to right at the same origin the row's label would
+                // use, and clipped by the same capsule edge.
+                if let Mark::Hit(runs) = &control.block.mark {
+                    let text_width = self.text_width(label, TOOLBAR_TEXT_SIZE);
+                    let mut x = label_origin(position, capsule, true, text_width);
+                    let reveal = if position == ToolbarPosition::Right {
+                        Reveal::Before(capsule.x + buttons_w)
+                    } else {
+                        Reveal::After(capsule.x + capsule.w - buttons_w)
+                    };
+                    for (text, matched) in runs {
+                        // The focused row is accent-filled, so the runs inside it take the two inks that
+                        // read on the accent: the match dark, the rest of the line white.
+                        let ink = match (*matched, control.block.active) {
+                            (true, false) => TOOLBAR_ACCENT,
+                            (true, true) => TOOLBAR_BLOCK_FILL,
+                            (false, true) => TOOLBAR_FOREGROUND,
+                            (false, false) => TOOLBAR_LABEL_TEXT,
+                        };
+                        let item =
+                            toolbar_text(x, capsule.y, TOOLBAR_BLOCK, TOOLBAR_TEXT_SIZE, ink, text);
+                        self.draw_text_with(
+                            pixmap,
+                            &item,
+                            Screen {
+                                scale,
+                                view: View::default(),
+                            },
+                            None,
+                            Some(reveal),
+                            None,
+                        );
+                        x += self.text_width(text, TOOLBAR_TEXT_SIZE);
+                    }
+                }
                 if let Some((delete, _)) = buttons {
                     let index = match control.block.action {
                         Some(ToolbarAction::Board(index)) => index,
@@ -3253,17 +3336,26 @@ impl Renderer {
                         }
                     }
                 }
-                // The caret sits after the buffer's text, and the preedit after the caret: a name is
-                // typed in its row the way a text box is typed in the canvas.
-                if let (Some(edit), Some(ToolbarAction::Board(index))) =
-                    (&toolbar.rename, control.block.action)
-                    && edit.index == index
-                {
-                    let typed: String = edit.text.chars().take(edit.cursor).collect();
+                // The caret sits after the buffer's text, and the preedit after the caret: a name — or a
+                // search query — is typed in its row the way a text box is typed in the canvas.
+                let field = match control.block.action {
+                    Some(ToolbarAction::Board(index)) => toolbar
+                        .rename
+                        .as_ref()
+                        .filter(|edit| edit.index == index)
+                        .map(|edit| (edit.cursor, edit.caret, edit.preedit.as_str())),
+                    Some(ToolbarAction::Search) => toolbar
+                        .search
+                        .as_ref()
+                        .map(|search| (search.query.cursor, search.caret, search.preedit.as_str())),
+                    _ => None,
+                };
+                if let Some((cursor, caret, preedit)) = field {
+                    let typed: String = label.chars().take(cursor).collect();
                     let text_width = self.text_width(label, TOOLBAR_TEXT_SIZE);
                     let x = label_origin(position, capsule, bare, text_width)
                         + self.text_width(&typed, TOOLBAR_TEXT_SIZE);
-                    if edit.caret {
+                    if caret {
                         let caret = Rect {
                             x: x * scale,
                             y: (capsule.y + TOOLBAR_BLOCK * 0.2) * scale,
@@ -3272,14 +3364,14 @@ impl Renderer {
                         };
                         round_rect(pixmap, caret, 0.0, parse_hex(TOOLBAR_ACCENT), None);
                     }
-                    if !edit.preedit.is_empty() {
+                    if !preedit.is_empty() {
                         let item = toolbar_text(
                             x + TOOLBAR_HAIRLINE,
                             capsule.y,
                             TOOLBAR_BLOCK,
                             TOOLBAR_TEXT_SIZE,
                             TOOLBAR_FOREGROUND,
-                            &edit.preedit,
+                            preedit,
                         );
                         let reveal = if position == ToolbarPosition::Right {
                             Reveal::Before(capsule.x)
@@ -9931,6 +10023,84 @@ mod tests {
         assert!(
             strip.plate.y > stroke_strip.plate.y,
             "the fill strip is not under its own swatch"
+        );
+    }
+
+    /// The matched characters are painted in the accent, in the hit's own row: the one thing a search card
+    /// shows that a plain list of names does not.
+    #[test]
+    fn the_matched_characters_of_a_hit_are_painted_in_the_accent() {
+        let surface = (900.0, 900.0);
+        let (w, h) = (surface.0 as u32, surface.1 as u32);
+        let mut toolbar = rail_for_legend();
+        toolbar.search = Some(crate::canvas::Search {
+            query: crate::canvas::TextBuffer::new("milk"),
+            hits: vec![crate::canvas::SearchHit {
+                item: ItemId::Text(0),
+                preview: "buy Milk and eggs".into(),
+                at: 4,
+                len: 4,
+            }],
+            // Focus on nothing, so the row under test is not accent-filled and the match's own ink is
+            // the only accent in it.
+            focus: 9,
+            ..Default::default()
+        });
+        let mut renderer = Renderer::new();
+        let pill = renderer.toolbar_pill(&toolbar, surface, ToolbarPosition::Left);
+        let origin = ToolbarPosition::Left.origin(surface, pill.column);
+        let row = pill
+            .controls
+            .iter()
+            .find(|control| control.block.action == Some(ToolbarAction::SearchPick(0)))
+            .expect("the hit has no row");
+        // The row's own block is one square; its text runs across the whole card, so the band scanned is
+        // the card's width at the row's height.
+        let card = pill.panel.expect("the search card is not open");
+        let card = ToolbarPosition::Left.place(origin, card);
+        let rect = Rect {
+            x: card.x,
+            y: ToolbarPosition::Left
+                .place(
+                    origin,
+                    RailRect {
+                        along: row.along,
+                        across: row.across,
+                        along_extent: TOOLBAR_BLOCK,
+                        across_extent: TOOLBAR_BLOCK,
+                    },
+                )
+                .y,
+            w: card.w,
+            h: TOOLBAR_BLOCK,
+        };
+        let mut buf = vec![0u8; (w * h * 4) as usize];
+        renderer.render(
+            &mut buf,
+            w,
+            h,
+            1.0,
+            View::default(),
+            &Board::default(),
+            &Overlay {
+                toolbar: Some(toolbar),
+                ..Default::default()
+            },
+            None,
+        );
+        let mut accent = 0;
+        for y in rect.y as u32..(rect.y + rect.h) as u32 {
+            for x in rect.x as u32..(rect.x + rect.w) as u32 {
+                let i = ((y * w + x) * 4) as usize;
+                let (r, g, b) = (buf[i], buf[i + 1], buf[i + 2]);
+                if b > 120 && b as u16 > r as u16 + 60 && g < 190 {
+                    accent += 1;
+                }
+            }
+        }
+        assert!(
+            accent > 4,
+            "the matched characters are not in the accent ({accent})"
         );
     }
 
