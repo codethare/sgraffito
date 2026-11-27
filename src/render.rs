@@ -1003,10 +1003,13 @@ pub fn panel_stays_open(hover: Option<ToolbarAction>, owner: Option<ToolbarActio
 pub fn closes_panel_on_pick(action: ToolbarAction) -> bool {
     // A width step and a rename work on what the panel holds rather than choosing from it, so they
     // leave it open. The delete question and its `no` do too: both replace or restore the row itself.
+    // The search is the one row that opens a card of its own, so it is not a pick out of a list either:
+    // it puts the drawer away itself, and closing here too would close the card in the same breath.
     picks_from_panel(action)
         && !matches!(
             action,
-            ToolbarAction::SizeStep(_)
+            ToolbarAction::Search
+                | ToolbarAction::SizeStep(_)
                 | ToolbarAction::AskDeleteBoard(_)
                 | ToolbarAction::CancelDeleteBoard
                 | ToolbarAction::RenameBoard(_)
@@ -10115,6 +10118,17 @@ mod tests {
             accent > 4,
             "the matched characters are not in the accent ({accent})"
         );
+    }
+
+    /// The drawer's search row opens a card of its own: it must not be handled as a pick that closes the
+    /// panel, or the card would be closed in the same call that opened it.
+    #[test]
+    fn the_search_row_is_not_a_pick_that_closes_a_panel() {
+        assert!(
+            picks_from_panel(ToolbarAction::Search),
+            "the drawer owns the row"
+        );
+        assert!(!closes_panel_on_pick(ToolbarAction::Search));
     }
 
     /// The search lives in the drawer, beside `link text to board`, and states the key that opens it.

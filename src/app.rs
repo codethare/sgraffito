@@ -1324,8 +1324,14 @@ impl App {
         self.set_more(false);
         self.set_boards(false);
         self.set_size(false);
+        // The search card is one of the rail's panels: a press that dismisses a menu dismisses it too,
+        // and the field must stop being the keyboard's sink when it goes.
+        let searched = self.search.take().is_some();
+        if searched {
+            self.sync_text_input();
+        }
         self.target = None;
-        if confirming {
+        if confirming || searched {
             self.refresh_toolbar();
         }
     }
@@ -1384,7 +1390,9 @@ impl App {
             Some(ToolbarAction::Boards)
         } else if self.size_open {
             Some(ToolbarAction::Size)
-        } else if self.more {
+        } else if self.more || self.search.is_some() {
+            // The search card is anchored to the drawer's block and behaves like its menu: a press
+            // anywhere outside puts it away.
             Some(ToolbarAction::More)
         } else {
             None
@@ -4019,8 +4027,7 @@ impl App {
             out.view = out.view.centred_on(size, centre);
             out.dirty = true;
         }
-        self.search = None;
-        self.refresh_toolbar();
+        self.close_search();
         self.dirty = true;
     }
 
