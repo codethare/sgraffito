@@ -273,6 +273,28 @@ pub fn panel_action_for_keysym(keysym: Keysym, shift: bool) -> Option<ToolbarAct
     }
 }
 
+/// What the search's field takes from the keyboard while its card is open. Everything not named here is
+/// text: the field is a text row, so `/` inside it is a character like any other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchKey {
+    Up,
+    Down,
+    Pick,
+    Close,
+}
+
+/// The search's own keys. `Backspace`, paste and the printable characters are the buffer's, and are
+/// handled by the same `edit_action` a text box uses.
+pub fn search_key(keysym: Keysym) -> Option<SearchKey> {
+    match keysym {
+        Keysym::Up => Some(SearchKey::Up),
+        Keysym::Down => Some(SearchKey::Down),
+        Keysym::Return | Keysym::KP_Enter => Some(SearchKey::Pick),
+        Keysym::Escape => Some(SearchKey::Close),
+        _ => None,
+    }
+}
+
 /// `I` opens the board's own conversation; `Shift+I` opens the one about what is selected, which is
 /// the same conversation the card under a selection opens with its `ai` control.
 pub fn ai_scope_for_keysym(keysym: Keysym, shift: bool) -> Option<crate::ai::Scope> {
@@ -494,6 +516,53 @@ impl KeyboardHandler for App {
                 }
                 return;
             }
+        }
+        // The search field takes the keyboard while its card is open, and before the text-box rule: it is
+        // a text row itself, so its own keys are read first and everything else is content.
+        if self.search.is_some() {
+            if event.keysym == Keysym::Escape && self.preedit_is_empty() {
+                self.close_search();
+                return;
+            }
+            if !self.preedit_is_empty() {
+                // A composition in flight owns the keyboard, exactly as it does in a text box.
+                return;
+            }
+            match search_key(event.keysym) {
+                Some(SearchKey::Up) => {
+                    self.nudge_search(-1.0);
+                    return;
+                }
+                Some(SearchKey::Down) => {
+                    self.nudge_search(1.0);
+                    return;
+                }
+                Some(SearchKey::Pick) => {
+                    if let Some(focus) = self.search.as_ref().map(|search| search.focus) {
+                        self.search_pick(focus);
+                    }
+                    return;
+                }
+                Some(SearchKey::Close) => {
+                    self.close_search();
+                    return;
+                }
+                None => {}
+            }
+            match edit_action(event.keysym, self.ctrl, false) {
+                EditAction::Backspace => self.edit_buffer(|buffer| {
+                    buffer.backspace();
+                }),
+                EditAction::Paste => self.paste(),
+                EditAction::Local => {
+                    if let Some(text) = event.utf8 {
+                        self.edit_buffer(|buffer| buffer.insert(&text));
+                    }
+                }
+                EditAction::EndText => self.close_search(),
+                EditAction::Newline | EditAction::Move(_) | EditAction::InputMethod => {}
+            }
+            return;
         }
         // While a text box is edited, printable characters are content, not shortcuts.
         if self.edit_target_mut().is_some() {
@@ -889,6 +958,9 @@ impl App {
     /// The buffer and preedit being typed into: a text box, a note, or a board's name. One of them at
     /// most — starting a rename ends a text edit, and a press ends a rename.
     fn edit_target_mut(&mut self) -> Option<(&mut TextBuffer, &mut String)> {
+        if let Some(search) = self.search.as_mut() {
+            return Some((&mut search.query, &mut search.preedit));
+        }
         if let Some(rename) = self.rename.as_mut() {
             return Some((&mut rename.text, &mut rename.preedit));
         }
@@ -906,6 +978,9 @@ impl App {
     }
 
     fn edit_target(&self) -> Option<(&TextBuffer, &str)> {
+        if let Some(search) = self.search.as_ref() {
+            return Some((&search.query, &search.preedit));
+        }
         if let Some(rename) = self.rename.as_ref() {
             return Some((&rename.text, &rename.preedit));
         }

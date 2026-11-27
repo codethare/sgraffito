@@ -510,14 +510,23 @@ fn search_rows(toolbar: &Toolbar) -> Vec<Block> {
         active: false,
         gap: TOOLBAR_GAP,
     }];
-    rows.extend(search.hits.iter().enumerate().map(|(index, hit)| Block {
-        mark: Mark::Hit(hit_runs(hit)),
-        column: 1,
-        label: hit.preview.clone(),
-        action: Some(ToolbarAction::SearchPick(index)),
-        active: index == search.focus,
-        gap: TOOLBAR_GAP,
-    }));
+    // The card is a window like the boards list: it shows the hits from `scroll` on, and the panel's own
+    // room truncates the rest.
+    rows.extend(
+        search
+            .hits
+            .iter()
+            .enumerate()
+            .skip(search.scroll)
+            .map(|(index, hit)| Block {
+                mark: Mark::Hit(hit_runs(hit)),
+                column: 1,
+                label: hit.preview.clone(),
+                action: Some(ToolbarAction::SearchPick(index)),
+                active: index == search.focus,
+                gap: TOOLBAR_GAP,
+            }),
+    );
     rows
 }
 

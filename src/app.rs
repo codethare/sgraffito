@@ -322,6 +322,9 @@ fn caret_visible(elapsed: Duration) -> bool {
     (elapsed.as_millis() / CARET_BLINK.as_millis()).is_multiple_of(2)
 }
 
+/// How many rows the search card shows at once, its field included.
+pub(crate) const SEARCH_WINDOW: usize = 6;
+
 /// A board's name being edited in the rail's list.
 pub struct Rename {
     /// The row's place in the rail's list, which is stable while the keyboard is on it.
@@ -454,6 +457,8 @@ pub struct App {
     pub(crate) fill_idx: Option<usize>,
     /// The keyword search, while its card is open. `None` is closed: the drawer's row and `/` open it.
     pub(crate) search: Option<Search>,
+    /// When the search card opened, which is what its caret blinks from.
+    search_since: Instant,
     /// The last select press on a text box, for the quick second press that starts editing.
     last_text_press: Option<TextPress>,
     /// The last select press on a bindable container or linear element, for the quick second press
@@ -726,6 +731,7 @@ impl App {
             palette_since: None,
             fill_idx: None,
             search: None,
+            search_since: Instant::now(),
             last_text_press: None,
             last_container_press: None,
             linear_drag: None,
@@ -1019,7 +1025,10 @@ impl App {
                     fill: self.fill_idx,
                     open: self.open_palette,
                     palette_grow: hover_grow(self.palette_since, Instant::now()),
-                    search: self.search.clone(),
+                    search: self.search.clone().map(|mut search| {
+                        search.caret = caret_visible(self.search_since.elapsed());
+                        search
+                    }),
                 })
             }
         }
@@ -1463,6 +1472,11 @@ impl App {
         }
         self.dirty = true;
         log(&format!("board switched to {name}"));
+        // The search reads the board a screen shows, so a switch re-runs it: the card stays open with the
+        // new board's words instead of the old board's indices.
+        if self.search.is_some() {
+            self.refresh_search();
+        }
         self.refresh_toolbar();
         true
     }
@@ -2819,6 +2833,12 @@ impl App {
     /// next frame of each one is rebuilt from the new document. Every mutation of the document
     /// goes through here, which is what keeps a stale raster from surviving a change.
     pub(crate) fn doc_changed(&mut self) {
+        // A hit names an element by its index, and a deletion shifts every index after it: the hits are
+        // recomputed while the card is open rather than picked from a stale list.
+        if self.search.is_some() {
+            self.refresh_search();
+            self.refresh_toolbar();
+        }
         self.store.mark_dirty(Instant::now());
         self.invalidate_text_caches();
         self.dirty = true;
@@ -3898,13 +3918,41 @@ impl App {
     /// the card replaces the drawer, because it is opened from one of its rows.
     pub(crate) fn toggle_search(&mut self) {
         if self.search.is_some() {
-            self.search = None;
-            self.refresh_toolbar();
+            self.close_search();
             return;
         }
         self.close_panels();
         self.search = Some(Search::default());
+        self.search_since = Instant::now();
         self.refresh_search();
+        self.sync_text_input();
+        self.refresh_toolbar();
+    }
+
+    pub(crate) fn close_search(&mut self) {
+        if self.search.take().is_some() {
+            self.sync_text_input();
+            self.refresh_toolbar();
+        }
+    }
+
+    /// Move the mark up or down the card's rows, wrapping at both ends, and scroll the window with it.
+    pub(crate) fn nudge_search(&mut self, dir: f32) {
+        let Some(search) = self.search.as_mut() else {
+            return;
+        };
+        if search.hits.is_empty() {
+            return;
+        }
+        let len = search.hits.len();
+        let step = if dir < 0.0 { len - 1 } else { 1 };
+        search.focus = (search.focus + step) % len;
+        // Keep the marked row inside the window the card shows: six rows is what a fixed-height card
+        // holds with its field, and a shorter output simply shows fewer.
+        search.scroll = search.scroll.min(search.focus);
+        search.scroll = search
+            .scroll
+            .max((search.focus + 1).saturating_sub(SEARCH_WINDOW));
         self.refresh_toolbar();
     }
 
@@ -5251,6 +5299,11 @@ impl App {
             // The loop wakes when the caret changes, not sixty times a second.
             let half = CARET_BLINK.as_millis();
             let left = half - rename.since.elapsed().as_millis() % half;
+            Duration::from_millis(left as u64).min(IDLE_WAIT)
+        } else if self.search.is_some() {
+            // The search field's caret blinks on the same clock, and it needs the same wake-up.
+            let half = CARET_BLINK.as_millis();
+            let left = half - self.search_since.elapsed().as_millis() % half;
             Duration::from_millis(left as u64).min(IDLE_WAIT)
         } else {
             IDLE_WAIT

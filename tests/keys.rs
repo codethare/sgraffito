@@ -3,9 +3,9 @@ use sgraffito::app::{MAX_PASTE_BYTES, Tool, read_selection, text_mime};
 use sgraffito::canvas::Caret;
 use sgraffito::canvas::ToolbarAction;
 use sgraffito::input::{
-    BoardListKey, EditAction, RenameKey, ai_scope_for_keysym, batch_changes, board_list_key,
-    bytes_to_delete, color_for_keysym, edit_action, panel_action_for_keysym, rename_key,
-    size_step_for_keysym, tool_for_keysym, wants_sampling,
+    BoardListKey, EditAction, RenameKey, SearchKey, ai_scope_for_keysym, batch_changes,
+    board_list_key, bytes_to_delete, color_for_keysym, edit_action, panel_action_for_keysym,
+    rename_key, search_key, size_step_for_keysym, tool_for_keysym, wants_sampling,
 };
 use smithay_client_toolkit::seat::keyboard::Keysym;
 
@@ -488,6 +488,28 @@ fn the_open_board_list_has_its_own_d_r_n_keys() {
 
 /// `I` opens the AI panel, and the drawer is where its control lives: the key and the rail have to agree,
 /// because the rail's block states the key that does the same thing.
+/// The search's own four keys, and the one that opens it. Everything else belongs to the field: it is a
+/// text row, so `/` typed inside it is a character, not a second toggle.
+#[test]
+fn the_search_takes_its_own_keys_and_slash_opens_it() {
+    assert_eq!(
+        panel_action_for_keysym(Keysym::slash, false),
+        Some(ToolbarAction::Search)
+    );
+    assert_eq!(
+        panel_action_for_keysym(Keysym::slash, true),
+        Some(ToolbarAction::Search)
+    );
+    assert_eq!(search_key(Keysym::Up), Some(SearchKey::Up));
+    assert_eq!(search_key(Keysym::Down), Some(SearchKey::Down));
+    assert_eq!(search_key(Keysym::Return), Some(SearchKey::Pick));
+    assert_eq!(search_key(Keysym::KP_Enter), Some(SearchKey::Pick));
+    assert_eq!(search_key(Keysym::Escape), Some(SearchKey::Close));
+    assert_eq!(search_key(Keysym::a), None);
+    assert_eq!(search_key(Keysym::slash), None);
+    assert_eq!(search_key(Keysym::BackSpace), None);
+}
+
 #[test]
 fn i_opens_the_ai_panel_from_the_drawer() {
     assert_eq!(
