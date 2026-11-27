@@ -3134,6 +3134,10 @@ impl App {
                 self.gesture = Some(Gesture::start(None, Rect::default(), at[0], at[1], alt));
             }
             Press::Marquee { canvas } => {
+                // A press on empty space drops what is held at once, before the marquee: that is the
+                // gesture everyone tries first to put something down, and waiting for the release meant
+                // only `Esc` ever did it. The marquee then selects whatever it sweeps.
+                self.set_selection(key, Vec::new(), None);
                 // The marquee is a canvas rectangle: the frame it is drawn in and the elements it
                 // catches are both canvas, and only the pointer has to be converted once, here.
                 self.gesture = Some(Gesture::Marquee { origin: canvas });

@@ -941,8 +941,10 @@ fn open_panel(
     overflow: &[Block],
     room: usize,
 ) -> Option<(ToolbarAction, Vec<Block>)> {
+    // The card is anchored to the drawer's own block, which is the row it is opened from: the search has
+    // no block on the rail of its own.
     let rows = if toolbar.search.is_some() {
-        Some((ToolbarAction::Search, search_rows(toolbar)))
+        Some((ToolbarAction::More, search_rows(toolbar)))
     } else if toolbar.boards_open {
         Some((ToolbarAction::Boards, board_rows(toolbar, room)))
     } else if toolbar.size_open {
@@ -3234,7 +3236,9 @@ impl Renderer {
                     };
                     device(local)
                 };
-                if (control.stretched || bare) && !label.is_empty() {
+                // A search result states its own line, run by run: the label would be drawn under them.
+                let own_runs = matches!(control.block.mark, Mark::Hit(_));
+                if (control.stretched || bare) && !label.is_empty() && !own_runs {
                     let text_width = self.text_width(label, TOOLBAR_TEXT_SIZE);
                     let item = toolbar_text(
                         label_origin(position, capsule, bare, text_width),

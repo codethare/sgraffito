@@ -562,6 +562,10 @@ impl KeyboardHandler for App {
                 EditAction::EndText => self.close_search(),
                 EditAction::Newline | EditAction::Move(_) | EditAction::InputMethod => {}
             }
+            // A typed character or a deletion changes what the query finds, and the field's own text is
+            // read off the rail's snapshot: both are rebuilt here rather than on the next frame's hover.
+            self.refresh_search();
+            self.refresh_toolbar();
             return;
         }
         // While a text box is edited, printable characters are content, not shortcuts.

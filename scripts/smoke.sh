@@ -27,6 +27,10 @@ trap cleanup EXIT
 
 export XDG_RUNTIME_DIR="$work/rt"
 export XDG_DATA_HOME="$work/data"
+# The rail's edge, the card slots and the palette all come from the configuration file; a run that read
+# the developer's own would place the rail where that file says, and every stage below is written for the
+# default left rail. An empty directory here means the defaults, whatever ~/.config holds.
+export XDG_CONFIG_HOME="$work/config"
 unset WAYLAND_DISPLAY
 export WLR_BACKENDS=headless
 # The second output carries scale 2, so the scale path is covered too.
@@ -415,6 +419,26 @@ assert abs(note["w"] - 180) < 14 and abs(note["h"] - 140) < 14, "a move resized 
 print(f"  injected selection drag ok: {note['x']},{note['y']}")
 PY
 
+# 5e2. an empty press drops the selection. The note the drag above left at 180,180 is clicked (which
+# selects it), then the wallpaper to the right of it (which must clear it): `Ctrl+D` with nothing held
+# duplicates nothing, so a second note would mean the empty press had not let go. Choosing `Ctrl+D` over
+# a screenshot keeps the check in the document, where the earlier stages already read.
+"$vinject" "$layout" seq <<VINJECT
+click $((h1 + 270)) 250
+sleep 300
+click $((h1 + 700)) 520
+sleep 300
+key ctrl+d
+sleep 1500
+VINJECT
+board_json HEADLESS-1 > "$work/board.json"
+python3 - "$work/board.json" <<PY || exit 1
+import json, sys
+notes = json.load(open(sys.argv[1]))["notes"]
+assert len(notes) == 1, f"the empty press left the note selected: {len(notes)} notes"
+print("  empty press drops the selection ok")
+PY
+
 # 5f. the keyboard alone: `Tab` selects, the arrows move what is held, `Delete` removes it. The click on
 # empty space is also what gives that output's surface the keyboard focus — every edit-mode surface is
 # `exclusive`, so exactly one output has it — and it clears the selection the drag above left behind.
@@ -521,6 +545,42 @@ shapes = json.load(open(sys.argv[1]))["shapes"]
 assert len(shapes) == 1, f"{len(shapes)} shapes"
 assert "fill" not in shapes[0], f"the no-fill chip did not clear it: {shapes[0].get('fill')}"
 print("  injected bucket clear ok")
+PY
+
+# 5h. the search. A note is written, then `/` finds it by a word inside it: the card lists the note and
+# `Enter` puts the user on it. `Delete` then removes exactly that note, which is what proves the pick
+# selected the right element rather than merely closing the card.
+"$vinject" "$layout" seq <<VINJECT
+key n
+sleep 300
+drag $((h1 + 120)) 120 $((h1 + 300)) 260 8
+sleep 600
+key m
+key i
+key l
+key k
+sleep 300
+key Escape
+sleep 800
+key slash
+sleep 400
+key m
+key i
+key l
+key k
+sleep 600
+key Return
+sleep 500
+key Delete
+sleep 1500
+VINJECT
+grep -q "mode switched to Edit" "$work/daemon.log" || fail "the search stage left edit mode"
+board_json HEADLESS-1 > "$work/board.json"
+python3 - "$work/board.json" <<PY || exit 1
+import json, sys
+board = json.load(open(sys.argv[1]))
+assert not board["notes"], f"the search pick did not select the note: {len(board['notes'])} left"
+print("  search found and selected the note ok")
 PY
 
 "$bin" lock > /dev/null || fail "lock after the pointer stage failed"
