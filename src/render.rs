@@ -9891,4 +9891,82 @@ mod tests {
             "the fill strip is not under its own swatch"
         );
     }
+
+    /// The fill swatch and the fill strip are painted, and the last chip is a crossed square rather than a
+    /// colour: the one thing the rail could not say before. A colour chip is the palette colour itself.
+    #[test]
+    fn the_fill_swatch_and_its_strip_are_painted() {
+        let surface = (900.0, 1000.0);
+        let (w, h) = (surface.0 as u32, surface.1 as u32);
+        let mut toolbar = rail_for_legend();
+        toolbar.fill = Some(0);
+        toolbar.open = Some(Palette::Fill);
+        let mut renderer = Renderer::new();
+        let pill = renderer.toolbar_pill(&toolbar, surface, ToolbarPosition::Left);
+        let origin = ToolbarPosition::Left.origin(surface, pill.column);
+        let strip = palette_strip(&pill, &toolbar, origin, ToolbarPosition::Left).unwrap();
+        let mut buf = vec![0u8; (w * h * 4) as usize];
+        renderer.render(
+            &mut buf,
+            w,
+            h,
+            1.0,
+            View::default(),
+            &Board::default(),
+            &Overlay {
+                toolbar: Some(toolbar.clone()),
+                ..Default::default()
+            },
+            None,
+        );
+        let pixel = |buf: &Vec<u8>, x: f32, y: f32| -> [u8; 4] {
+            let i = ((y as u32 * w + x as u32) * 4) as usize;
+            [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]
+        };
+        let colors = config::current().colors.clone();
+        // The swatch on the rail is the same face as a chip, holding the colour in hand.
+        let control = pill
+            .controls
+            .iter()
+            .find(|control| control.block.action == Some(ToolbarAction::FillColor(Some(0))))
+            .expect("the fill swatch is not on the rail");
+        let swatch = ToolbarPosition::Left.place(
+            origin,
+            RailRect {
+                along: control.along,
+                across: control.across,
+                along_extent: TOOLBAR_BLOCK,
+                across_extent: TOOLBAR_BLOCK,
+            },
+        );
+        assert_eq!(
+            pixel(&buf, swatch.x + swatch.w / 2.0, swatch.y + swatch.h / 2.0),
+            parse_hex(&colors[0]),
+            "the fill swatch is not the colour in hand"
+        );
+        for (index, rect) in &strip.chips {
+            let centre = pixel(&buf, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+            match index {
+                Some(index) => {
+                    let want = parse_hex(&colors[*index]);
+                    assert_eq!(centre, want, "chip {index} is not its colour");
+                }
+                None => {
+                    // The square is the block surface, and the slash crosses it: the corner is that
+                    // surface and the diagonal through the middle carries the lighter stroke.
+                    let corner = pixel(&buf, rect.x + 5.0, rect.y + 5.0);
+                    let want = parse_hex(TOOLBAR_BLOCK_FILL);
+                    assert_eq!(&corner[..3], &want[..3]);
+                    let mut lighter = 0;
+                    for step in 0..(rect.w as u32) {
+                        let at = pixel(&buf, rect.x + step as f32, rect.y + step as f32);
+                        if at[0] > corner[0] && at[1] > corner[1] && at[2] > corner[2] {
+                            lighter += 1;
+                        }
+                    }
+                    assert!(lighter > 2, "the no-fill chip carries no slash");
+                }
+            }
+        }
+    }
 }
