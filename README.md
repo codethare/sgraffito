@@ -185,7 +185,7 @@ A level with six or more siblings is a **table**: the cells wrap into rows, each
 
 One thing is deliberately not there yet: a timeline and a quadrant chart are drawn as the trees they became — a downward chain of sections, a rightward set of four cells — rather than as a time axis or an x/y plane.
 
-The arrangement itself is a rule, not a request: the answer's `%% sgraffito layout:` line says what the map is (a ring, a decomposition, a downward decomposition, a fishbone, a comparison) and is drawn as named — `tree` grows a column per level to the right, `tree-down` a row per level downwards, which is how an organisation or a chain of steps reads, while the geometry — node boxes from the real font metrics, one column per level or one ring per depth, edges attached to node outlines — is deterministic code with no coordinates from the model. When a map is small and deep both a ring and a decomposition would read, so the cheaper of the two is drawn; the choice is logged with its width, crossings and covered area.
+The arrangement itself is a rule, not a request: the answer's `%% sgraffito layout:` line says what the map is (a ring, a decomposition, a downward decomposition, a fishbone, a comparison, a table) and is drawn as named — `tree` grows a column per level to the right, `tree-down` a row per level downwards, which is how an organisation or a chain of steps reads, while the geometry — node boxes from the real font metrics, one column per level or one ring per depth, edges attached to node outlines — is deterministic code with no coordinates from the model. When a map is small and deep both a ring and a decomposition would read, so the cheaper of the two is drawn; a decomposition still fits a ring, and a level of three or more siblings still fits a table, so the ring and the table are costed beside the tree it names. The choice is logged with its width, crossings and covered area.
 
 Every answer is laid out clear of what the board already holds: the maps earlier conversations left, and the strokes, notes and texts drawn by hand. A map goes where the request asked for it when that place is free — the strip the panel leaves, or the words a selection named — and otherwise steps aside to the nearest free spot, a row down before a column out, kept clear of the screen's left edge and only under the panel's card when there is nowhere else (the canvas is unbounded, so a map may stand below the fold and be panned to). What the answer itself replaces is not in the way: its conversation's previous diagram, and the shapes and texts its selection named. The map keeps the corner it landed on while it streams, so an answer grows in place instead of hopping across the board, and the position is not stored: it is worked out again from what the board holds when the answer arrives.
 
@@ -344,9 +344,10 @@ Each board has its own conversation: the transcript, the draft in the input line
 diagram are per board, and switching boards switches all of them. A prompt therefore never continues
 another board's conversation, and a follow-up replaces only the diagram its own board's conversation
 placed. The answer names the arrangement it wants in a Mermaid comment —
-`%% sgraffito layout: radial | tree | fishbone | compare` — for a brainstorm, a decomposition, the
-causes of one effect, or a comparison of exactly two things; a map that names none is drawn as a ring,
-or as a tree once it is three levels deep.
+`%% sgraffito layout: radial | tree | tree-down | fishbone | compare | grid` — for a brainstorm, a
+decomposition, a decomposition read downwards, the causes of one effect, a comparison of exactly two
+things, or a level of siblings as one table; the model is asked for this line every time, and a map that
+names none is costed as a ring, a table and a tree, whichever is cheapest.
 
 An empty `api_key` means the file supplies none, and the environment is then the only source: the
 daemon reads `OPENCODE_GO_API_KEY`, `OPENCODE_ZEN_API_KEY` and `OPENCODE_API_KEY` on every request, from

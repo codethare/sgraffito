@@ -37,8 +37,9 @@ Then output exactly one fenced code block with language `mermaid`.
 Use a `mindmap` unless the content is a process, a history or a 2x2 comparison: then a tree-shaped
 `flowchart` (one start, no node with two parents; `flowchart TD` reads downwards, `flowchart LR` to the
 right), a `timeline`, or a `quadrantChart` are read too.
-The block starts with `mindmap`, then one comment line naming the arrangement:
-  %% sgraffito layout: radial | tree | tree-down | fishbone | compare
+The block starts with `mindmap`, then the comment line that names the arrangement — every mind map names
+one, from this list:
+  %% sgraffito layout: radial | tree | tree-down | fishbone | compare | grid
 Use two spaces per indentation level. One root and at most 40 nodes. Do not add any text after the block.
 
 Choose the arrangement by what the map is for:
@@ -49,6 +50,8 @@ Choose the arrangement by what the map is for:
 - fishbone: the causes of one effect; the root is the effect, each first-level node is a cause group (因果).
 - compare: exactly two first-level nodes, the two things compared; a child whose name appears under both is
   an attribute they share (对比).
+- grid: a level with many siblings — three or more — where the branches are cells of one table, each with
+  its own column of children under a centred title (并列/表格).
 
 Rules for the content:
 1. MECE: siblings at one level must not overlap and must cover their parent. Never mix dimensions at one
@@ -2298,7 +2301,20 @@ pub fn layout_kinds(
 ) -> Vec<MapKind> {
     match preference {
         Some(kind) => vec![fit_kind(kind, tree)],
-        None => rule_kinds(tree, hint),
+        None => {
+            let mut kinds = rule_kinds(tree, hint);
+            // The rule names the reading, not the only drawing: a decomposition still fits a ring, and a
+            // level of three or more branches still fits a table, so both are costed and the geometry
+            // decides. A comparison and a fishbone are left to the answer, because "two things compared"
+            // and "these are the causes" are meanings a tree's shape cannot say.
+            if levels(tree) >= 3 && !kinds.contains(&MapKind::Radial) {
+                kinds.push(MapKind::Radial);
+            }
+            if tree.children.len() >= 3 && !kinds.contains(&MapKind::Grid) {
+                kinds.push(fit_kind(MapKind::Grid, tree));
+            }
+            kinds
+        }
     }
 }
 
@@ -3606,10 +3622,26 @@ mod tests {
             candidate_kinds(Some(MapKind::Fishbone), &two),
             vec![MapKind::Fishbone]
         );
-        // A syntax's reading is a hint: the rules take it as the answer, the cost still places it.
+        // A decomposition is not only ever a tree: the ring and the table are costed beside it, so the
+        // geometry can keep a tall map on the screen without the answer being rewritten.
+        let branches = parse_mindmap(
+            "mindmap\n  root((Shop))\n    Front\n      Till\n      Queue\n    Back\n      Stock\n      Bins\n    Side\n      Sign\n      Door\n",
+        )
+        .unwrap();
+        assert_eq!(levels(&branches), 3, "the shape this check is about");
+        let costed = layout_kinds(None, None, &branches);
+        assert!(costed.contains(&MapKind::Tree(Dir::Right)), "{costed:?}");
+        assert!(costed.contains(&MapKind::Radial), "{costed:?}");
+        assert!(costed.contains(&MapKind::Grid), "{costed:?}");
+        // What indentation cannot say is still left to the answer.
+        assert!(!costed.contains(&MapKind::Compare), "{costed:?}");
+        assert!(!costed.contains(&MapKind::Fishbone), "{costed:?}");
+
+        // A syntax's reading is a hint: it leads the list, and the ring is still costed beside it, so a
+        // decomposition the screen does not fit downwards is drawn on a ring rather than off the edge.
         assert_eq!(
             layout_kinds(None, Some(MapKind::Tree(Dir::Down)), &deep),
-            vec![MapKind::Tree(Dir::Down)]
+            vec![MapKind::Tree(Dir::Down), MapKind::Radial]
         );
         assert_eq!(
             layout_kinds(Some(MapKind::Radial), Some(MapKind::Tree(Dir::Down)), &deep),
