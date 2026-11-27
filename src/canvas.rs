@@ -1333,6 +1333,27 @@ impl Board {
         (ids, box_)
     }
 
+    /// Give every closed shape `items` names this inside colour, `None` clearing it, and return the box
+    /// they occupy. A line and an arrow have no inside, and text and notes are their own colour rather
+    /// than a container's, so a fill pick leaves them alone; the indices are left alone either way.
+    pub fn recolour_fill(&mut self, items: &[ItemId], fill: Option<&str>) -> Option<Rect> {
+        let mut box_: Option<Rect> = None;
+        for id in items {
+            let ItemId::Shape(i) = *id else {
+                continue;
+            };
+            let Some(s) = self.shapes.get_mut(i) else {
+                continue;
+            };
+            if !s.kind.is_closed() {
+                continue;
+            }
+            s.fill = fill.map(str::to_string);
+            union_into(&mut box_, Some(s.paint_bounds()));
+        }
+        box_
+    }
+
     /// Recolour every element `items` names, returning the box they occupy, which is what the frame that
     /// repaints them damages. `None` means nothing was named. Unlike a removal this walks the ids as they
     /// come and leaves every index alone, so an element the selection does not hold cannot be reached.

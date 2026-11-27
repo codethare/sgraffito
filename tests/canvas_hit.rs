@@ -1571,6 +1571,54 @@ fn a_colour_applies_to_every_element_the_selection_holds() {
 }
 
 #[test]
+fn a_fill_recolours_only_the_closed_shapes_it_holds() {
+    use sgraffito::canvas::{Note, ShapeKind};
+    let mut a = Board {
+        strokes: vec![line(40.0, 20.0, 60.0)],
+        texts: vec![text(20.0, 80.0, "hello")],
+        shapes: vec![
+            shape(ShapeKind::Rect, [10.0, 120.0], [60.0, 160.0]),
+            shape(ShapeKind::Line, [10.0, 200.0], [60.0, 240.0]),
+        ],
+        notes: vec![Note::new(100.0, 20.0, PALETTE[1], "2026/10/14".into())],
+    };
+    let held = [
+        ItemId::Shape(0),
+        ItemId::Shape(1),
+        ItemId::Stroke(0),
+        ItemId::Text(0),
+        ItemId::Note(0),
+    ];
+    let before = (
+        a.strokes[0].color.clone(),
+        a.texts[0].color.clone(),
+        a.notes[0].color.clone(),
+    );
+    let box_ = a
+        .recolour_fill(&held, Some(PALETTE[2]))
+        .expect("a fill was applied");
+    assert_eq!(a.shapes[0].fill.as_deref(), Some(PALETTE[2]));
+    assert_eq!(a.shapes[1].fill, None, "a line has no inside");
+    assert_eq!(
+        (
+            a.strokes[0].color.clone(),
+            a.texts[0].color.clone(),
+            a.notes[0].color.clone()
+        ),
+        before,
+        "a fill is not a stroke colour"
+    );
+    assert_eq!(box_, a.shapes[0].paint_bounds());
+    // No fill clears it again, and the box is still the closed shape's.
+    let cleared = a.recolour_fill(&held, None).expect("a fill was cleared");
+    assert_eq!(a.shapes[0].fill, None);
+    assert_eq!(cleared, a.shapes[0].paint_bounds());
+    // Nothing held, or an id that names no element, changes nothing at all.
+    assert_eq!(a.recolour_fill(&[], Some(PALETTE[0])), None);
+    assert_eq!(a.recolour_fill(&[ItemId::Shape(9)], Some(PALETTE[0])), None);
+}
+
+#[test]
 fn a_copy_leaves_the_original_in_place_and_keeps_every_index() {
     use sgraffito::canvas::{Note, ShapeKind};
     let mut a = Board {
