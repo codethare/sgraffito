@@ -43,7 +43,7 @@ use wayland_client::{
 use crate::canvas::{
     Attachment, Backdrop, Board, BoardEdit, BoardRow, Doc, ERASER_THRESHOLD, Gesture, Grab, Handle,
     ItemId, LinearHandle, LiveConnector, Motion, Note, Overlay, PEN_WIDTH_MAX, PEN_WIDTH_MIN,
-    PEN_WIDTH_STEP, Press, Rect, SNAP_RADIUS, Selection, Shape, ShapeKind, TEXT_SIZE_MAX,
+    PEN_WIDTH_STEP, Palette, Press, Rect, SNAP_RADIUS, Selection, Shape, ShapeKind, TEXT_SIZE_MAX,
     TEXT_SIZE_MIN, TEXT_SIZE_STEP, Target, TextBuffer, TextItem, TextOverlay, Toolbar, Transform,
     View, ZOOM_STEP, Zoom, date_stamp, link_source, marquee_select, note_drag, nudge_delta,
     selected_linear, selection_bounds, selection_frame, selection_frame_with,
@@ -444,10 +444,14 @@ pub struct App {
 
     /// What a pick in the board list applies instead of switching the screen.
     pub(crate) target: Option<Target>,
-    /// Whether the collapsed colour swatch is expanded.
-    pub(crate) colors_open: bool,
+    /// Which swatch is showing its other choices, if either. The two swatches are one strip at a time,
+    /// the way the panels are one panel at a time.
+    pub(crate) open_palette: Option<Palette>,
     /// When a shortcut-opened colour strip closes itself; `None` while the pointer keeps it open.
-    colors_until: Option<Instant>,
+    palette_until: Option<Instant>,
+    /// The inside colour new closed shapes take, as a palette index. `None` is no fill, which is where a
+    /// run starts: the rail's fill swatch is the only way to give a shape an inside.
+    pub(crate) fill_idx: Option<usize>,
     /// The last select press on a text box, for the quick second press that starts editing.
     last_text_press: Option<TextPress>,
     /// The last select press on a bindable container or linear element, for the quick second press
@@ -457,7 +461,7 @@ pub struct App {
     /// the pointer moves; the gesture's undo snapshot is taken on the press.
     pub(crate) linear_drag: Option<LinearDrag>,
     /// When the colour strip started unfurling.
-    colors_since: Option<Instant>,
+    palette_since: Option<Instant>,
 
     /// The board's name being edited in the list, if any. A name is typed where it is read, so this is
     /// app-level state and not an output's.
@@ -715,9 +719,10 @@ impl App {
             board_scroll: 0,
             size_open: false,
             target: None,
-            colors_open: false,
-            colors_until: None,
-            colors_since: None,
+            open_palette: None,
+            palette_until: None,
+            palette_since: None,
+            fill_idx: None,
             last_text_press: None,
             last_container_press: None,
             linear_drag: None,
@@ -1008,8 +1013,9 @@ impl App {
                             .is_some_and(|selection| !selection.items.is_empty())
                     }),
                     roundness: self.roundness,
-                    colors_open: self.colors_open,
-                    colors_grow: hover_grow(self.colors_since, Instant::now()),
+                    fill: self.fill_idx,
+                    open: self.open_palette,
+                    palette_grow: hover_grow(self.palette_since, Instant::now()),
                 })
             }
         }
@@ -2649,7 +2655,7 @@ impl App {
                 .panel_open_since
                 .is_some_and(|started| now.saturating_duration_since(started) < TOOLBAR_ANIM)
             || self
-                .colors_since
+                .palette_since
                 .is_some_and(|started| now.saturating_duration_since(started) < TOOLBAR_ANIM)
             || zoom_in_flight(self.outputs.values().map(|out| out.zoom))
             || self.outputs.values().any(|out| out.motion.quality() < 1.0)
@@ -2684,17 +2690,13 @@ impl App {
         self.refresh_toolbar();
     }
 
-    /// Whether a pointer position sits on the open colour card, gaps included.
-    pub(crate) fn toolbar_over_colors(&mut self, key: &u32, x: f32, y: f32) -> bool {
-        let Some(out) = self.outputs.get(key) else {
-            return false;
-        };
-        let Some(toolbar) = out.overlay.toolbar.clone() else {
-            return false;
-        };
+    /// Which swatch's open card a pointer position sits on, gaps included.
+    pub(crate) fn toolbar_over_palette(&mut self, key: &u32, x: f32, y: f32) -> Option<Palette> {
+        let out = self.outputs.get(key)?;
+        let toolbar = out.overlay.toolbar.clone()?;
         let (width, height) = (out.width as f32, out.height as f32);
         self.renderer
-            .toolbar_over_colors(&toolbar, width, height, x, y)
+            .toolbar_over_palette(&toolbar, width, height, x, y)
     }
 
     /// The shape the pointer should have now: the active tool's, or the compositor's own
@@ -3825,40 +3827,46 @@ impl App {
         }
     }
 
-    /// Show the other colours after a colour shortcut. The active swatch on the rail has already
+    /// Show the other stroke colours after a colour shortcut. The active swatch on the rail has already
     /// changed; this only opens the strip for a short dwell.
     pub(crate) fn reveal_colors(&mut self) {
-        if !self.colors_open {
-            self.colors_since = Some(Instant::now());
+        if self.open_palette != Some(Palette::Stroke) {
+            self.palette_since = Some(Instant::now());
         }
-        self.colors_open = true;
-        self.colors_until = Some(Instant::now() + COLOR_POPUP_DWELL);
+        self.open_palette = Some(Palette::Stroke);
+        self.palette_until = Some(Instant::now() + COLOR_POPUP_DWELL);
         self.refresh_toolbar();
     }
 
-    /// Hold the strip while the pointer is on the active swatch or any of its colours; once the
-    /// pointer leaves a strip with no shortcut deadline, it collapses.
-    pub(crate) fn hover_colors(&mut self, over: bool) {
-        if over {
-            if !self.colors_open || self.colors_until.is_some() {
-                if !self.colors_open {
-                    self.colors_since = Some(Instant::now());
-                }
-                self.colors_open = true;
-                self.colors_until = None;
+    /// Hold the strip while the pointer is on the swatch that opened it or any of its colours; once the
+    /// pointer leaves a strip with no shortcut deadline, it collapses. Moving from one swatch to the
+    /// other switches the strip rather than closing it, so the two are one control with two faces.
+    pub(crate) fn hover_palette(&mut self, over: Option<Palette>) {
+        match over {
+            Some(which) if self.open_palette != Some(which) => {
+                self.palette_since = Some(Instant::now());
+                self.open_palette = Some(which);
+                self.palette_until = None;
                 self.refresh_toolbar();
             }
-        } else if self.colors_until.is_none() && self.colors_open {
-            self.colors_open = false;
-            self.refresh_toolbar();
+            Some(_) if self.palette_until.is_some() => {
+                self.palette_until = None;
+                self.refresh_toolbar();
+            }
+            Some(_) => {}
+            None if self.palette_until.is_none() && self.open_palette.is_some() => {
+                self.open_palette = None;
+                self.refresh_toolbar();
+            }
+            None => {}
         }
     }
 
-    pub(crate) fn close_colors(&mut self) {
-        if self.colors_open || self.colors_until.is_some() {
-            self.colors_open = false;
-            self.colors_until = None;
-            self.colors_since = None;
+    pub(crate) fn close_palette(&mut self) {
+        if self.open_palette.is_some() || self.palette_until.is_some() {
+            self.open_palette = None;
+            self.palette_until = None;
+            self.palette_since = None;
             self.refresh_toolbar();
         }
     }
@@ -3869,6 +3877,17 @@ impl App {
             self.refresh_toolbar();
             self.recolour_selection(&crate::config::current().colors[idx]);
         }
+    }
+
+    /// Fill the closed shapes the selection holds with this palette colour, or clear them when it is
+    /// `None`, and keep it in hand for the next shape. One change, the way a stroke colour pick is.
+    pub(crate) fn set_fill(&mut self, fill: Option<usize>) {
+        self.fill_idx = fill.filter(|index| *index < crate::config::current().colors.len());
+        self.refresh_toolbar();
+        let color = self
+            .fill_idx
+            .map(|index| crate::config::current().colors[index].clone());
+        self.recolour_fill_selection(color.as_deref());
     }
 
     /// The other half of a size step: what the selection holds takes the step too, as one change, the way
@@ -3910,16 +3929,7 @@ impl App {
     /// held, so a second chip recolours the same elements, and the frame stays where it was, which is what
     /// shows the user what they just changed.
     fn recolour_selection(&mut self, color: &str) {
-        let held: Vec<(u32, String, Vec<ItemId>)> = self
-            .outputs
-            .iter()
-            .filter_map(|(key, out)| {
-                out.overlay
-                    .selection
-                    .as_ref()
-                    .map(|s| (*key, out.board().to_string(), s.items.clone()))
-            })
-            .collect();
+        let held = self.held_selections();
         let mut changed = Vec::new();
         let before = self.doc.clone();
         for (key, board_name, items) in held {
@@ -3938,6 +3948,44 @@ impl App {
         for (key, box_) in changed {
             self.doc_changed_at(key, box_);
         }
+    }
+
+    /// The fill's half of `recolour_selection`: only the closed shapes the selection holds take it, and
+    /// `None` takes the fill off them. Two outputs may each hold a selection, on different boards.
+    fn recolour_fill_selection(&mut self, fill: Option<&str>) {
+        let held = self.held_selections();
+        let mut changed = Vec::new();
+        let before = self.doc.clone();
+        for (key, board_name, items) in held {
+            if let Some(box_) = self
+                .doc
+                .boards
+                .get_mut(&board_name)
+                .and_then(|ann| ann.recolour_fill(&items, fill))
+            {
+                changed.push((key, box_));
+            }
+        }
+        if !changed.is_empty() {
+            self.undo.record(before, &self.doc);
+        }
+        for (key, box_) in changed {
+            self.doc_changed_at(key, box_);
+        }
+    }
+
+    /// Every output's held selection, with the board it sits on. Taken before the boards are borrowed
+    /// mutably, because two outputs may hold selections on two boards.
+    fn held_selections(&self) -> Vec<(u32, String, Vec<ItemId>)> {
+        self.outputs
+            .iter()
+            .filter_map(|(key, out)| {
+                out.overlay
+                    .selection
+                    .as_ref()
+                    .map(|s| (*key, out.board().to_string(), s.items.clone()))
+            })
+            .collect()
     }
 
     /// Write the text box being edited back into the document (empty boxes are dropped).
@@ -4989,15 +5037,18 @@ impl App {
         let dt = now.saturating_duration_since(self.last_tick).as_secs_f32();
         self.last_tick = now;
         self.step_zooms(dt);
-        if let Some(until) = self.colors_until
+        if let Some(until) = self.palette_until
             && now >= until
         {
-            self.colors_until = None;
+            self.palette_until = None;
             // A pointer still resting on a colour keeps the strip open; the deadline only dismisses
-            // a strip opened by a shortcut when the pointer is elsewhere.
-            if !matches!(self.toolbar_hover, Some(ToolbarAction::Color(_))) && self.colors_open {
-                self.colors_open = false;
-                self.colors_since = None;
+            // a strip opened by a shortcut when the pointer is elsewhere. Only the stroke palette has a
+            // shortcut, so only its chips can hold the strip past the deadline.
+            if !matches!(self.toolbar_hover, Some(ToolbarAction::Color(_)))
+                && self.open_palette.is_some()
+            {
+                self.open_palette = None;
+                self.palette_since = None;
                 self.refresh_toolbar();
             }
         }
@@ -5098,7 +5149,7 @@ impl App {
         } else if let Some(left) = self.ai.burst_hold_left(Instant::now()) {
             // The strip's number has to leave on its own clock, not on the next event.
             left.min(IDLE_WAIT)
-        } else if let Some(until) = self.colors_until {
+        } else if let Some(until) = self.palette_until {
             until
                 .saturating_duration_since(Instant::now())
                 .min(IDLE_WAIT)

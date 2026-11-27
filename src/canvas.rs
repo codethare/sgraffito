@@ -160,12 +160,28 @@ pub enum Tool {
     Note,
 }
 
+/// Which of the rail's two colour swatches is showing its other choices. Only one strip is open at a
+/// time, the way only one panel is: the two swatches are neighbours, and two cards beside a short rail
+/// would overlap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Palette {
+    /// The stroke colour, picked by the number keys and the first swatch.
+    Stroke,
+    /// The fill colour, picked by the second swatch only.
+    Fill,
+}
+
 /// What clicking one control of the edit-mode toolbar does. Each variant has exactly the
 /// effect of the key the control carries.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ToolbarAction {
     Tool(Tool),
+    /// Pick the colour in hand, by palette index.
     Color(usize),
+    /// Pick the colour new circles, rectangles and diamonds are filled with and the bucket paints, by
+    /// palette index. `None` is no fill: a shape drawn with it has a clear inside, and the bucket takes
+    /// a fill off. There is no key for these; the swatch and its strip are the whole way in.
+    FillColor(Option<usize>),
     /// Direction to step the active tool's size in, ±1.
     SizeStep(f32),
     /// Open or close the list of width steps. The readout is the only control that carries it: a click
@@ -3949,6 +3965,10 @@ pub struct Toolbar {
     pub tool: Tool,
     /// The active colour, normalized to `#rrggbb` or `#rrggbbaa`; one of [`crate::config::current`]'s.
     pub color: String,
+    /// The inside colour new closed shapes take, as a palette index, and the colour the bucket paints.
+    /// `None` is no fill, which is where the rail starts: a shape is drawn with a clear inside until the
+    /// fill swatch is given a colour.
+    pub fill: Option<usize>,
     /// Stroke width or text size, depending on the tool.
     pub size: f32,
     /// The block under the pointer: it stretches to say what it does.
@@ -3996,10 +4016,10 @@ pub struct Toolbar {
     /// Whether new lines and arrows are drawn with rounded corners, and the selected ones currently
     /// carry that style.
     pub roundness: bool,
-    /// Whether the collapsed colour swatch is showing the other four colours beside it.
-    pub colors_open: bool,
+    /// Which swatch is showing its other choices, if either. One strip at a time, like the panels.
+    pub open: Option<Palette>,
     /// How far that flyout has unfurled, 0 to about 1.
-    pub colors_grow: f32,
+    pub palette_grow: f32,
 }
 
 #[derive(Debug, Clone)]

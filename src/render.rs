@@ -19,8 +19,8 @@ use wayland_client::protocol::wl_shm::Format;
 use crate::ai::burst_label;
 use crate::canvas::{
     AiView, Backdrop, Board, GRID_SPACING, Handle, ItemId, LINEAR_MIDPOINT, LiveConnector,
-    NOTE_DATE_SIZE, NOTE_RADIUS, Note, Overlay, Rect, SELECT_HANDLE, SELECT_ROTATE_GAP, Shape,
-    ShapeKind, Stroke, TextItem, TextOverlay, Tool, Toolbar, ToolbarAction, View, note_ink,
+    NOTE_DATE_SIZE, NOTE_RADIUS, Note, Overlay, Palette, Rect, SELECT_HANDLE, SELECT_ROTATE_GAP,
+    Shape, ShapeKind, Stroke, TextItem, TextOverlay, Tool, Toolbar, ToolbarAction, View, note_ink,
     parse_hex, rect_of, rotate_handle, selected_linear, selection_frame_with,
 };
 use crate::config;
@@ -284,6 +284,9 @@ fn key_of(action: ToolbarAction) -> Option<&'static str> {
         ToolbarAction::Ai => "I",
         ToolbarAction::Link | ToolbarAction::Round => return None,
         ToolbarAction::Backdrop(_) => return None,
+        // The fill colours have no key: the swatch and its strip are the whole way in, as the
+        // background palette has no key in the editor this one is modelled on.
+        ToolbarAction::FillColor(_) => return None,
         ToolbarAction::Color(index) => ["1", "2", "3", "4", "5"].get(index).copied().unwrap_or("?"),
         ToolbarAction::SizeStep(dir) => {
             if dir < 0.0 {
@@ -3343,7 +3346,7 @@ impl Renderer {
             w: r.w * scale,
             h: r.h * scale,
         };
-        let grow = toolbar.colors_grow.clamp(0.0, 1.1);
+        let grow = toolbar.palette_grow.clamp(0.0, 1.1);
         let full = strip.plate;
         let row = (full.w - 2.0 * TOOLBAR_PAD) * grow;
         let plate_x = if position == ToolbarPosition::Right {
@@ -3702,33 +3705,34 @@ impl Renderer {
     }
 
     /// Whether the pointer is anywhere on the open colour card, including the gaps between its
-    /// chips. The strip keeps itself open across this whole surface, so the pointer can sweep from
-    /// one colour to the next without the row folding away underneath it.
-    pub fn toolbar_over_colors(
+    /// Which swatch's card, if either, holds this pointer position. The strip keeps itself open across
+    /// its whole surface, so the pointer can sweep from one colour to the next without the row folding
+    /// away underneath it; the caller gets the palette rather than a yes, because the two swatches share
+    /// the one open slot and a sweep may cross from one to the other.
+    pub fn toolbar_over_palette(
         &mut self,
         toolbar: &Toolbar,
         width: f32,
         height: f32,
         x: f32,
         y: f32,
-    ) -> bool {
+    ) -> Option<Palette> {
         let position = config::current().toolbar;
         let Some(pill) = self.cached_toolbar_pill(toolbar, (width, height), position) else {
-            return false;
+            return None;
         };
         let origin = position.origin((width, height), pill.column);
-        color_strip(&pill, toolbar, origin, position).is_some_and(|strip| {
-            // Include the short corridor from the active swatch into the card, so crossing it
-            // does not fold the strip before the pointer reaches the first colour.
-            let reach = TOOLBAR_PAD + TOOLBAR_GAP;
-            let plate = Rect {
-                x: strip.plate.x - reach,
-                y: strip.plate.y - reach,
-                w: strip.plate.w + 2.0 * reach,
-                h: strip.plate.h + 2.0 * reach,
-            };
-            plate.contains(x, y)
-        })
+        let strip = color_strip(&pill, toolbar, origin, position)?;
+        // Include the short corridor from the active swatch into the card, so crossing it
+        // does not fold the strip before the pointer reaches the first colour.
+        let reach = TOOLBAR_PAD + TOOLBAR_GAP;
+        let plate = Rect {
+            x: strip.plate.x - reach,
+            y: strip.plate.y - reach,
+            w: strip.plate.w + 2.0 * reach,
+            h: strip.plate.h + 2.0 * reach,
+        };
+        plate.contains(x, y).then_some(Palette::Stroke)
     }
 
     /// The toolbar block under a pointer position for a rail docked to `position`. The public
@@ -5155,6 +5159,7 @@ fn same_layout(a: &Toolbar, b: &Toolbar) -> bool {
     // previous layout and make the drawer's control unreachable.
     a.tool == b.tool
         && a.color == b.color
+        && a.fill == b.fill
         && a.size == b.size
         && a.hover == b.hover
         && a.more == b.more
@@ -5165,7 +5170,7 @@ fn same_layout(a: &Toolbar, b: &Toolbar) -> bool {
         && a.target == b.target
         && a.rename == b.rename
         && a.delete_confirm == b.delete_confirm
-        && a.colors_open == b.colors_open
+        && a.open == b.open
         && a.boards == b.boards
         && a.board_scroll == b.board_scroll
         && a.shared == b.shared
@@ -5300,9 +5305,9 @@ fn color_strip(
     origin: (f32, f32),
     position: ToolbarPosition,
 ) -> Option<ColorStrip> {
-    if !toolbar.colors_open {
+    let Some(_palette) = toolbar.open else {
         return None;
-    }
+    };
     let colors = &config::current().colors;
     let active = colors
         .iter()
@@ -5730,7 +5735,7 @@ pub fn toolbar_bounds_at(
             h: layout.reach + 2.0 * TOOLBAR_HAIRLINE,
         }
     };
-    if toolbar.colors_open {
+    if toolbar.open.is_some() {
         rail.union(color_strip_bounds(position, surface, layout.column))
     } else {
         rail
@@ -8407,8 +8412,9 @@ mod tests {
             can_redo: false,
             can_duplicate: false,
             roundness: false,
-            colors_open: false,
-            colors_grow: 1.0,
+            open: None,
+            fill: None,
+            palette_grow: 1.0,
         }
     }
 
@@ -8710,8 +8716,9 @@ mod tests {
                 can_redo: false,
                 can_duplicate: false,
                 roundness: false,
-                colors_open: false,
-                colors_grow: 1.0,
+                open: None,
+                fill: None,
+                palette_grow: 1.0,
             }),
             ..Default::default()
         };
@@ -9068,8 +9075,9 @@ mod tests {
             can_redo: false,
             can_duplicate: false,
             roundness: false,
-            colors_open: false,
-            colors_grow: 1.0,
+            open: None,
+            fill: None,
+            palette_grow: 1.0,
         }
     }
 
@@ -9340,6 +9348,7 @@ mod tests {
                 | ToolbarAction::CancelDeleteBoard
                 | ToolbarAction::Undo
                 | ToolbarAction::Redo => false,
+                ToolbarAction::FillColor(_) => unreachable!("no key, filtered above"),
                 ToolbarAction::Backdrop(_) => false,
                 ToolbarAction::Size => unreachable!("no key, filtered above"),
             };
@@ -9583,7 +9592,7 @@ mod tests {
             .count();
         assert_eq!(colours, 1, "more than the active chip stayed on the rail");
 
-        toolbar.colors_open = true;
+        toolbar.open = Some(Palette::Stroke);
         let open = renderer.toolbar_pill(&toolbar, surface, ToolbarPosition::Left);
         let origin = ToolbarPosition::Left.origin(surface, open.column);
         let strip = color_strip(&open, &toolbar, origin, ToolbarPosition::Left)
@@ -9620,15 +9629,43 @@ mod tests {
                 .iter()
                 .any(|(_, rect)| rect.contains(gap, gap_y))
         );
-        assert!(renderer.toolbar_over_colors(&toolbar, surface.0, surface.1, gap, gap_y));
+        assert_eq!(
+            renderer.toolbar_over_palette(&toolbar, surface.0, surface.1, gap, gap_y),
+            Some(Palette::Stroke)
+        );
         let corridor = origin.0 + TOOLBAR_BLOCK + TOOLBAR_PAD / 2.0;
-        assert!(renderer.toolbar_over_colors(&toolbar, surface.0, surface.1, corridor, gap_y));
-        assert!(!renderer.toolbar_over_colors(
-            &toolbar,
-            surface.0,
-            surface.1,
-            strip.plate.x - TOOLBAR_BLOCK,
-            gap_y
-        ));
+        assert_eq!(
+            renderer.toolbar_over_palette(&toolbar, surface.0, surface.1, corridor, gap_y),
+            Some(Palette::Stroke)
+        );
+        assert_eq!(
+            renderer.toolbar_over_palette(
+                &toolbar,
+                surface.0,
+                surface.1,
+                strip.plate.x - TOOLBAR_BLOCK,
+                gap_y
+            ),
+            None
+        );
+    }
+
+    /// The rail's cached layout is reused only when nothing that decides a block has changed. A fill
+    /// pick repaints the fill swatch's face, and an open strip adds chips: both must miss the cache.
+    #[test]
+    fn the_rail_reopens_its_layout_for_a_fill_or_an_open_palette() {
+        let rail = rail_for_legend();
+        let mut filled = rail.clone();
+        filled.fill = Some(2);
+        assert!(
+            !same_layout(&rail, &filled),
+            "a fill pick reuses the old layout"
+        );
+        let mut opened = rail.clone();
+        opened.open = Some(Palette::Fill);
+        assert!(
+            !same_layout(&rail, &opened),
+            "an open strip reuses the old layout"
+        );
     }
 }

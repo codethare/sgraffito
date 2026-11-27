@@ -401,8 +401,9 @@ fn toolbar(tool: Tool, color: &'static str, size: f32, hover: Option<ToolbarActi
         can_redo: false,
         can_duplicate: false,
         roundness: false,
-        colors_open: false,
-        colors_grow: 1.0,
+        open: None,
+        fill: None,
+        palette_grow: 1.0,
     }
 }
 
@@ -2504,8 +2505,9 @@ fn a_row_of_the_panel_can_be_clicked_with_the_pointer_on_the_block_that_opened_i
         can_redo: false,
         can_duplicate: false,
         roundness: false,
-        colors_open: false,
-        colors_grow: 1.0,
+        open: None,
+        fill: None,
+        palette_grow: 1.0,
     };
     let mut renderer = Renderer::new();
     let band = toolbar_bounds(&rail(), w as f32, h as f32);
@@ -4731,8 +4733,9 @@ fn ai_toolbar() -> Toolbar {
         can_redo: false,
         can_duplicate: false,
         roundness: true,
-        colors_open: false,
-        colors_grow: 1.0,
+        open: None,
+        fill: None,
+        palette_grow: 1.0,
     }
 }
 

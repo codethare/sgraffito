@@ -33,8 +33,8 @@ use crate::app::{
     text_mime,
 };
 use crate::canvas::{
-    Board, Caret, ERASER_THRESHOLD, Rect, SELECT_HANDLE_HIT, ShapeKind, Stroke, Target, TextBuffer,
-    ZOOM_STEP, constrained_drag, grab_at, selected_linear, selection_frame_with,
+    Board, Caret, ERASER_THRESHOLD, Palette, Rect, SELECT_HANDLE_HIT, ShapeKind, Stroke, Target,
+    TextBuffer, ZOOM_STEP, constrained_drag, grab_at, selected_linear, selection_frame_with,
 };
 use crate::render::{
     action_card_ai_bounds, action_card_bounds, action_card_duplicate_bounds,
@@ -687,7 +687,7 @@ impl PointerHandler for App {
                     if self.toolbar_hover.take().is_some() {
                         self.refresh_toolbar_hover();
                     }
-                    self.hover_colors(false);
+                    self.hover_palette(None);
                     self.pointer_over_toolbar = false;
                     // The tool shape must not follow the pointer onto another client's surface,
                     // and the request still needs the serial of the last enter to be honoured.
@@ -1423,9 +1423,13 @@ impl App {
         // keeps the pointer on itself out to the end of its capsule.
         let hover = self.toolbar_hit(key, x, y);
         // The open colour card is one hover target: its plate, not just the chips, holds it open,
-        // so sweeping across a gap does not fold the row before the next colour is reached.
-        let over_colors =
-            matches!(hover, Some(ToolbarAction::Color(_))) || self.toolbar_over_colors(key, x, y);
+        // so sweeping across a gap does not fold the row before the next colour is reached. A chip is
+        // that card's own target; anything else asks which card, if either, the pointer is on.
+        let over_palette = match hover {
+            Some(ToolbarAction::Color(_)) => Some(Palette::Stroke),
+            Some(ToolbarAction::FillColor(_)) => Some(Palette::Fill),
+            _ => self.toolbar_over_palette(key, x, y),
+        };
         // The drawer is a menu: it closes as soon as the pointer is off the `more` block and off its own
         // controls, so it never sits open beside the rail while the pointer is somewhere else. The hover is
         // worked out against the layout the frame drew, which is the open one, so the rail's own blocks are
@@ -1435,14 +1439,14 @@ impl App {
         {
             self.close_panels();
         }
-        self.hover_colors(over_colors);
+        self.hover_palette(over_palette);
         if hover != self.toolbar_hover {
             self.toolbar_hover = hover;
             // A fresh block opens from nothing; leaving the rail closes immediately.
             self.toolbar_hover_since = hover.map(|_| Instant::now());
             self.refresh_toolbar_hover();
         }
-        let over = hover.is_some() || over_colors;
+        let over = hover.is_some() || over_palette.is_some();
         if over != self.pointer_over_toolbar {
             self.pointer_over_toolbar = over;
             self.sync_cursor();
@@ -1484,7 +1488,11 @@ impl App {
             ToolbarAction::Tool(tool) => self.set_tool(tool),
             ToolbarAction::Color(index) => {
                 self.set_color(index);
-                self.close_colors();
+                self.close_palette();
+            }
+            ToolbarAction::FillColor(index) => {
+                self.set_fill(index);
+                self.close_palette();
             }
             ToolbarAction::SizeStep(dir) => self.nudge_size(dir),
             ToolbarAction::More => self.toggle_more(),
