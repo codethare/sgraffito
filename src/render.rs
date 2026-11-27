@@ -143,6 +143,9 @@ enum Mark {
     Icon(Icon),
     /// Palette index of a colour chip.
     Swatch(usize),
+    /// The fill colour in hand, by palette index. `None` is no fill, drawn as a crossed-out square:
+    /// the one face a colour cannot show for itself.
+    Fill(Option<usize>),
     /// A value as a bare number.
     Value(String),
     /// Nothing on its face: a row of names has nothing to show but the name, and a repeated glyph beside
@@ -356,10 +359,13 @@ fn label_origin(
 const RAIL_SEPARATOR: f32 = TOOLBAR_BLOCK * 0.75;
 
 fn separates(previous: Option<ToolbarAction>, current: Option<ToolbarAction>) -> bool {
-    matches!(
-        (previous, current),
-        (Some(ToolbarAction::Color(_)), Some(action)) if !matches!(action, ToolbarAction::Color(_))
-    ) || matches!(current, Some(ToolbarAction::More))
+    let palette = |action: Option<ToolbarAction>| {
+        matches!(
+            action,
+            Some(ToolbarAction::Color(_)) | Some(ToolbarAction::FillColor(_))
+        )
+    };
+    (palette(previous) && !palette(current)) || matches!(current, Some(ToolbarAction::More))
 }
 
 fn draw_rail_separators(
@@ -416,16 +422,32 @@ fn rail_candidates(toolbar: &Toolbar) -> Vec<Block> {
         .iter()
         .position(|color| color == &toolbar.color)
         .unwrap_or(0);
-    // One swatch on the rail: the colour in hand. The other four live in the flyout that opens
-    // when the pointer is on it or a colour key just changed the active one.
-    let mut blocks: Vec<Block> = vec![Block {
-        mark: Mark::Swatch(active),
-        column: 0,
-        label: labelled(ToolbarAction::Color(active), "current colour"),
-        action: Some(ToolbarAction::Color(active)),
-        active: true,
-        gap: TOOLBAR_GROUP_GAP,
-    }];
+    // Two swatches on the rail: the stroke colour in hand and the fill colour in hand. The other
+    // four of each live in the flyout that opens when the pointer is on the swatch, or — stroke only —
+    // when a colour key just changed the active one.
+    let mut blocks: Vec<Block> = vec![
+        Block {
+            mark: Mark::Swatch(active),
+            column: 0,
+            label: labelled(ToolbarAction::Color(active), "current colour"),
+            action: Some(ToolbarAction::Color(active)),
+            active: true,
+            gap: TOOLBAR_GAP,
+        },
+        // The fill swatch always has a face: a crossed-out square when the hand holds no fill, so the
+        // control states its state instead of reading as an empty block.
+        Block {
+            mark: Mark::Fill(toolbar.fill),
+            column: 0,
+            label: match toolbar.fill {
+                Some(index) => format!("fill colour {}", index + 1),
+                None => "no fill".to_string(),
+            },
+            action: Some(ToolbarAction::FillColor(toolbar.fill)),
+            active: toolbar.fill.is_some(),
+            gap: TOOLBAR_GROUP_GAP,
+        },
+    ];
     for (tool, label) in [
         (Tool::Pen, "pen"),
         (Tool::Eraser, "eraser"),
@@ -3000,42 +3022,14 @@ impl Renderer {
                 let badge = control.block.action.and_then(badge_of);
                 match &control.block.mark {
                     Mark::Swatch(index) => {
-                        // The colour chip keeps its place; the capsule unfurls around it.
-                        if control.stretched {
-                            round_rect(
-                                pixmap,
-                                block,
-                                radius,
-                                parse_hex(TOOLBAR_BLOCK_FILL),
-                                Some((parse_hex(TOOLBAR_BLOCK_EDGE), TOOLBAR_HAIRLINE * scale)),
-                            );
-                        }
-                        if hovered {
-                            round_rect(
-                                pixmap,
-                                square.grown(2.0 * scale),
-                                TOOLBAR_RADIUS * scale,
-                                parse_hex(TOOLBAR_HOVER_FILL),
-                                None,
-                            );
-                        }
-                        round_rect(
+                        draw_swatch(
                             pixmap,
+                            control,
+                            block,
                             square,
-                            TOOLBAR_RADIUS * scale,
-                            parse_hex(&config::current().colors[*index]),
-                            Some((
-                                parse_hex(if control.block.active {
-                                    TOOLBAR_ACCENT
-                                } else {
-                                    TOOLBAR_SWATCH_EDGE
-                                }),
-                                if control.block.active {
-                                    2.0
-                                } else {
-                                    TOOLBAR_HAIRLINE
-                                } * scale,
-                            )),
+                            scale,
+                            hovered,
+                            Some(&config::current().colors[*index]),
                         );
                         // The chip is the colour itself, so the badge takes the ink a note on that
                         // colour would: no single foreground reads on all five palette entries.
@@ -3044,6 +3038,15 @@ impl Renderer {
                             self.draw_badge(pixmap, square, scale, key, ink);
                         }
                     }
+                    Mark::Fill(fill) => draw_swatch(
+                        pixmap,
+                        control,
+                        block,
+                        square,
+                        scale,
+                        hovered,
+                        fill.map(|index| config::current().colors[index].as_str()),
+                    ),
                     mark => {
                         // The rail is one card: its buttons share the plate and paint no square of
                         // their own. A pop-out still needs a surface over the plate, and an active
@@ -3121,7 +3124,7 @@ impl Renderer {
                                     None,
                                 );
                             }
-                            Mark::Swatch(_) | Mark::None => {}
+                            Mark::Swatch(_) | Mark::Fill(_) | Mark::None => {}
                         }
                     }
                 }
@@ -3718,9 +3721,7 @@ impl Renderer {
         y: f32,
     ) -> Option<Palette> {
         let position = config::current().toolbar;
-        let Some(pill) = self.cached_toolbar_pill(toolbar, (width, height), position) else {
-            return None;
-        };
+        let pill = self.cached_toolbar_pill(toolbar, (width, height), position)?;
         let origin = position.origin((width, height), pill.column);
         let strip = color_strip(&pill, toolbar, origin, position)?;
         // Include the short corridor from the active swatch into the card, so crossing it
@@ -5305,9 +5306,7 @@ fn color_strip(
     origin: (f32, f32),
     position: ToolbarPosition,
 ) -> Option<ColorStrip> {
-    let Some(_palette) = toolbar.open else {
-        return None;
-    };
+    let _palette = toolbar.open?;
     let colors = &config::current().colors;
     let active = colors
         .iter()
@@ -5903,6 +5902,86 @@ fn caret_geometry(prepared: &PreparedText, at: usize, preedit_len: usize) -> Car
 /// A rounded rectangle with a fill and an optional hairline edge, in device pixels. The
 /// corners are cubic approximations of a circle, so a radius of half the height is a real
 /// capsule.
+/// The face of a colour swatch: the chip keeps its place and the capsule unfurls around it. `colour` is
+/// `None` for the fill swatch with no fill in hand, which draws the block's own surface crossed out —
+/// the one state a colour cannot show for itself.
+fn draw_swatch(
+    pixmap: &mut PixmapMut,
+    control: &Control,
+    block: Rect,
+    square: Rect,
+    scale: f32,
+    hovered: bool,
+    colour: Option<&str>,
+) {
+    let radius = if control.stretched {
+        TOOLBAR_BLOCK / 2.0
+    } else {
+        TOOLBAR_RADIUS
+    } * scale;
+    if control.stretched {
+        round_rect(
+            pixmap,
+            block,
+            radius,
+            parse_hex(TOOLBAR_BLOCK_FILL),
+            Some((parse_hex(TOOLBAR_BLOCK_EDGE), TOOLBAR_HAIRLINE * scale)),
+        );
+    }
+    if hovered {
+        round_rect(
+            pixmap,
+            square.grown(2.0 * scale),
+            TOOLBAR_RADIUS * scale,
+            parse_hex(TOOLBAR_HOVER_FILL),
+            None,
+        );
+    }
+    let ink = match colour {
+        Some(colour) => parse_hex(colour),
+        None => parse_hex(TOOLBAR_BLOCK_FILL),
+    };
+    round_rect(
+        pixmap,
+        square,
+        TOOLBAR_RADIUS * scale,
+        ink,
+        Some((
+            parse_hex(if control.block.active {
+                TOOLBAR_ACCENT
+            } else {
+                TOOLBAR_SWATCH_EDGE
+            }),
+            if control.block.active {
+                2.0
+            } else {
+                TOOLBAR_HAIRLINE
+            } * scale,
+        )),
+    );
+    if colour.is_some() {
+        return;
+    }
+    // A slash from corner to corner, inset so it stays inside the rounded corner.
+    let inset = TOOLBAR_BLOCK * 0.24 * scale;
+    let mut slash = PathBuilder::new();
+    slash.move_to(square.x + inset, square.y + inset);
+    slash.line_to(square.x + square.w - inset, square.y + square.h - inset);
+    let Some(path) = slash.finish() else {
+        return;
+    };
+    let c = parse_hex(TOOLBAR_LABEL_TEXT);
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(c[0], c[1], c[2], c[3]);
+    paint.anti_alias = true;
+    let stroke = SkStroke {
+        width: TOOLBAR_HAIRLINE.max(1.0) * scale,
+        line_cap: LineCap::Round,
+        ..Default::default()
+    };
+    pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+}
+
 fn round_rect(
     pixmap: &mut PixmapMut,
     box_: Rect,
@@ -7861,13 +7940,15 @@ mod tests {
             .find(|b| b.action == Some(ToolbarAction::More))
             .expect("the more block");
         assert!(!more_block.active, "the more block is accented while open");
-        // On the rail, the accent still means the armed tool and the active colour, and nothing else: this
+        // On the rail, the accent still means the armed tool and a colour in hand, and nothing else: this
         // block and the panel are not lists of things that can be "on".
         for block in blocks.iter().filter(|b| b.active && b.column == 0) {
             assert!(
                 matches!(
                     block.action,
-                    Some(ToolbarAction::Tool(_)) | Some(ToolbarAction::Color(_))
+                    Some(ToolbarAction::Tool(_))
+                        | Some(ToolbarAction::Color(_))
+                        | Some(ToolbarAction::FillColor(_))
                 ),
                 "{:?} is accented on the rail",
                 block.action
@@ -9285,7 +9366,7 @@ mod tests {
             _ => None,
         };
         let blocks = toolbar_blocks(&rail_state(), 1000.0);
-        assert_eq!(blocks.len(), 16);
+        assert_eq!(blocks.len(), 17);
         let mut stated = 0;
         for block in &blocks {
             let Some(action) = block.action else {
@@ -9295,13 +9376,16 @@ mod tests {
                 continue;
             };
             let Some(key) = key_of(action) else {
-                // A control with no key states no key: the width readout opens its list on hover.
-                assert!(
-                    block.label.is_empty(),
-                    "'{}' states a key it has not",
-                    block.label
-                );
-                assert!(matches!(block.mark, Mark::Value(_)));
+                // A control with no key states no key, and states what it does instead. The width
+                // readout is the exception: its value is its face and it says nothing on its capsule.
+                if !matches!(action, ToolbarAction::FillColor(_)) {
+                    assert!(
+                        block.label.is_empty(),
+                        "'{}' states a key it has not",
+                        block.label
+                    );
+                    assert!(matches!(block.mark, Mark::Value(_)));
+                }
                 continue;
             };
             assert!(
@@ -9557,6 +9641,15 @@ mod tests {
             Some(ToolbarAction::Color(0)),
             Some(ToolbarAction::Tool(Tool::Pen))
         ));
+        // The two swatches are one family: no rule between them, and one after the fill swatch.
+        assert!(!separates(
+            Some(ToolbarAction::Color(0)),
+            Some(ToolbarAction::FillColor(None))
+        ));
+        assert!(separates(
+            Some(ToolbarAction::FillColor(Some(1))),
+            Some(ToolbarAction::Tool(Tool::Pen))
+        ));
         assert!(!separates(
             Some(ToolbarAction::Color(0)),
             Some(ToolbarAction::Color(1))
@@ -9667,5 +9760,24 @@ mod tests {
             !same_layout(&rail, &opened),
             "an open strip reuses the old layout"
         );
+    }
+
+    /// The palette group is two swatches: the stroke colour in hand and the fill colour in hand. The
+    /// fill one always has a face, and states that it holds no fill rather than holding a colour.
+    #[test]
+    fn the_palette_group_holds_a_stroke_and_a_fill_swatch() {
+        let mut rail = rail_for_legend();
+        let blocks = toolbar_blocks(&rail, 1000.0);
+        assert_eq!(blocks.len(), 17, "a drawn block cannot be hit");
+        assert_eq!(blocks[0].action, Some(ToolbarAction::Color(0)));
+        assert_eq!(blocks[1].action, Some(ToolbarAction::FillColor(None)));
+        assert_eq!(blocks[1].mark, Mark::Fill(None));
+        assert_eq!(blocks[1].label, "no fill");
+        assert!(!blocks[1].active, "an empty hand is accented");
+        rail.fill = Some(1);
+        let blocks = toolbar_blocks(&rail, 1000.0);
+        assert_eq!(blocks[1].mark, Mark::Fill(Some(1)));
+        assert_eq!(blocks[1].label, "fill colour 2");
+        assert!(blocks[1].active, "a fill in hand carries no accent");
     }
 }

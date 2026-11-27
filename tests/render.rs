@@ -590,9 +590,10 @@ fn every_block_of_the_rail_is_reachable_and_no_row_is_a_gap() {
         !actions.contains(&ToolbarAction::Tool(Tool::Bucket)),
         "the bucket belongs in the more-tools drawer, not on the rail"
     );
-    // The rail carries the colour in hand; the other four live in its opened flyout, covered by
-    // the colour-strip test.
+    // The rail carries the stroke colour in hand and the fill colour in hand; the other four of each
+    // live in their own opened flyout, covered by the colour-strip tests.
     assert!(actions.contains(&ToolbarAction::Color(0)));
+    assert!(actions.contains(&ToolbarAction::FillColor(None)));
     assert!(
         actions.contains(&ToolbarAction::Size),
         "the width readout is not reachable"
@@ -607,9 +608,9 @@ fn every_block_of_the_rail_is_reachable_and_no_row_is_a_gap() {
         ToolbarAction::Lock,
         "Esc is not last"
     );
-    // Sixteen clickable blocks: the active colour, eleven tools, the width readout that opens the
-    // steps' list, the boards' block, the drawer's block and `Esc`.
-    assert_eq!(actions.len(), 16, "a drawn block cannot be hit");
+    // Seventeen clickable blocks: the stroke and fill swatches, eleven tools, the width readout that
+    // opens the steps' list, the boards' block, the drawer's block and `Esc`.
+    assert_eq!(actions.len(), 17, "a drawn block cannot be hit");
     // Outside the rail the toolbar takes nothing: those presses are drawing gestures.
     let band = toolbar_bounds(&rail, w, h);
     assert_eq!(
