@@ -1613,9 +1613,15 @@ fn a_fill_recolours_only_the_closed_shapes_it_holds() {
     let cleared = a.recolour_fill(&held, None).expect("a fill was cleared");
     assert_eq!(a.shapes[0].fill, None);
     assert_eq!(cleared, a.shapes[0].paint_bounds());
-    // Nothing held, or an id that names no element, changes nothing at all.
+    // Nothing held, an id that names no element, or a fill a shape already carries changes nothing at
+    // all — an unchanged pick must not record a step that undoes nothing.
     assert_eq!(a.recolour_fill(&[], Some(PALETTE[0])), None);
     assert_eq!(a.recolour_fill(&[ItemId::Shape(9)], Some(PALETTE[0])), None);
+    assert_eq!(
+        a.recolour_fill(&held, None),
+        None,
+        "a clear of an empty inside"
+    );
 }
 
 #[test]

@@ -1364,7 +1364,13 @@ impl Board {
             if !s.kind.is_closed() {
                 continue;
             }
-            s.fill = fill.map(str::to_string);
+            let fill = fill.map(str::to_string);
+            // A shape that already carries this fill is not a change: reporting it would record an undo
+            // entry that undoes nothing.
+            if s.fill == fill {
+                continue;
+            }
+            s.fill = fill;
             union_into(&mut box_, Some(s.paint_bounds()));
         }
         box_
