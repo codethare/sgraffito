@@ -4113,8 +4113,9 @@ impl App {
         self.last_container_press = None;
     }
 
-    /// Fill the topmost closed shape under the pointer with the colour in hand. Lines and arrows are
-    /// not containers, so a press on one does nothing; a press outside every closed shape does too.
+    /// Paint the topmost closed shape under the pointer with the fill colour in hand, or take its fill
+    /// off when the hand holds none. Lines and arrows are not containers, so a press on one does nothing;
+    /// a press outside every closed shape does too, and so does a press that changes nothing.
     pub(crate) fn bucket_fill(&mut self, key: u32, point: [f32; 2]) {
         let Some(board_name) = self.outputs.get(&key).map(|out| out.board().to_string()) else {
             return;
@@ -4129,16 +4130,22 @@ impl App {
         }) else {
             return;
         };
-        let color = crate::config::current().colors[self.color_idx].clone();
+        let fill = self
+            .fill_idx
+            .map(|index| crate::config::current().colors[index].clone());
         let before = self.doc.clone();
         let shape = &mut self.doc.boards.get_mut(&board_name).unwrap().shapes[index];
-        if shape.fill.as_deref() == Some(color.as_str()) {
+        if shape.fill == fill {
             return;
         }
-        shape.fill = Some(color);
+        let painting = fill.is_some();
+        shape.fill = fill;
         self.undo.record(before, &self.doc);
         self.doc_changed_at(key, box_);
-        log(&format!("fill shape {index}"));
+        log(&format!(
+            "{} shape {index}",
+            if painting { "fill" } else { "clear" }
+        ));
         self.dirty = true;
     }
 
@@ -4674,9 +4681,14 @@ impl App {
 
     /// Start a shape at the press point. Motion moves its second point and the release commits it,
     /// so a shape is the pen's gesture with a kind, and a live shape is transient exactly as an
-    /// in-progress stroke is. A shape is stroked with the pen width and never filled.
+    /// in-progress stroke is. A closed shape takes the fill colour in hand — a line or an arrow has no
+    /// inside to fill — and every shape is stroked with the pen width.
     pub(crate) fn begin_shape(&mut self, key: &u32, x: f32, y: f32, kind: ShapeKind) {
         let color = crate::config::current().colors[self.color_idx].clone();
+        let fill = match (kind.is_closed(), self.fill_idx) {
+            (true, Some(index)) => Some(crate::config::current().colors[index].clone()),
+            _ => None,
+        };
         let width = self.pen_width;
         let snap = if matches!(kind, ShapeKind::Line | ShapeKind::Arrow) {
             self.snap_connector(key, [x, y])
@@ -4702,7 +4714,7 @@ impl App {
             rotate: 0.0,
             id: 0,
             attach,
-            fill: None,
+            fill,
         });
     }
 

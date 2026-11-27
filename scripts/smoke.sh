@@ -153,9 +153,14 @@ def ink(x0, y0, x1, y1):
                if max(px[(y * w + x) * 3:(y * w + x) * 3 + 3]) > 20)
 high = ink(0, int(h * 0.14), 60, int(h * 0.20))
 low = ink(0, int(h * 0.62), 60, int(h * 0.68))
-rail_top = ink(0, 0, 60, 20)
+# The plate's own edge, one pad inside the 18-pixel margin: it lands on row 23, so the band is
+# the margin plus the pad plus the edge, not the 20 this read before the margin was widened.
+rail_top = ink(0, 0, 60, 28)
 right = ink(60, 0, w, 20)
 assert high > 100 and low > 100, f"no vertical rail on the left edge (high={high} low={low})"
+if rail_top == 0:
+    dump = [[max(px[(y * w + x) * 3:(y * w + x) * 3 + 3]) for x in range(0, 62, 6)] for y in range(10, 30, 2)]
+    print("top rows (y 10..28, x 0..60 step 6):", dump)
 assert rail_top > 0, "the rail is pinned to the margin, so it reaches the top rows"
 assert right == 0, f"the top strip is not clear to the right of the rail (ink={right})"
 print(f"  rail ok: high={high} low={low} top={rail_top}")
@@ -271,7 +276,7 @@ cargo build --example vinject >/dev/null 2>&1 || fail "the pointer injector did 
 vinject=target/debug/examples/vinject
 layout=1200x600
 h1=400
-rail=$((h1 + 23))
+rail=$((h1 + 39))
 board_json() {
     python3 - "$XDG_DATA_HOME/sgraffito" "$1" <<'PY'
 import json, pathlib, sys
@@ -301,10 +306,14 @@ print(' '.join(f'{kind}={len(ann.get(kind, []))}' for kind in ('strokes', 'texts
 
 # 5a. the blue chip arms the colour, the pen's block arms the pen, and the drag draws a stroke that reaches
 # both the file and the surface.
+# The stroke swatch is the rail's first block at y 30, and the strip it opens is one horizontal row at
+# the same height, its chips a block and a gap apart from x 70. The pen is the third block, at 104.
 "$vinject" "$layout" seq <<VINJECT
-click $rail 131
-click $rail 205
-drag $((h1 + 50)) 300 $((h1 + 250)) 420 8
+move $rail 45
+sleep 400
+click $((h1 + 138)) 45
+click $rail 119
+drag $((h1 + 90)) 300 $((h1 + 250)) 420 8
 sleep 1500
 VINJECT
 [ "$(kinds)" = "strokes=1 texts=0 shapes=0 notes=0" ] || fail "the injected drag left $(kinds)"
@@ -314,7 +323,7 @@ import json, sys
 stroke = json.load(open(sys.argv[1]))["strokes"][0]
 assert stroke["color"] == "#3584e4", f"the colour chip did not arm: {stroke['color']}"
 first, last = stroke["points"][0], stroke["points"][-1]
-assert abs(first[0] - 50) < 8 and abs(last[1] - 420) < 8, stroke["points"]
+assert abs(first[0] - 90) < 8 and abs(last[1] - 420) < 8, stroke["points"]
 print(f"  injected stroke ok: {stroke['color']} {first} -> {last}")
 PY
 grim -o HEADLESS-1 -t ppm "$work/pointer.ppm" 2>/dev/null || fail "grim after the injected drag failed"
@@ -357,8 +366,8 @@ echo "  boards panel closed on Esc"
 # issued immediately after the previous stage closed went missing here, so this stage waits before it clicks.
 "$vinject" "$layout" seq <<VINJECT
 sleep 400
-click $rail 239
-click $((h1 + 150)) 360
+click $rail 153
+click $((h1 + 170)) 360
 sleep 1500
 VINJECT
 grep -q "tool switched to Eraser" "$work/daemon.log" || fail "the eraser's block was not clicked"
@@ -392,7 +401,7 @@ PY
 # 5e. a selection drag moves what the frame holds. The press is resolved in screen space and the gesture
 # works in canvas ones, so a mix-up between the two is exactly what a drag that drifts looks like.
 "$vinject" "$layout" seq <<VINJECT
-click $rail 307
+click $rail 221
 drag $((h1 + 200)) 190 $((h1 + 260)) 250 8
 sleep 1500
 VINJECT
@@ -467,6 +476,52 @@ key Delete
 sleep 1500
 VINJECT
 [ "$(kinds)" = "strokes=0 texts=0 shapes=0 notes=0" ] || fail "the keyboard left $(kinds)"
+
+# 5g. the fill swatch arms an inside colour. The fill swatch is the rail's second block at y 64, and its
+# strip opens beside it with the five colours when the hand holds none; the second chip is yellow. The
+# rectangle drawn next carries it. Then the same strip, with a colour in hand, ends in the crossed-out
+# square — no fill — and the bucket with that in hand takes the inside away again.
+"$vinject" "$layout" seq <<VINJECT
+move $rail 79
+sleep 400
+click $((h1 + 104)) 79
+sleep 300
+key r
+sleep 300
+move $((h1 + 120)) 200
+sleep 300
+drag $((h1 + 120)) 200 $((h1 + 260)) 320 8
+sleep 1500
+VINJECT
+board_json HEADLESS-1 > "$work/board.json"
+python3 - "$work/board.json" <<PY || exit 1
+import json, sys
+shapes = json.load(open(sys.argv[1]))["shapes"]
+assert len(shapes) == 1, f"{len(shapes)} shapes"
+assert shapes[0].get("fill") == "#f6d32d", f"the fill chip did not arm the inside: {shapes[0].get('fill')}"
+print(f"  injected filled rectangle ok: {shapes[0]['fill']}")
+PY
+"$vinject" "$layout" seq <<VINJECT
+move $rail 79
+sleep 400
+click $((h1 + 206)) 79
+sleep 300
+key b
+sleep 300
+move $((h1 + 190)) 260
+sleep 300
+click $((h1 + 190)) 260
+sleep 1500
+VINJECT
+grep -q "tool switched to Bucket" "$work/daemon.log" || fail "the bucket key did not arm the bucket"
+board_json HEADLESS-1 > "$work/board.json"
+python3 - "$work/board.json" <<PY || exit 1
+import json, sys
+shapes = json.load(open(sys.argv[1]))["shapes"]
+assert len(shapes) == 1, f"{len(shapes)} shapes"
+assert "fill" not in shapes[0], f"the no-fill chip did not clear it: {shapes[0].get('fill')}"
+print("  injected bucket clear ok")
+PY
 
 "$bin" lock > /dev/null || fail "lock after the pointer stage failed"
 
