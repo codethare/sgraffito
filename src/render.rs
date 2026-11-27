@@ -9892,6 +9892,63 @@ mod tests {
         );
     }
 
+    /// A bottom rail opens its cards away from the edge, so the fill strip — one chip wider than the
+    /// stroke's — has to fit above the rail and inside the output on the edge where it could fall off.
+    #[test]
+    fn the_fill_strip_on_a_bottom_rail_opens_upward_and_inside_the_output() {
+        let surface = (900.0, 400.0);
+        let mut toolbar = rail_for_legend();
+        toolbar.fill = Some(0);
+        toolbar.open = Some(Palette::Fill);
+        let mut renderer = Renderer::new();
+        let pill = renderer.toolbar_pill(&toolbar, surface, ToolbarPosition::Bottom);
+        let origin = ToolbarPosition::Bottom.origin(surface, pill.column);
+        let strip = palette_strip(&pill, &toolbar, origin, ToolbarPosition::Bottom)
+            .expect("the opened fill strip is missing");
+        let control = pill
+            .controls
+            .iter()
+            .find(|control| control.block.action == Some(ToolbarAction::FillColor(Some(0))))
+            .expect("the fill swatch is not on the rail");
+        let swatch = ToolbarPosition::Bottom.place(
+            origin,
+            RailRect {
+                along: control.along,
+                across: control.across,
+                along_extent: TOOLBAR_BLOCK,
+                across_extent: TOOLBAR_BLOCK,
+            },
+        );
+        assert_eq!(strip.chips.len(), 5);
+        assert!(
+            strip.plate.y + strip.plate.h <= swatch.y,
+            "the strip is not above the rail it belongs to"
+        );
+        assert!(
+            strip.plate.y >= TOOLBAR_MARGIN,
+            "the strip is off the top edge"
+        );
+        assert!(
+            strip.plate.x >= TOOLBAR_MARGIN
+                && strip.plate.x + strip.plate.w <= surface.0 - TOOLBAR_MARGIN,
+            "the strip runs off the output: {strip:?}",
+            strip = strip.plate
+        );
+        for (index, rect) in &strip.chips {
+            assert_eq!(
+                renderer.toolbar_hit_at(
+                    ToolbarPosition::Bottom,
+                    &toolbar,
+                    surface.0,
+                    surface.1,
+                    rect.x + rect.w / 2.0,
+                    rect.y + rect.h / 2.0,
+                ),
+                Some(ToolbarAction::FillColor(*index))
+            );
+        }
+    }
+
     /// The fill swatch and the fill strip are painted, and the last chip is a crossed square rather than a
     /// colour: the one thing the rail could not say before. A colour chip is the palette colour itself.
     #[test]
