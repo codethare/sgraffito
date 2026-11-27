@@ -267,6 +267,8 @@ pub fn panel_action_for_keysym(keysym: Keysym, shift: bool) -> Option<ToolbarAct
         Keysym::c | Keysym::C => Some(ToolbarAction::Boards),
         Keysym::f | Keysym::F => Some(ToolbarAction::Shared),
         Keysym::i | Keysym::I => Some(ToolbarAction::Ai),
+        // `/` is the search's key: a single key like the others, and the row's own badge.
+        Keysym::slash => Some(ToolbarAction::Search),
         _ => None,
     }
 }
@@ -1494,6 +1496,8 @@ impl App {
                 self.set_fill(index);
                 self.close_palette();
             }
+            ToolbarAction::Search => self.toggle_search(),
+            ToolbarAction::SearchPick(index) => self.search_pick(index),
             ToolbarAction::SizeStep(dir) => self.nudge_size(dir),
             ToolbarAction::More => self.toggle_more(),
             // A click on the readout toggles its list, like every other control on the rail.

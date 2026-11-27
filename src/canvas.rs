@@ -160,6 +160,22 @@ pub enum Tool {
     Note,
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Search {
+    /// The field's text and caret: the same buffer a text box and a board's name use.
+    pub query: TextBuffer,
+    /// The input method's preedit, never persisted.
+    pub preedit: String,
+    /// Whether the caret is on its visible half of the blink.
+    pub caret: bool,
+    /// What the query found on the board the output shows, one row each.
+    pub hits: Vec<SearchHit>,
+    /// The row `Enter` would pick, in `hits`.
+    pub focus: usize,
+    /// The first row the card shows: it is a fixed-height window, like the boards list.
+    pub scroll: usize,
+}
+
 /// Which of the rail's two colour swatches is showing its other choices. Only one strip is open at a
 /// time, the way only one panel is: the two swatches are neighbours, and two cards beside a short rail
 /// would overlap.
@@ -182,6 +198,11 @@ pub enum ToolbarAction {
     /// palette index. `None` is no fill: a shape drawn with it has a clear inside, and the bucket takes
     /// a fill off. There is no key for these; the swatch and its strip are the whole way in.
     FillColor(Option<usize>),
+    /// Open or close the keyword search: the drawer row and `/` both apply it, and the field takes the
+    /// keyboard while it is open.
+    Search,
+    /// Pick the search result at this index of the card's list.
+    SearchPick(usize),
     /// Direction to step the active tool's size in, ±1.
     SizeStep(f32),
     /// Open or close the list of width steps. The readout is the only control that carries it: a click
@@ -4102,6 +4123,8 @@ pub struct Toolbar {
     pub open: Option<Palette>,
     /// How far that flyout has unfurled, 0 to about 1.
     pub palette_grow: f32,
+    /// The keyword search, while its card is open. `None` is closed: the drawer row and `/` open it.
+    pub search: Option<Search>,
 }
 
 #[derive(Debug, Clone)]

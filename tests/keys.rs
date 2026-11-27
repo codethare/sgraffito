@@ -502,7 +502,7 @@ fn i_opens_the_ai_panel_from_the_drawer() {
     assert!(sgraffito::render::DRAWER.contains(&ToolbarAction::Ai));
     assert_eq!(
         sgraffito::render::DRAWER.len(),
-        6,
+        7,
         "one row per drawer control"
     );
 }

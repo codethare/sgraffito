@@ -60,6 +60,7 @@ fn config_paints_the_palette_and_the_note_border() {
             open: None,
             fill: None,
             palette_grow: 1.0,
+            search: None,
         }),
         ..Default::default()
     };

@@ -81,10 +81,10 @@ const ICON_INSET: f32 = 7.0;
 /// to fit: the width of a block depends on the font, so the damage reserves this strip instead
 /// of the drawn rail. The strip is damaged whenever the rail changes, and joins a transient
 /// damage box that reaches it. It also holds the line the `more` block shows while the pointer is
-/// on it, which names the drawer's controls — two of them now, so the room is the first control's
-/// phrase plus the second's, and a phrase that does not fit is not drawn rather than drawn outside
-/// the box.
-const TOOLBAR_RESERVE: f32 = 320.0;
+/// on it, which names the drawer's controls — seven of them now — so the room is the first
+/// control's phrase plus the rest's, and a phrase that does not fit is not drawn rather than drawn
+/// outside the box.
+const TOOLBAR_RESERVE: f32 = 380.0;
 /// How far the drawer's column starts from the rail's.
 const TOOLBAR_DRAWER_X: f32 = TOOLBAR_BLOCK + TOOLBAR_GAP;
 /// The outer edge of a panel card: clear of the rail's plate, with the same gap the colour card uses.
@@ -199,6 +199,8 @@ enum Icon {
     Grid,
     /// A dot matrix.
     Dots,
+    /// The keyword search: a magnifier.
+    Find,
     /// The AI panel: a four-point sparkle.
     Sparkle,
 }
@@ -294,6 +296,9 @@ fn key_of(action: ToolbarAction) -> Option<&'static str> {
         // The fill colours have no key: the swatch and its strip are the whole way in, as the
         // background palette has no key in the editor this one is modelled on.
         ToolbarAction::FillColor(_) => return None,
+        // The search's own row, and the key that opens it.
+        ToolbarAction::Search => "/",
+        ToolbarAction::SearchPick(_) => return None,
         ToolbarAction::Color(index) => ["1", "2", "3", "4", "5"].get(index).copied().unwrap_or("?"),
         ToolbarAction::SizeStep(dir) => {
             if dir < 0.0 {
@@ -861,11 +866,12 @@ fn toolbar_blocks(toolbar: &Toolbar, surface: f32) -> Vec<Block> {
 /// by choice, so they live in the list the `more` block opens. This is the one list of who they are —
 /// `drawer_blocks` is what they look like — so the rules that open and close the drawer cannot
 /// disagree with what it shows.
-pub const DRAWER: [ToolbarAction; 6] = [
+pub const DRAWER: [ToolbarAction; 7] = [
     ToolbarAction::Ai,
     ToolbarAction::Tool(Tool::Bucket),
     ToolbarAction::Scrim,
     ToolbarAction::Shared,
+    ToolbarAction::Search,
     ToolbarAction::Link,
     ToolbarAction::Round,
 ];
@@ -1012,6 +1018,14 @@ fn drawer_blocks(toolbar: &Toolbar, overflow: &[Block]) -> Vec<Block> {
                 ),
                 action: Some(*action),
                 active: toolbar.shared,
+                gap: TOOLBAR_GAP,
+            }),
+            ToolbarAction::Search => Some(Block {
+                mark: Mark::Icon(Icon::Find),
+                column: 1,
+                label: labelled(*action, "find text"),
+                action: Some(*action),
+                active: toolbar.search.is_some(),
                 gap: TOOLBAR_GAP,
             }),
             ToolbarAction::Link => Some(Block {
@@ -1187,6 +1201,7 @@ fn drawer_caption(action: ToolbarAction) -> Option<&'static str> {
         ToolbarAction::Scrim => "backdrop",
         ToolbarAction::Shared => "boards",
         ToolbarAction::Link => "link",
+        ToolbarAction::Search => "find",
         ToolbarAction::Round => "edges",
         _ => return None,
     })
@@ -5189,6 +5204,7 @@ fn same_layout(a: &Toolbar, b: &Toolbar) -> bool {
         && a.rename == b.rename
         && a.delete_confirm == b.delete_confirm
         && a.open == b.open
+        && a.search == b.search
         && a.boards == b.boards
         && a.board_scroll == b.board_scroll
         && a.shared == b.shared
@@ -6598,6 +6614,17 @@ fn draw_icon(
                     }
                 }
             }
+        }
+        Icon::Find => {
+            // A lens and a short handle: the ring is a stroked circle, the handle a line leaving it at
+            // two o'clock. Both stay inside the icon box, so the badge keeps its corner.
+            let mut lens = PathBuilder::new();
+            lens.push_circle(x + w * 0.44, y + h * 0.44, w * 0.26);
+            if let Some(lens) = lens.finish() {
+                path.push_path(&lens);
+            }
+            path.move_to(x + w * 0.64, y + h * 0.64);
+            path.line_to(x + w * 0.8, y + h * 0.8);
         }
         Icon::Plus => {
             path.move_to(x + w / 2.0, y + h * 0.2);
@@ -8562,6 +8589,7 @@ mod tests {
             open: None,
             fill: None,
             palette_grow: 1.0,
+            search: None,
         }
     }
 
@@ -8866,6 +8894,7 @@ mod tests {
                 open: None,
                 fill: None,
                 palette_grow: 1.0,
+                search: None,
             }),
             ..Default::default()
         };
@@ -9225,6 +9254,7 @@ mod tests {
             open: None,
             fill: None,
             palette_grow: 1.0,
+            search: None,
         }
     }
 
@@ -9429,6 +9459,7 @@ mod tests {
             "M" => Some(Keysym::M),
             "C" => Some(Keysym::C),
             "F" => Some(Keysym::F),
+            "/" => Some(Keysym::slash),
             _ => None,
         };
         let blocks = toolbar_blocks(&rail_state(), 1000.0);
@@ -9484,6 +9515,9 @@ mod tests {
                 ToolbarAction::Ai => {
                     panel_action_for_keysym(keysym, shift) == Some(ToolbarAction::Ai)
                 }
+                ToolbarAction::Search => {
+                    panel_action_for_keysym(keysym, shift) == Some(ToolbarAction::Search)
+                }
                 // A row of the boards panel states its name and no key: it is picked from the list the
                 // `boards` block opened, and that block carries the key.
                 ToolbarAction::Board(_)
@@ -9498,7 +9532,9 @@ mod tests {
                 | ToolbarAction::CancelDeleteBoard
                 | ToolbarAction::Undo
                 | ToolbarAction::Redo => false,
-                ToolbarAction::FillColor(_) => unreachable!("no key, filtered above"),
+                ToolbarAction::FillColor(_) | ToolbarAction::SearchPick(_) => {
+                    unreachable!("no key, filtered above")
+                }
                 ToolbarAction::Backdrop(_) => false,
                 ToolbarAction::Size => unreachable!("no key, filtered above"),
             };
@@ -9895,6 +9931,31 @@ mod tests {
         assert!(
             strip.plate.y > stroke_strip.plate.y,
             "the fill strip is not under its own swatch"
+        );
+    }
+
+    /// The search lives in the drawer, beside `link text to board`, and states the key that opens it.
+    #[test]
+    fn the_drawer_holds_the_search_and_states_its_key() {
+        let mut rail = rail_for_legend();
+        rail.more = true;
+        let rows = toolbar_blocks(&rail, 1000.0);
+        let row = rows
+            .iter()
+            .find(|block| block.action == Some(ToolbarAction::Search))
+            .expect("the drawer has no search row");
+        assert!(row.label.ends_with("(/)"), "{}", row.label);
+        assert_eq!(badge_of(ToolbarAction::Search), Some("/"));
+        assert!(DRAWER.contains(&ToolbarAction::Search));
+        // A typed query changes the card's rows, so it must miss the layout cache.
+        let mut typed = rail.clone();
+        typed.search = Some(crate::canvas::Search {
+            query: crate::canvas::TextBuffer::new("milk"),
+            ..Default::default()
+        });
+        assert!(
+            !same_layout(&rail, &typed),
+            "a typed query reuses the old layout"
         );
     }
 

@@ -43,10 +43,10 @@ use wayland_client::{
 use crate::canvas::{
     Attachment, Backdrop, Board, BoardEdit, BoardRow, Doc, ERASER_THRESHOLD, Gesture, Grab, Handle,
     ItemId, LinearHandle, LiveConnector, Motion, Note, Overlay, PEN_WIDTH_MAX, PEN_WIDTH_MIN,
-    PEN_WIDTH_STEP, Palette, Press, Rect, SNAP_RADIUS, Selection, Shape, ShapeKind, TEXT_SIZE_MAX,
-    TEXT_SIZE_MIN, TEXT_SIZE_STEP, Target, TextBuffer, TextItem, TextOverlay, Toolbar, Transform,
-    View, ZOOM_STEP, Zoom, date_stamp, link_source, marquee_select, note_drag, nudge_delta,
-    selected_linear, selection_bounds, selection_frame, selection_frame_with,
+    PEN_WIDTH_STEP, Palette, Press, Rect, SNAP_RADIUS, Search, Selection, Shape, ShapeKind,
+    TEXT_SIZE_MAX, TEXT_SIZE_MIN, TEXT_SIZE_STEP, Target, TextBuffer, TextItem, TextOverlay,
+    Toolbar, Transform, View, ZOOM_STEP, Zoom, date_stamp, link_source, marquee_select, note_drag,
+    nudge_delta, selected_linear, selection_bounds, selection_frame, selection_frame_with,
     selection_press_linear, snap_square, stepped_size,
 };
 
@@ -452,6 +452,8 @@ pub struct App {
     /// The inside colour new closed shapes take, as a palette index. `None` is no fill, which is where a
     /// run starts: the rail's fill swatch is the only way to give a shape an inside.
     pub(crate) fill_idx: Option<usize>,
+    /// The keyword search, while its card is open. `None` is closed: the drawer's row and `/` open it.
+    pub(crate) search: Option<Search>,
     /// The last select press on a text box, for the quick second press that starts editing.
     last_text_press: Option<TextPress>,
     /// The last select press on a bindable container or linear element, for the quick second press
@@ -723,6 +725,7 @@ impl App {
             palette_until: None,
             palette_since: None,
             fill_idx: None,
+            search: None,
             last_text_press: None,
             last_container_press: None,
             linear_drag: None,
@@ -1016,6 +1019,7 @@ impl App {
                     fill: self.fill_idx,
                     open: self.open_palette,
                     palette_grow: hover_grow(self.palette_since, Instant::now()),
+                    search: self.search.clone(),
                 })
             }
         }
@@ -3888,6 +3892,84 @@ impl App {
             .fill_idx
             .map(|index| crate::config::current().colors[index].clone());
         self.recolour_fill_selection(color.as_deref());
+    }
+
+    /// Open the search card, or close it when it is already open. The drawer's row and `/` both do this;
+    /// the card replaces the drawer, because it is opened from one of its rows.
+    pub(crate) fn toggle_search(&mut self) {
+        if self.search.is_some() {
+            self.search = None;
+            self.refresh_toolbar();
+            return;
+        }
+        self.close_panels();
+        self.search = Some(Search::default());
+        self.refresh_search();
+        self.refresh_toolbar();
+    }
+
+    /// Re-run the query over the board the keyboard's output shows. The hits are indices into that
+    /// board's lists, so they are recomputed whenever the query or the document changes.
+    pub(crate) fn refresh_search(&mut self) {
+        let Some(key) = self.keyboard_focus else {
+            return;
+        };
+        let Some(board) = self.outputs.get(&key).map(|out| out.board().to_string()) else {
+            return;
+        };
+        let query = self
+            .search
+            .as_ref()
+            .map(|search| search.query.text.clone())
+            .unwrap_or_default();
+        let hits = self
+            .doc
+            .boards
+            .get(&board)
+            .map(|ann| ann.search(&query))
+            .unwrap_or_default();
+        if let Some(search) = self.search.as_mut() {
+            search.hits = hits;
+            search.focus = search.focus.min(search.hits.len().saturating_sub(1));
+        }
+    }
+
+    /// Put the user on a search result: arm the selection tool, select the element and centre the view
+    /// on it without changing the zoom — a search says where to look, not how closely. A hit whose
+    /// element has gone changes nothing.
+    pub(crate) fn search_pick(&mut self, index: usize) {
+        let Some(hit) = self
+            .search
+            .as_ref()
+            .and_then(|search| search.hits.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(key) = self.keyboard_focus else {
+            return;
+        };
+        let Some(board) = self.outputs.get(&key).map(|out| out.board().to_string()) else {
+            return;
+        };
+        let centre = self.doc.boards.get(&board).and_then(|ann| match hit.item {
+            ItemId::Text(i) => ann.texts.get(i).map(|text| text.paint_bounds().centre()),
+            ItemId::Note(i) => ann.notes.get(i).map(|note| note.bounds().centre()),
+            _ => None,
+        });
+        let Some(centre) = centre else {
+            return;
+        };
+        self.set_tool(Tool::Selection);
+        self.set_selection(key, vec![hit.item], None);
+        if let Some(out) = self.outputs.get_mut(&key) {
+            let size = (out.width as f32, out.height as f32);
+            out.view = out.view.centred_on(size, centre);
+            out.dirty = true;
+        }
+        self.search = None;
+        self.refresh_toolbar();
+        self.dirty = true;
     }
 
     /// The other half of a size step: what the selection holds takes the step too, as one change, the way

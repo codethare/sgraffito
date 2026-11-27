@@ -404,6 +404,7 @@ fn toolbar(tool: Tool, color: &'static str, size: f32, hover: Option<ToolbarActi
         open: None,
         fill: None,
         palette_grow: 1.0,
+        search: None,
     }
 }
 
@@ -2509,6 +2510,7 @@ fn a_row_of_the_panel_can_be_clicked_with_the_pointer_on_the_block_that_opened_i
         open: None,
         fill: None,
         palette_grow: 1.0,
+        search: None,
     };
     let mut renderer = Renderer::new();
     let band = toolbar_bounds(&rail(), w as f32, h as f32);
@@ -4737,6 +4739,7 @@ fn ai_toolbar() -> Toolbar {
         open: None,
         fill: None,
         palette_grow: 1.0,
+        search: None,
     }
 }
 
