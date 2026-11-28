@@ -2035,10 +2035,7 @@ const TABLE_CHANNEL: f32 = 26.0;
 const LADDER_STEP: f32 = 11.0;
 const LADDER_INSET: f32 = 12.0;
 
-fn ladder_bends(parent: &Placed, child: &Placed) -> Vec<[f32; 2]> {
-    let channel = parent.centre[0].min(child.centre[0])
-        - parent.size[0].max(child.size[0]) / 2.0
-        - LADDER_INSET;
+fn ladder_bends(parent: &Placed, child: &Placed, channel: f32) -> Vec<[f32; 2]> {
     let drop = [parent.centre[0], parent.centre[1] + parent.size[1] / 2.0];
     let end = [child.centre[0] - child.size[0] / 2.0, child.centre[1]];
     channel_path(&[
@@ -2048,6 +2045,17 @@ fn ladder_bends(parent: &Placed, child: &Placed) -> Vec<[f32; 2]> {
         [channel, end[1]],
         end,
     ])
+}
+
+/// The x a column of children is reached down: beside the widest box in the column, so the line to a
+/// narrow child is never drawn through a wide sibling. `parent` and every node hanging from it are the
+/// column, and one channel serves them all.
+fn column_channel<'a>(parent: &'a Placed, placed: impl Iterator<Item = &'a Placed>) -> f32 {
+    let left = std::iter::once(parent)
+        .chain(placed.filter(|node| node.parents.contains(&parent.id)))
+        .map(|node| node.centre[0] - node.size[0] / 2.0)
+        .fold(f32::INFINITY, f32::min);
+    left - LADDER_INSET
 }
 
 /// How far apart the samples of an orthogonal route are. The renderer draws a curve through every point,
@@ -2537,14 +2545,20 @@ fn assemble_routed(
                 continue;
             };
             // A column of siblings needs a channel of its own: only the first can be reached by a
-            // straight drop, and the rest would be drawn over it.
+            // straight drop, and the rest would be drawn over it. The route decides which shapes are a
+            // column; see the match below.
             let siblings = placed
                 .iter()
                 .filter(|other| other.parents.contains(parent_id))
                 .count();
             let bends = match (&route, siblings) {
-                (Route::Branches(Dir::Down), 2..) => ladder_bends(parent, node),
-                (Route::Table(_), 2..) if !parent.parents.is_empty() => ladder_bends(parent, node),
+                // Only a column needs a ladder. A downward tree's children sit in a row, so its edges fan
+                // into their tops and cross nothing; the column inside a table's cell does stack, and a
+                // straight drop to a lower child would be drawn over the one above it. The channel is the
+                // column's, measured from its widest box, or a wide title swallows a narrow child's edge.
+                (Route::Table(_), 2..) if !parent.parents.is_empty() => {
+                    ladder_bends(parent, node, column_channel(parent, placed.iter()))
+                }
                 _ => route.bends(parent, node),
             };
             let mut points = Vec::with_capacity(bends.len() + 2);

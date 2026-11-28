@@ -1170,6 +1170,73 @@ fn an_answer_in_no_known_syntax_is_an_error_with_a_useful_message() {
     assert!(!empty.is_empty());
 }
 
+/// The same rule for a downward tree: its children stack in a column, and every edge to that column runs
+/// down a channel beside it. The channel has to clear the widest box in the column, not just the two nodes
+/// the edge joins, or the line to a narrow child is drawn through a wide sibling.
+#[test]
+fn a_downward_tree_keeps_its_edges_out_of_its_own_column() {
+    let map = tree(
+        "shop",
+        vec![
+            tree(
+                "front-of-house and the long queue outside",
+                vec![
+                    leaf("till"),
+                    leaf("queue that runs out of the door and down the street"),
+                    leaf("door"),
+                ],
+            ),
+            tree("back", vec![leaf("stock"), leaf("bins")]),
+        ],
+    );
+    let board = layout_mindmap(
+        MapKind::Tree(Dir::Down),
+        &map,
+        [100.0, 620.0],
+        900.0,
+        "#e01b24",
+        &mut measure_fn(),
+    );
+    let nodes: Vec<(u64, sgraffito::canvas::Rect)> = board
+        .shapes
+        .iter()
+        .filter(|shape| shape.kind == ShapeKind::Rect && shape.color == "#e01b24")
+        .map(|shape| (shape.id, sgraffito::canvas::Shape::bounds(shape)))
+        .collect();
+    assert!(nodes.len() >= 8, "the whole tree is drawn: {}", nodes.len());
+    for line in board
+        .shapes
+        .iter()
+        .filter(|shape| shape.kind == ShapeKind::Line)
+    {
+        let ends: Vec<u64> = line.attach.iter().flatten().map(|a| a.shape).collect();
+        let mut points = vec![line.from];
+        points.extend(line.points.iter().copied());
+        points.push(line.to);
+        for pair in points.windows(2) {
+            for (id, box_) in &nodes {
+                if ends.contains(id) {
+                    continue;
+                }
+                let grown = box_.grown(2.0);
+                for step in 0..=32 {
+                    let t = step as f32 / 32.0;
+                    let x = pair[0][0] + (pair[1][0] - pair[0][0]) * t;
+                    let y = pair[0][1] + (pair[1][1] - pair[0][1]) * t;
+                    assert!(
+                        !(x > grown.x
+                            && x < grown.x + grown.w
+                            && y > grown.y
+                            && y < grown.y + grown.h),
+                        "edge {} runs through node {id} at ({x:.0}, {y:.0})",
+                        line.id
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn a_table_wraps_its_cells_and_its_edges_keep_out_of_them() {
     // Seven branches do not fit one row: the cells wrap, and the root reaches the second row down a
