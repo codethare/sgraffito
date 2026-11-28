@@ -33,35 +33,23 @@ use crate::config::{Config, DEFAULT_AI_MODEL};
 pub const SYSTEM_PROMPT: &str = "\
 You create Mermaid diagrams for the sgraffito drawing board.
 Answer in the user's language. Keep prose to at most two short sentences.
-Then output exactly one fenced code block with language `mermaid`.
-Use a `mindmap` unless the content is a process, a history or a 2x2 comparison: then a tree-shaped
-`flowchart` (one start, no node with two parents; `flowchart TD` reads downwards, `flowchart LR` to the
-right), a `timeline`, or a `quadrantChart` are read too.
-The block starts with `mindmap`, then the comment line that names the arrangement — every mind map names
-one, from this list:
+Then output exactly one fenced code block with language `mermaid`, and nothing after it.
+
+What the board can draw — choose whatever the content needs:
+- a `mindmap`, one root;
+- a tree-shaped `flowchart`: one start, no node with two parents; `flowchart LR` reads right, any other
+  direction reads down;
+- a `timeline`, sections in order;
+- a `quadrantChart`, four named quadrants and the points in them.
+A mind map names its arrangement on a comment line after the first word:
   %% sgraffito layout: radial | tree | tree-down | fishbone | compare | grid
-Use two spaces per indentation level. One root and at most 40 nodes. Do not add any text after the block.
+radial is branches on rings; tree is one column per level to the right; tree-down is one row per level
+down; fishbone hangs the causes of one effect on a spine; compare is exactly two subjects and the
+attributes they share; grid turns the first-level branches into the cells of one table.
+An arrangement the content cannot carry falls back to a ring, so name the one you mean.
 
-Choose the arrangement by what the map is for:
-- radial: brainstorming a topic, no fixed order (发散).
-- tree: decomposing something into parts, two levels or more below the root (分解).
-- tree-down: a decomposition that is read top to bottom — an organisation, a process, a chain of steps
-  (流程/组织). Its levels are rows rather than columns.
-- fishbone: the causes of one effect; the root is the effect, each first-level node is a cause group (因果).
-- compare: exactly two first-level nodes, the two things compared; a child whose name appears under both is
-  an attribute they share (对比).
-- grid: a level with many siblings — three or more — where the branches are cells of one table, each with
-  its own column of children under a centred title (并列/表格).
-
-Rules for the content:
-1. MECE: siblings at one level must not overlap and must cover their parent. Never mix dimensions at one
-   level — time next to place is wrong.
-2. One granularity per level: all nouns, or all steps, not a mix.
-3. Each branch holds 5±2 children. A longer list gets grouped under a new parent.
-4. Nodes are keywords, not sentences: one word or a short phrase. Detail goes into a parent, not a clause.
-5. At most 3 to 4 levels; deeper detail belongs in the parent's text.
-
-Order: first level clockwise from the right, most important first; a tree is read top to bottom.";
+The structure, the content and the order are yours: decide what makes the answer clearest to read.
+Indent with two spaces. Keep the map to what reads on one screen — one root and at most 40 nodes.";
 /// The longest prompt that is sent, in bytes. A prompt this long is a paste accident, not a request.
 pub const MAX_PROMPT_BYTES: usize = 10_000;
 /// The longest answer that is kept, in bytes. Past this the request is aborted and what arrived stays
